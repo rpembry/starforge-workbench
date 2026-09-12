@@ -58,6 +58,34 @@ Claude collection starts with a persisted cutoff covering the preceding day. Ope
 
 No task execution scheduler is implied by run heartbeats or attention records. Reporting time windows and the default human actor label are simple personal conventions to adapt.
 
+## Personal display and reporting settings
+
+By default, new human actions use `Operator` and reports use `America/New_York`.
+To change either without editing tracked source, copy the synthetic
+[`config/settings.example.yaml`](../config/settings.example.yaml) outside the
+repository, then set `WB_SETTINGS_FILE` to that file's absolute path before
+starting the service:
+
+```sh
+export WB_SETTINGS_FILE="$HOME/.config/starforge-ai-workbench/settings.yaml"
+```
+
+The only precedence rule is: an explicitly set `WB_SETTINGS_FILE` overrides
+both defaults; without it, both defaults apply. Settings load once at app
+creation, so restart or reload the service after changing the file. Two
+installations can use the same checkout and separate private settings files,
+such as one naming its human actor `Avery Example` in `America/Los_Angeles`
+and another retaining the defaults.
+
+`human_name` must be a non-empty string of at most 500 characters and
+`reporting_timezone` must be an installed IANA timezone name. Invalid or
+unreadable settings stop startup with a field-specific error that does not
+print configuration values. An omitted actor for a newly created human API
+action uses `human_name`; an explicitly supplied actor, provider identity, and
+stored record are not changed. Reporting timezone affects report calculations
+and metadata only. Historical date-only imports retain their legacy timezone
+provenance and are not rewritten or reinterpreted.
+
 ## OpenCode attention observations
 
 The optional [`config/opencode-attention.example.js`](../config/opencode-attention.example.js)
