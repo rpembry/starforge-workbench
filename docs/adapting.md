@@ -59,19 +59,27 @@ No task execution scheduler is implied by run heartbeats or attention records. R
 The optional [`config/opencode-attention.example.js`](../config/opencode-attention.example.js)
 bridge targets OpenCode `1.18.30`. Its contract was verified against the
 published `@opencode-ai/plugin` and `@opencode-ai/sdk` `1.18.30` TypeScript
-declarations ([plugin package](https://www.npmjs.com/package/@opencode-ai/plugin/v/1.18.30),
-[SDK package](https://www.npmjs.com/package/@opencode-ai/sdk/v/1.18.30)). It uses
+declarations and pinned runtime source ([plugin package](https://www.npmjs.com/package/@opencode-ai/plugin/v/1.18.30),
+[SDK package](https://www.npmjs.com/package/@opencode-ai/sdk/v/1.18.30),
+[prompt loop](https://github.com/anomalyco/opencode/blob/v1.18.30/packages/opencode/src/session/prompt.ts),
+[run state](https://github.com/anomalyco/opencode/blob/v1.18.30/packages/opencode/src/session/run-state.ts)). It uses
 these structured hooks only:
 
 - `chat.message` activates a turn generation using the user message ID and its
   OpenCode creation time.
 - `message.updated` links an assistant message to its parent user message. A
-  typed error becomes `provider_error`; a numeric completion time becomes
-  `idle`, meaning provider-turn complete rather than task complete.
+  typed error becomes `provider_error`. Completion timestamps are not treated
+  as idle because OpenCode also completes intermediate tool-call messages.
+- `message.part.updated` links a tool `callID` to its assistant message and
+  originating generation before a question callback can be classified.
 - `permission.updated` becomes `permission_wait` only after its assistant
   message has been linked to the current generation.
 - `tool.execute.before` becomes `user_question` only for OpenCode's built-in
-  `question` tool. Its arguments are discarded.
+  `question` tool and a call ID previously linked to the current generation.
+  Its arguments are discarded.
+- `session.status` becomes `idle` only for an idle event following a busy event
+  in the current generation. Pinned runtime source emits this when the session
+  runner becomes idle, after tool-call continuation has finished.
 
 The bridge writes a private local JSONL queue. It is disabled when
 `WB_OPENCODE_ATTENTION_EVENTS` is unset. To adapt it, create an owned directory
@@ -99,7 +107,10 @@ OpenCode creation time is not newer than the current generation. Provider
 creation time and plugin wall-clock observation time must be timezone-aware;
 the API rejects clocks more than five minutes in the future.
 
-After observer restart, its byte cursor resumes the queue. A response lost
+After observer restart, its byte cursor resumes the queue using byte offset,
+filesystem device, and inode. Replacement always resets to byte zero, including
+an equal-sized or larger replacement; same-file truncation resets when its size
+falls below the offset. A response lost
 after an accepted write is safe: replay is rejected as a duplicate and then
 acknowledged locally. Queue rotation replays from the beginning against the
 same server checks. Plugin restart intentionally forgets in-memory turn state;
@@ -109,9 +120,10 @@ the server's UTC clock. A stopped bridge, missing queue, unsupported hook, or
 expired reason therefore removes the strong reason rather than claiming
 failure; process and collector observations remain the fallback.
 
-OpenCode `1.18.30`'s plugin `Event` type does not provide a generation-bearing
-`session.idle` or `session.error`, so this bridge deliberately ignores those
-events. It does not distinguish authentication, rate-limit, or other provider
+OpenCode `1.18.30`'s session status event does not carry a generation, so the
+bridge accepts idle only after seeing busy within the generation established by
+the ordered plugin hooks. A plugin restart deliberately loses that correlation.
+The generation-less `session.error` event remains ignored. The bridge does not distinguish authentication, rate-limit, or other provider
 error subtypes, and it does not infer question/permission resolution before a
 later supported state. Subagents and child sessions need separate validation.
 No live-provider smoke check is included: existing sessions were not used as

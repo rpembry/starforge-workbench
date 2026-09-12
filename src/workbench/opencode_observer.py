@@ -87,9 +87,13 @@ def scan_attention(api, queue, state):
     counts = dict(submitted=0, malformed=0, rejected=0, failed=0)
     offset = state.get('attention_offset', 0)
     with queue.open('rb') as source:
+        file_stat = os.fstat(source.fileno())
+        identity = {'device': file_stat.st_dev, 'inode': file_stat.st_ino}
         source.seek(0, os.SEEK_END)
-        if offset > source.tell():
-            offset = 0  # Rotation replays safely against server generation/sequence checks.
+        if state.get('attention_file') != identity or offset > source.tell():
+            offset = 0  # Replacement or truncation replays through server generation checks.
+        state['attention_file'] = identity
+        state['attention_offset'] = offset
         source.seek(offset)
         while True:
             start = source.tell()

@@ -30,7 +30,7 @@ export default async function opencodeAttention() {
     if (!sessionID || !messageID || typeof created !== 'number') return
     const current = sessions.get(sessionID)
     if (current?.id === messageID) return
-    const state = {id: messageID, sequence: 0, lastTime: created, messages: new Map(), emitted: new Set()}
+    const state = {id: messageID, sequence: 0, lastTime: created, messages: new Map(), calls: new Map(), busy: false, emitted: new Set()}
     append({kind: 'generation', provider: 'opencode', session_id: sessionID,
       generation_id: messageID, source: 'opencode-plugin', source_instance: sourceInstance,
       started_at: new Date(created).toISOString(), provenance: 'opencode.chat.message'})
@@ -62,9 +62,13 @@ export default async function opencodeAttention() {
         state.messages.set(info.id, info.parentID)
         if (info.error) {
           observe(info.sessionID, info.parentID, 'provider_error', 'opencode.message.error', 'error:'+info.id)
-        } else if (typeof info.time?.completed === 'number') {
-          observe(info.sessionID, info.parentID, 'idle', 'opencode.message.completed', 'completed:'+info.id)
         }
+      }
+      if (event.type === 'message.part.updated' && event.properties?.part?.type === 'tool') {
+        const part = event.properties.part
+        const state = sessions.get(part.sessionID)
+        const generationID = state?.messages.get(part.messageID)
+        if (state && generationID === state.id) state.calls.set(part.callID, generationID)
       }
       if (event.type === 'permission.updated') {
         const permission = event.properties
@@ -72,11 +76,22 @@ export default async function opencodeAttention() {
         const generationID = state?.messages.get(permission.messageID)
         observe(permission.sessionID, generationID, 'permission_wait', 'opencode.permission.updated', 'permission:'+permission.id)
       }
+      if (event.type === 'session.status') {
+        const {sessionID, status} = event.properties
+        const state = sessions.get(sessionID)
+        if (!state) return
+        if (status?.type === 'busy') state.busy = true
+        if (status?.type === 'idle' && state.busy) {
+          observe(sessionID, state.id, 'idle', 'opencode.session.idle', 'idle')
+          state.busy = false
+        }
+      }
     },
     'tool.execute.before': async (input) => {
       if (input.tool !== 'question') return
       const state = sessions.get(input.sessionID)
-      observe(input.sessionID, state?.id, 'user_question', 'opencode.tool.question', 'question:'+input.callID)
+      const generationID = state?.calls.get(input.callID)
+      observe(input.sessionID, generationID, 'user_question', 'opencode.tool.question', 'question:'+input.callID)
     },
   }
 }

@@ -23,7 +23,7 @@ def observation(api, reason, sequence=1, session='ses_fixture', identity='msg_ge
     provenance = {
         'permission_wait': 'opencode.permission.updated',
         'user_question': 'opencode.tool.question',
-        'idle': 'opencode.message.completed',
+        'idle': 'opencode.session.idle',
         'provider_error': 'opencode.message.error',
     }[reason]
     return api.post('/api/provider-attention/observations', json={

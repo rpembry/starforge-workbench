@@ -190,7 +190,7 @@ class ProviderAttentionIn(Model):
     observed_at: datetime
     reason: Literal['permission_wait', 'user_question', 'idle', 'provider_error']
     provenance: Literal['opencode.permission.updated', 'opencode.tool.question',
-                        'opencode.message.completed', 'opencode.message.error']
+                        'opencode.session.idle', 'opencode.message.error']
 
     @field_validator('observed_at')
     @classmethod
@@ -202,7 +202,7 @@ class ProviderAttentionIn(Model):
         expected = {
             'permission_wait': 'opencode.permission.updated',
             'user_question': 'opencode.tool.question',
-            'idle': 'opencode.message.completed',
+            'idle': 'opencode.session.idle',
             'provider_error': 'opencode.message.error',
         }
         if self.provenance != expected[self.reason]:
