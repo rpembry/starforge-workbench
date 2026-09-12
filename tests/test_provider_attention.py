@@ -121,13 +121,13 @@ def test_auth_boundaries_validation_and_schema_upgrade(api, repo):
     assert api.post('/api/provider-attention/observations', json=body).status_code == 422
     assert unsupported.status_code == 422
     with repo.connection() as db:
-        assert [row[0] for row in db.execute('SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3, 4]
+        assert [row[0] for row in db.execute('SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3, 4, 5]
         db.execute('DROP TABLE provider_attention_incidents')
         db.execute('DROP TABLE provider_attention')
-        db.execute('DELETE FROM schema_migrations WHERE version=4')
+        db.execute('DELETE FROM schema_migrations WHERE version IN (4,5)')
         db.commit()
     upgraded = SQLiteRepository(repo.path)
     with upgraded.connection() as db:
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='provider_attention'").fetchone()
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='provider_attention_incidents'").fetchone()
-        assert [row[0] for row in db.execute('SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3, 4]
+        assert [row[0] for row in db.execute('SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3, 4, 5]
