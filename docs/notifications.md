@@ -116,6 +116,10 @@ no existing service needs restarting. `watch` rereads configuration each poll.
   lets them survive the default five-minute delivery spacing without pretending
   stale evidence is fresh. A verified reply/terminal question state, or a newer
   generation, removes the incident; expiry alone does not prove resolution.
+- The bridge does not emit terminal question evidence unless it emitted the
+  matching open incident. If an older queue already contains such an orphan
+  resolution, the API validates and consumes its exact sequence as a no-op so
+  later valid incidents are not starved; it creates no notification occurrence.
 - Snapshots older than three minutes, more than 30 seconds in the future, malformed
   or older than the last accepted snapshot cannot reset deduplication. Keep clocks
   synchronized. Duplicate identical IDs coalesce; contradictory duplicates fail
