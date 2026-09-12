@@ -60,6 +60,7 @@ Some important distinctions guide the implementation:
 See [`src/workbench/main.py`](src/workbench/main.py), [the models](src/workbench/models.py), [attention derivation](src/workbench/attention.py), and [repository/state transitions](src/workbench/repository.py).
 Exact-ID operator association of an existing process generation is documented in
 [action-to-run linking](docs/action-run-linking.md).
+[RECENT activity](docs/recent-activity.md) shows readable subject titles and relative times, with original audit details on expansion.
 
 ### Optional attention notifications
 
