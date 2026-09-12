@@ -265,15 +265,45 @@ class SQLiteRepository:
             observed_at = data['observed_at']
             if observed < datetime.fromisoformat(old['generation_started_at']) or (old['observed_at'] and observed <= datetime.fromisoformat(old['observed_at'])):
                 raise Problem(409, 'out_of_order_observation', 'Observation clock is not newer than current evidence')
+            incident = db.execute('''SELECT * FROM provider_attention_incidents
+                WHERE provider=? AND session_id=? AND generation_id=? AND incident_id=?''',
+                (data['provider'], data['session_id'], data['generation_id'], data['incident_id'])).fetchone()
+            if incident and incident['reason'] != data['reason']:
+                raise Problem(409, 'incident_conflict', 'Provider incident identity has different provenance')
+            if data['state'] == 'open':
+                if incident and incident['state'] != 'open':
+                    raise Problem(409, 'incident_closed', 'Resolved provider incident cannot reopen')
+                if incident and incident['open_provenance'] != data['provenance']:
+                    raise Problem(409, 'incident_conflict', 'Provider incident identity has different provenance')
+                if incident:
+                    db.execute('''UPDATE provider_attention_incidents SET last_observed_at=?, last_sequence=?,
+                        recorded_at=?, recorded_by=? WHERE provider=? AND session_id=? AND generation_id=? AND incident_id=?''',
+                        (observed_at, data['sequence'], now(), principal, data['provider'], data['session_id'],
+                         data['generation_id'], data['incident_id']))
+                else:
+                    self.insert(db, 'provider_attention_incidents', dict(
+                        provider=data['provider'], session_id=data['session_id'], generation_id=data['generation_id'],
+                        incident_id=data['incident_id'], reason=data['reason'], state='open', opened_at=observed_at,
+                        last_observed_at=observed_at, resolved_at=None, open_provenance=data['provenance'],
+                        resolution_provenance=None, last_sequence=data['sequence'], recorded_at=now(), recorded_by=principal))
+            else:
+                if not incident or incident['state'] != 'open':
+                    raise Problem(409, 'incident_not_open', 'Provider incident is not currently open')
+                db.execute('''UPDATE provider_attention_incidents SET state='resolved', resolved_at=?,
+                    resolution_provenance=?, last_sequence=?, recorded_at=?, recorded_by=?
+                    WHERE provider=? AND session_id=? AND generation_id=? AND incident_id=?''',
+                    (observed_at, data['provenance'], data['sequence'], now(), principal, data['provider'],
+                     data['session_id'], data['generation_id'], data['incident_id']))
             update = dict(last_sequence=data['sequence'], reason=data['reason'], observed_at=observed_at,
-                          observation_provenance=data['provenance'], recorded_at=now(), recorded_by=principal)
+                           observation_provenance=data['provenance'], recorded_at=now(), recorded_by=principal)
             db.execute('''UPDATE provider_attention SET last_sequence=:last_sequence, reason=:reason,
                 observed_at=:observed_at, observation_provenance=:observation_provenance,
                 recorded_at=:recorded_at, recorded_by=:recorded_by
                 WHERE provider=:provider AND session_id=:session_id''',
                 dict(update, provider=data['provider'], session_id=data['session_id']))
-            result = db.execute('SELECT * FROM provider_attention WHERE provider=? AND session_id=?',
-                                (data['provider'], data['session_id'])).fetchone()
+            result = db.execute('''SELECT * FROM provider_attention_incidents
+                WHERE provider=? AND session_id=? AND generation_id=? AND incident_id=?''',
+                (data['provider'], data['session_id'], data['generation_id'], data['incident_id'])).fetchone()
             db.commit()
             return dict(result)
 
@@ -293,9 +323,12 @@ class SQLiteRepository:
                 age = (current-datetime.fromisoformat(collector['heartbeat_at'])).total_seconds()
                 collector['heartbeat_age_seconds'] = max(0, int(age))
                 collector['health'] = 'offline' if age > 90 else collector['status']
-            provider_attention = [dict(r) for r in db.execute('SELECT * FROM provider_attention ORDER BY provider,session_id')]
+            provider_attention = [dict(r) for r in db.execute('''SELECT i.*,g.generation_started_at
+                FROM provider_attention_incidents i JOIN provider_attention g
+                  ON g.provider=i.provider AND g.session_id=i.session_id AND g.generation_id=i.generation_id
+                WHERE i.state='open' ORDER BY i.provider,i.session_id,i.opened_at,i.incident_id''')]
             for observation in provider_attention:
-                stamp = observation['observed_at'] or observation['generation_started_at']
+                stamp = observation['last_observed_at']
                 age = (current-datetime.fromisoformat(stamp)).total_seconds()
                 observation['freshness_age_seconds'] = max(0, int(age))
                 observation['fresh'] = bool(observation['reason']) and age <= 90

@@ -71,15 +71,17 @@ these structured hooks only:
   typed error becomes `provider_error`. Completion timestamps are not treated
   as idle because OpenCode also completes intermediate tool-call messages.
 - `message.part.updated` links a tool `callID` to its assistant message and
-  originating generation before a question callback can be classified.
+  originating generation before a question callback can be classified. A
+  terminal `completed` or `error` state explicitly resolves that question.
 - `permission.updated` becomes `permission_wait` only after its assistant
-  message has been linked to the current generation.
+  message has been linked to the current generation. `permission.replied`
+  explicitly resolves the same permission identity.
 - `tool.execute.before` becomes `user_question` only for OpenCode's built-in
   `question` tool and a call ID previously linked to the current generation.
   Its arguments are discarded.
-- `session.status` becomes `idle` only for an idle event following a busy event
-  in the current generation. Pinned runtime source emits this when the session
-  runner becomes idle, after tool-call continuation has finished.
+- Generation-less `session.status` and `session.idle` events are ignored. They
+  cannot safely attribute delayed idle, cancel, queued-turn, or resume ordering
+  to a user-message generation.
 
 The bridge writes a private local JSONL queue. It is disabled when
 `WB_OPENCODE_ATTENTION_EVENTS` is unset. To adapt it, create an owned directory
@@ -89,8 +91,10 @@ same path to `workbench.opencode_observer --attention-events`. OpenCode loads
 plugins at startup, so restart OpenCode after installing or changing the local
 copy. Do not point two bridge instances at one queue.
 
-The bridge emits only provider/session IDs, user-message generation ID, bridge
-instance ID, fixed reason and provenance values, sequence, and timestamps. It
+The bridge emits only provider/session IDs, user-message generation ID, a
+SHA-256 incident identity derived locally from a permission, question call, or
+assistant-message ID, bridge instance ID, fixed state/reason/provenance values,
+sequence, and timestamps. It
 never writes prompts, responses, reasoning, questions, error messages, tool
 arguments, permission patterns, model output, or credentials. The existing
 observer submits these records with its collector credential; operators and
@@ -115,17 +119,18 @@ after an accepted write is safe: replay is rejected as a duplicate and then
 acknowledged locally. Queue rotation replays from the beginning against the
 same server checks. Plugin restart intentionally forgets in-memory turn state;
 until a new `chat.message` establishes a generation, lifecycle events are
-ignored and status remains unknown. Current reasons expire after 90 seconds by
-the server's UTC clock. A stopped bridge, missing queue, unsupported hook, or
-expired reason therefore removes the strong reason rather than claiming
-failure; process and collector observations remain the fallback.
+ignored and status remains unknown. Verified permission and question replies
+resolve their matching incidents; a newer generation supersedes incidents from
+the prior turn. An unresolved incident remains visible after 90 seconds with
+explicitly stale wording so a notification rate limit cannot erase it. It does
+not claim the request is still open. A stopped bridge, missing queue, or missed
+resolution therefore leaves current status unknown; process and collector
+observations remain the fallback.
 
-OpenCode `1.18.30`'s session status event does not carry a generation, so the
-bridge accepts idle only after seeing busy within the generation established by
-the ordered plugin hooks. A plugin restart deliberately loses that correlation.
-The generation-less `session.error` event remains ignored. The bridge does not distinguish authentication, rate-limit, or other provider
-error subtypes, and it does not infer question/permission resolution before a
-later supported state. Subagents and child sessions need separate validation.
+OpenCode `1.18.30`'s session status and idle events do not carry a generation,
+so strong idle is unsupported. The generation-less `session.error` event also
+remains ignored. The bridge does not distinguish authentication, rate-limit, or
+other provider error subtypes. Subagents and child sessions need separate validation.
 No live-provider smoke check is included: existing sessions were not used as
 fixtures, so live support remains unverified. These observations never change
 an action, approve a request, authorize execution, or establish task

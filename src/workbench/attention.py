@@ -27,24 +27,24 @@ def derive(actions, runs, collectors, generated_at, provider_attention=()):
         'provider_error': ('provider_error', 1, 'blocked',
             'OpenCode reported a provider error for the current turn.',
             'Inspect the matching OpenCode session and provider status; do not infer task failure.'),
-        'idle': ('provider_idle', 3, 'idle',
-            'OpenCode reported that the current turn ended and is idle. This is not task completion.',
-            'Review the matching session and explicit action state before deciding what happens next.'),
     }
     for observation in provider_attention:
-        if not observation['fresh'] or observation['reason'] not in provider_reasons:
+        if observation['reason'] not in provider_reasons:
             continue
         kind, priority, progress, reason, next_action = provider_reasons[observation['reason']]
-        identity = 'provider_attention:'+observation['provider']+':'+observation['session_id']
-        fresh_until = (datetime.fromisoformat(observation['observed_at'])+timedelta(seconds=90)).isoformat()
+        identity = 'provider_attention:'+observation['provider']+':'+observation['session_id']+':'+observation['incident_id']
+        fresh_until = (datetime.fromisoformat(observation['last_observed_at'])+timedelta(seconds=90)).isoformat()
+        if not observation['fresh']:
+            progress = 'unknown'
+            reason = reason.rstrip('.')+' was observed, but current status is unverified; review the matching session.'
         items[identity] = dict(id=identity, kind=kind, priority=priority,
             title='OpenCode session', subject={'resource': 'provider_attention', 'id': observation['session_id']},
             progress=progress, reason=reason, next_action=next_action,
             evidence=[dict(resource='provider_attention', id=observation['session_id'],
                 generation_id=observation['generation_id'], generation_started_at=observation['generation_started_at'],
-                sequence=observation['last_sequence'],
-                provenance=observation['observation_provenance'],
-                timestamps={'observed_at': observation['observed_at'], 'fresh_until': fresh_until})])
+                incident_id=observation['incident_id'], sequence=observation['last_sequence'],
+                provenance=observation['open_provenance'],
+                timestamps={'observed_at': observation['last_observed_at'], 'fresh_until': fresh_until})])
 
     def approval(action=None, run=None):
         resource, row = ('actions', action) if action else ('runs', run)

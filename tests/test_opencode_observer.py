@@ -80,32 +80,45 @@ const user = (id, created) => hooks["chat.message"]({{sessionID:"ses_test",messa
   {{message:{{id,role:"user",time:{{created}},system:"PRIVATE PROMPT"}},parts:[{{text:"PRIVATE"}}]}});
 const assistant = (id, parentID, extra={{}}) => hooks.event({{event:{{type:"message.updated",properties:{{info:
   {{id,sessionID:"ses_test",role:"assistant",parentID,time:{{created:Date.now()}},providerID:"fixture",modelID:"fixture",...extra,text:"PRIVATE RESPONSE"}}}}}}}});
-const tool = (messageID, callID) => hooks.event({{event:{{type:"message.part.updated",properties:{{part:
-  {{id:"part_"+callID,sessionID:"ses_test",messageID,type:"tool",callID,tool:"question",state:{{status:"running",input:{{question:"PRIVATE"}}}}}}}}}}}});
+const tool = (messageID, callID, status="running") => hooks.event({{event:{{type:"message.part.updated",properties:{{part:
+  {{id:"part_"+callID,sessionID:"ses_test",messageID,type:"tool",callID,tool:"question",state:{{status,input:{{question:"PRIVATE"}}}}}}}}}}}});
 await user("msg_old", Date.now()-1000);
 await assistant("asst_old", "msg_old");
 await tool("asst_old", "call_one");
 await tool("asst_old", "call_late");
 await hooks.event({{event:{{type:"permission.updated",properties:{{id:"per_one",sessionID:"ses_test",messageID:"asst_old",metadata:{{secret:"PRIVATE"}}}}}}}});
 await hooks["tool.execute.before"]({{tool:"question",sessionID:"ses_test",callID:"call_one"}},{{args:{{question:"PRIVATE QUESTION"}}}});
+await hooks.event({{event:{{type:"permission.replied",properties:{{sessionID:"ses_test",permissionID:"per_one",response:"once"}}}}}});
+await tool("asst_old", "call_one", "completed");
 await assistant("asst_old", "msg_old", {{finish:"tool-calls",time:{{created:Date.now()-500,completed:Date.now()}}}});
 await assistant("asst_step_two", "msg_old", {{finish:"stop",time:{{created:Date.now()-200,completed:Date.now()}}}});
 await hooks.event({{event:{{type:"session.status",properties:{{sessionID:"ses_test",status:{{type:"busy"}}}}}}}});
-await hooks.event({{event:{{type:"session.status",properties:{{sessionID:"ses_test",status:{{type:"idle"}}}}}}}});
+await hooks.event({{event:{{type:"session.status",properties:{{sessionID:"ses_test",status:{{type:"retry",attempt:1,message:"PRIVATE",next:Date.now()}}}}}}}});
 await user("msg_new", Date.now()+1);
+await hooks.event({{event:{{type:"session.status",properties:{{sessionID:"ses_test",status:{{type:"busy"}}}}}}}});
+await hooks.event({{event:{{type:"session.status",properties:{{sessionID:"ses_test",status:{{type:"idle"}}}}}}}});
+await hooks.event({{event:{{type:"session.idle",properties:{{sessionID:"ses_test"}}}}}});
 await hooks["tool.execute.before"]({{tool:"question",sessionID:"ses_test",callID:"call_late"}},{{args:{{question:"PRIVATE DELAYED"}}}});
 await assistant("asst_new", "msg_new", {{error:{{name:"APIError",data:{{message:"PRIVATE ERROR"}}}}}});
 await assistant("asst_late", "msg_old", {{time:{{created:Date.now(),completed:Date.now()+1}}}});
+await user("msg_resume", Date.now()+2);
+await hooks.event({{event:{{type:"session.status",properties:{{sessionID:"ses_test",status:{{type:"idle"}}}}}}}});
 '''
     env = dict(os.environ, WB_OPENCODE_ATTENTION_EVENTS=str(queue))
     subprocess.run([node, '--input-type=module', '-e', script], check=True, env=env)
     raw = queue.read_text()
     records = [json.loads(line) for line in raw.splitlines()]
     assert 'PRIVATE' not in raw
-    assert [record['kind'] for record in records] == ['generation', 'observation', 'observation', 'observation', 'generation', 'observation']
+    assert [record['kind'] for record in records] == ['generation', 'observation', 'observation', 'observation', 'observation', 'generation', 'observation', 'generation']
     assert [record.get('reason') for record in records if record['kind'] == 'observation'] == [
-        'permission_wait', 'user_question', 'idle', 'provider_error']
-    assert records[-1]['generation_id'] == 'msg_new'
+        'permission_wait', 'user_question', 'permission_wait', 'user_question', 'provider_error']
+    observations = [record for record in records if record['kind'] == 'observation']
+    assert [record['state'] for record in observations] == ['open', 'open', 'resolved', 'resolved', 'open']
+    assert observations[0]['incident_id'] == observations[2]['incident_id']
+    assert observations[1]['incident_id'] == observations[3]['incident_id']
+    assert all(len(record['incident_id']) == 64 for record in observations)
+    assert observations[-1]['generation_id'] == 'msg_new'
+    assert records[-1]['generation_id'] == 'msg_resume'
 
 
 def test_attention_queue_restart_replay_and_failure_ordering(tmp_path):
@@ -116,8 +129,8 @@ def test_attention_queue_restart_replay_and_failure_ordering(tmp_path):
          'started_at': '2026-09-12T12:00:00+00:00', 'provenance': 'opencode.chat.message'},
         {'kind': 'observation', 'provider': 'opencode', 'session_id': 'ses_test',
          'generation_id': 'msg_one', 'source': 'opencode-plugin', 'source_instance': 'instance_one',
-         'sequence': 1, 'observed_at': '2026-09-12T12:00:01+00:00',
-         'reason': 'permission_wait', 'provenance': 'opencode.permission.updated'},
+         'incident_id': 'a'*64, 'sequence': 1, 'observed_at': '2026-09-12T12:00:01+00:00',
+         'reason': 'permission_wait', 'state': 'open', 'provenance': 'opencode.permission.updated'},
     ]
     queue.write_text(''.join(json.dumps(record)+'\n' for record in records)+'{"partial":')
     calls = []
@@ -146,8 +159,8 @@ def test_attention_queue_replacement_resets_cursor_by_file_identity(tmp_path, re
         'started_at': '2026-09-12T12:00:00+00:00', 'provenance': 'opencode.chat.message'}
     observation = {'kind': 'observation', 'provider': 'opencode', 'session_id': 'ses_new',
         'generation_id': 'msg_new', 'source': 'opencode-plugin', 'source_instance': 'instance_new',
-        'sequence': 1, 'observed_at': '2026-09-12T12:00:01+00:00',
-        'reason': 'user_question', 'provenance': 'opencode.tool.question'}
+        'incident_id': 'b'*64, 'sequence': 1, 'observed_at': '2026-09-12T12:00:01+00:00',
+        'reason': 'user_question', 'state': 'open', 'provenance': 'opencode.tool.question'}
     replacement = ''.join(json.dumps(record)+'\n' for record in (generation, observation)).encode()
     old = {**generation, 'session_id': 'ses_old', 'generation_id': 'msg_old'}
     delta = {'smaller': -10, 'equal': 0, 'larger': 10}[relation]
