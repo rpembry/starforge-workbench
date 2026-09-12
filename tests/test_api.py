@@ -159,3 +159,21 @@ def test_heartbeats_preserve_operator_assignments_and_approval_state(api):
     assert heartbeat.status_code == 201
     assert heartbeat.json()['action_id'] == a['id']
     assert heartbeat.json()['status'] == 'approval_needed'
+
+
+def test_everyday_guide_navigation_assets_and_access(api):
+    assert 'href="/guide"' in api.get('/').text
+    guide = api.get('/guide')
+    assert guide.status_code == 200
+    assert '~/.local/bin/ai-workbench up</code>' in guide.text
+    assert '~/.local/bin/ai-workbench up aiw' in guide.text
+    assert '~/.local/bin/ai-workbench up ai-workbench' in guide.text
+    assert 'worklog' not in guide.text.lower()
+    logo = api.get('/assets/workbench-logo.png')
+    assert logo.status_code == 200
+    assert logo.headers['content-type'] == 'image/png'
+    assert logo.content.startswith(b'\x89PNG\r\n\x1a\n')
+    api.headers['Authorization'] = 'Bearer '+COLLECTOR
+    assert api.get('/guide').status_code == 403
+    api.headers.clear()
+    assert api.get('/guide').status_code == 401

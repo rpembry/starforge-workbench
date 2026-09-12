@@ -14,6 +14,7 @@
 !/src/**/*.sql
 !/src/**/*.html
 !/src/**/*.js
+!/src/workbench/static/workbench-logo.png
 !/src/**/htmx-LICENSE.txt
 !/bin/
 !/bin/ai-workbench

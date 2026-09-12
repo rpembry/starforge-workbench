@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Everyday guide · AI Workbench</title>
+<style>
+:root{font:16px system-ui;color:#e5ebf3;background:#101722}body{max-width:850px;margin:auto;padding:28px}a{color:#91b9ee}p,li{line-height:1.65}header{border-bottom:1px solid #334155;padding-bottom:20px}h1{display:flex;align-items:center;gap:16px;font-size:30px}h2{color:#91b9ee;margin-top:0}section{background:#192331;border:1px solid #334155;padding:24px;border-radius:12px;margin:20px 0}pre{background:#101722;border-radius:6px;padding:14px;white-space:pre-wrap;overflow-wrap:anywhere}code{font-size:.95em}li{margin:8px 0}a:focus-visible{outline:3px solid #f5b971;outline-offset:4px}footer{color:#a4b2c5;margin:24px 0}@media(max-width:600px){body{padding:16px}section{padding:18px}h1{font-size:25px}}
+</style></head>
+<body><nav aria-label="Main navigation"><a href="/">← Dashboard</a> · <a href="/reports/standup">Standup</a> · <a href="/reports/accomplishments">Accomplishments</a></nav>
+<header><h1><img src="/assets/workbench-logo.png" width="64" height="64" alt="">Everyday guide</h1><p>Open your sessions, decide what matters, and keep your work up to date.</p></header>
+<main>
+<section><h2>Start your day</h2><p>Run these commands in a <strong>regular terminal shell</strong>, outside an agent conversation or launcher menu. These examples use an installed launcher with the AIW contexts configured.</p>
+<p><strong>Open all enabled agent tabs:</strong></p><pre><code>~/.local/bin/ai-workbench up</code></pre>
+<p><strong>Open only your daily AIW conversation:</strong></p><pre><code>~/.local/bin/ai-workbench up aiw</code></pre>
+<p><strong>Open AIW Dev:</strong></p><pre><code>~/.local/bin/ai-workbench up ai-workbench</code></pre>
+<p>Leave existing healthy sessions open. The launcher reuses them; if a tab is already attached, switch to it. Saved conversation bindings are preserved. Depending on the provider and configuration, a tab may offer a selection menu.</p>
+<p>After a reboot, use <code>up</code> to reopen your tabs. Installed background collectors can start automatically at login; opening agent tabs is a separate step. Running <code>up aiw</code> opens only AIW.</p></section>
+<section><h2>Choose where to work</h2><ul>
+<li><strong>AIW:</strong> your daily conversation for priorities, tasks, waiting items, and accomplishments.</li>
+<li><strong>AIW Dev:</strong> changes to Workbench itself—bugs, features, tests, and releases.</li>
+<li><strong>The website:</strong> view the same work state on the <a href="/">dashboard</a>, create a human task, and open reports. Bookmark your configured Workbench website.</li>
+</ul><p>Opening a session or seeing an activity signal does not itself authorize or complete work.</p></section>
+<section><h2>Ask what needs attention</h2><p>Try: “What needs my attention?” or “What should I work on next?”</p><p>AIW can explain blockers, decisions, and monitoring problems. A suggestion is separate from work you have agreed to do.</p></section>
+<section><h2>Keep tasks current</h2><ul><li>“Track this: prepare the release notes.”</li><li>“I’m working on the release notes now.”</li><li>“The release notes are waiting for review.”</li><li>“The release notes are finished; record the result.”</li></ul><p>Name the task clearly and give useful context or a result link. Explicit updates keep the record accurate: an agent running, going quiet, or finishing a response does not prove that a task is complete.</p></section>
+<section><h2>Review and wrap up</h2><p>Ask “Prepare my daily standup,” “What did I accomplish today?” or “What is still waiting?”</p><p>You can also open <a href="/reports/standup">Standup</a>, <a href="/reports/accomplishments">Accomplishments</a>, or <a href="/reports/todo">Actions</a>. Check the report’s displayed time window, then tell AIW about missing outcomes or changed priorities.</p></section>
+<section><h2>When something looks wrong</h2><p>Ask: “Check Workbench health and this session before restarting anything.”</p><p><strong>Check all configured sessions:</strong></p><pre><code>~/.local/bin/ai-workbench status</code></pre><p><strong>Check only AIW:</strong></p><pre><code>~/.local/bin/ai-workbench status aiw</code></pre><p>Collectors report activity in the background. An offline collector means visibility is missing, not that your work failed. An open terminal is also not proof that its agent is healthy. Preserve working conversations and investigate the specific issue instead of restarting everything.</p><p>For scrolling, selection, or link behavior, ask AIW to inspect your terminal settings and preserve live sessions. You do not need to manage collectors or remember API commands for everyday use.</p></section>
+</main><footer><a href="/">Back to dashboard</a></footer></body></html>
