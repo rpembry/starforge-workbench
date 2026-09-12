@@ -34,7 +34,7 @@
 !/docs/
 !/docs/*.md
 !/docs/images/
-!/docs/images/dashboard-simulated.png
+!/docs/images/starforge-dashboard-simulated.png
 !/deploy/
 !/deploy/*.py
 !/deploy/*.sh
