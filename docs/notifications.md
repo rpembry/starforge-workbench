@@ -96,12 +96,14 @@ no existing service needs restarting. `watch` rereads configuration each poll.
   count only when title inclusion is enabled. Routine evidence timestamps and poll
   order do not trigger notifications.
 - Provider permission waits, user questions, and provider errors are actionable and
-  selectable. They are enabled by default like the other categories. Routine
-  `provider_idle` observations are never selectable and never send a push.
-- Provider occurrences also use the authoritative generation identity and start
-  time. A new turn can notify even when the session and reason are unchanged and no
-  recovery was sampled. Older generations, regressed sequences, and contradictory
-  evidence fail closed rather than rearming an alert.
+  selectable. They are enabled by default like the other categories. Strong
+  provider idle is unsupported because its runtime event lacks generation identity;
+  it is never selectable and never sends a push.
+- Provider occurrences use the authoritative generation plus a locally hashed
+  permission, question, or error incident identity. Separate requests in one turn
+  remain separate; repeated evidence does not notify again. A new turn can notify
+  even when the session and reason are unchanged. Older generations, regressed
+  sequences, and contradictory evidence fail closed rather than rearming an alert.
 - Multiple pending items are coalesced into **one summary per delivery**, including
   initial startup and recovery after an outage. Default spacing is five minutes;
   new items wait behind that rate limit. Resolved pending items are removed.
@@ -109,6 +111,11 @@ no existing service needs restarting. `watch` rereads configuration each poll.
   There is no daily reminder. Observing an item's absence in a successful, fresh
   snapshot rearms it: a later outage/request can notify again. Recoveries themselves
   do not send a push. An outage and recovery entirely between polls cannot be seen.
+- Verified unresolved provider incidents remain pending after their 90-second
+  evidence freshness window, with wording that current status is unverified. This
+  lets them survive the default five-minute delivery spacing without pretending
+  stale evidence is fresh. A verified reply/terminal question state, or a newer
+  generation, removes the incident; expiry alone does not prove resolution.
 - Snapshots older than three minutes, more than 30 seconds in the future, malformed
   or older than the last accepted snapshot cannot reset deduplication. Keep clocks
   synchronized. Duplicate identical IDs coalesce; contradictory duplicates fail

@@ -92,12 +92,15 @@ class Entry(LegacyEntry):
     authority: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
     authority_started_at: float | None = Field(default=None, allow_inf_nan=False)
     authority_sequence: int | None = Field(default=None, ge=0)
+    incident: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')  # Optional only for pre-incident v2 state.
 
     @model_validator(mode='after')
     def complete_authority(self):
         fields = (self.authority, self.authority_started_at, self.authority_sequence)
         if any(value is not None for value in fields) and not all(value is not None for value in fields):
             raise ValueError('Authority metadata must be complete')
+        if self.incident is not None and self.authority is None:
+            raise ValueError('Incident metadata requires authority')
         return self
 
 
@@ -229,7 +232,8 @@ def selected(snapshot, config, current):
 
 def fingerprint(item, include_details):
     # Evidence timestamps, polling order and heartbeat age never rearm alerts.
-    values = {key: item[key] for key in ('kind', 'progress', 'reason')}
+    keys = ('kind',) if item['kind'] in PROVIDER_CATEGORIES else ('kind', 'progress', 'reason')
+    values = {key: item[key] for key in keys}
     if include_details:
         values['title'] = item['title']
     return digest(values)
@@ -244,6 +248,8 @@ def provider_authority(item, snapshot_stamp=None):
     record = evidence[0]
     if record.get('resource') != 'provider_attention' or not isinstance(record.get('generation_id'), str) or not record['generation_id']:
         raise ValueError()
+    if not isinstance(record.get('incident_id'), str) or not re.fullmatch(r'[a-f0-9]{64}', record['incident_id']):
+        raise ValueError()
     if type(record.get('sequence')) is not int or record['sequence'] < 0:
         raise ValueError()
     timestamps = record.get('timestamps')
@@ -257,9 +263,9 @@ def provider_authority(item, snapshot_stamp=None):
     started_stamp, observed_stamp, fresh_stamp = (value.timestamp() for value in (started, observed, fresh_until))
     if started_stamp > observed_stamp or observed_stamp >= fresh_stamp:
         raise ValueError()
-    if snapshot_stamp is not None and not observed_stamp <= snapshot_stamp <= fresh_stamp:
+    if snapshot_stamp is not None and observed_stamp > snapshot_stamp:
         raise ValueError()
-    return digest(record['generation_id']), started_stamp, record['sequence']
+    return digest(record['generation_id']), started_stamp, record['sequence'], record['incident_id']
 
 
 def message(items, config):
@@ -352,23 +358,25 @@ def reconcile(state, items, config, stamp):
         signature = fingerprint(item, config.include_details)
         prior = state.entries.get(key)
         authority = provider_authority(item, stamp)
-        if authority and prior and prior.authority:
-            authority_id, started_at, sequence = authority
+        if authority and prior and prior.authority and prior.incident is not None:
+            authority_id, started_at, sequence, incident = authority
             if started_at < prior.authority_started_at or (started_at == prior.authority_started_at and authority_id != prior.authority):
                 raise NotificationError('provider_attention_generation_out_of_order')
             if authority_id == prior.authority:
-                if started_at != prior.authority_started_at or sequence < prior.authority_sequence:
+                if started_at != prior.authority_started_at or incident != prior.incident or sequence < prior.authority_sequence:
                     raise NotificationError('provider_attention_evidence_out_of_order')
                 if sequence == prior.authority_sequence and prior.fingerprint != signature:
                     raise NotificationError('provider_attention_evidence_conflict')
-        if prior and prior.fingerprint == signature and (not authority or authority[0] == prior.authority):
+        if prior and prior.fingerprint == signature and (not authority or
+                (authority[0] == prior.authority and authority[3] == prior.incident)):
             entries[key] = prior
             if authority:
                 entries[key].authority_sequence = authority[2]
         else:
             fields = dict(fingerprint=signature)
             if authority:
-                fields.update(authority=authority[0], authority_started_at=authority[1], authority_sequence=authority[2])
+                fields.update(authority=authority[0], authority_started_at=authority[1],
+                              authority_sequence=authority[2], incident=authority[3])
             entries[key] = Entry(**fields)
     state.entries = entries  # Observed recovery rearms a later episode; API errors do not.
     state.last_snapshot = stamp
