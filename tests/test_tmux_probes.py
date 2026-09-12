@@ -1,5 +1,6 @@
 import copy
 import json
+from pathlib import Path
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -146,6 +147,32 @@ def test_session_lost_after_creation_does_not_set_options_on_another_target(cont
     with pytest.raises(cli.TmuxUnknown, match='disappeared'):
         cli.up(context, ROOT/'config/workbench.example.yaml', headless=True)
     assert mutation.call_count == 1 and mutation.call_args.args[0] == 'new-session'
+
+
+def test_pane_start_verifies_cwd_and_birth_geometry(context, monkeypatch):
+    run = Mock(side_effect=[response(str(cli.cwd(context))+'\n'), response('132x41\n')])
+    monkeypatch.setattr(cli, 'run', run)
+    monkeypatch.setattr(cli, 'validate_context', Mock())
+    cli.verify_pane_start(context, '$7', (132, 41))
+    assert all(call.kwargs['cwd'] == cli.TMUX_CLIENT_CWD for call in run.call_args_list)
+
+
+def test_pane_start_rejects_removed_or_fallback_cwd(context, monkeypatch):
+    validate = Mock(side_effect=ValueError('Missing directory'))
+    monkeypatch.setattr(cli, 'validate_context', validate)
+    with pytest.raises(ValueError, match='Missing directory'):
+        cli.verify_pane_start(context, '$7')
+    validate.side_effect = None
+    monkeypatch.setattr(cli, 'run', Mock(return_value=response('/\n')))
+    with pytest.raises(ValueError, match='pane cwd mismatch'):
+        cli.verify_pane_start(context, '$7')
+
+
+def test_tmux_clients_always_start_from_stable_non_project_directory(context, monkeypatch):
+    run = Mock(return_value=response())
+    monkeypatch.setattr(cli, 'run', run)
+    cli.tmux('list-sessions')
+    assert run.call_args.kwargs['cwd'] == Path('/')
 
 
 def test_up_continues_after_unknown_context_without_cleanup(context, monkeypatch):

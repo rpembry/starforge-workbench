@@ -37,6 +37,23 @@ is the user's terminal session. It uses the same explicit server/socket argument
 a verified target, and a fresh final observation before clearing a pending receipt.
 The launcher adds no automatic cleanup or destructive recovery policy.
 
+Every tmux client command starts from `/`, a stable non-project directory, while
+each managed pane still receives its explicit resolved context directory. This
+prevents a dedicated server first reached from a disposable worktree from inheriting
+that worktree as its client launch directory. After create or respawn, the launcher
+revalidates the configured directories and compares tmux's pane cwd before reporting
+success. The `_menu` child independently refuses to start a provider if its cwd is
+missing or differs from the configured context. A mismatch is preserved for
+inspection; the launcher never restarts the dedicated tmux server automatically.
+
+Detached sessions are created with explicit `-x`/`-y` dimensions. Interactive
+launches use the invoking terminal size when one is available; headless launches
+use the documented `197x49` fallback, matching a newly prepared Workbench Ptyxis
+profile. The launcher verifies detached birth geometry before opening or attaching
+Ptyxis. A later client attachment may resize tmux normally. Synthetic tests cover
+birth geometry and attachment; real provider rendering remains a separate manual
+check because providers and live sessions are never test fixtures.
+
 Mocked tests cover missing socket/session, stale socket, malformed responses,
 protocol mismatch, timeout, disappearance between queries, safe recovery, binding
 and cleanup guards, direct tty probes, and continued reporting. The opt-in real tmux
