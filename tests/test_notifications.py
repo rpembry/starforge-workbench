@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from workbench import notifications as n
+from workbench.attention import derive
 
 NOW = 1800000000.0
 
@@ -20,6 +21,19 @@ def snapshot(items, current=NOW):
 def item(identity='fixture', kind='approval_needed', **extra):
     return dict(id=identity, kind=kind, progress='unknown', reason='Review required', title='PRIVATE task fixture',
                 evidence=[{'timestamps': {'heartbeat_at': 'earlier'}}], **extra)
+
+
+def provider_item(kind='provider_permission_wait', generation='msg_one', sequence=1,
+                  started=NOW-10, observed=NOW-1, identity='provider:session', incident='a'*64, **extra):
+    value = item(identity, kind)
+    value.update(progress='waiting', reason='Provider attention required',
+                 evidence=[{'resource': 'provider_attention', 'id': identity, 'generation_id': generation,
+                            'generation_started_at': datetime.fromtimestamp(started, timezone.utc).isoformat(),
+                            'incident_id': incident, 'sequence': sequence, 'provenance': 'opencode.fixture',
+                            'timestamps': {'observed_at': datetime.fromtimestamp(observed, timezone.utc).isoformat(),
+                                           'fresh_until': datetime.fromtimestamp(observed+90, timezone.utc).isoformat()}}])
+    value.update(extra)
+    return value
 
 
 @pytest.fixture
@@ -78,6 +92,112 @@ def test_categories_coalesce_and_routine_details_do_not_notify(config):
     assert tick(config, entries, sender, NOW+11)['status'] == 'delivered'
     assert tick(config, [], sender, NOW+12)['status'] == 'quiet'
     assert tick(config, entries, sender, NOW+20)['status'] == 'delivered'
+
+
+def test_actionable_provider_categories_coalesce_and_idle_is_never_selectable(config):
+    sender = Mock()
+    entries = [provider_item(),
+               provider_item('provider_user_question', generation='msg_two', started=NOW-9, identity='provider:question', incident='b'*64),
+               provider_item('provider_error', generation='msg_three', started=NOW-8, identity='provider:error', incident='c'*64, progress='blocked'),
+               item('idle', 'provider_idle')]
+    assert tick(config, entries, sender)['count'] == 3
+    payload = sender.call_args.args[1]
+    assert all(label in payload['message'] for label in ('provider permission', 'provider question', 'provider error'))
+    assert 'idle' not in payload['message'] and 'PRIVATE' not in json.dumps(payload)
+    with pytest.raises(ValueError):
+        n.Settings(categories=['provider_idle'])
+
+
+def test_provider_generation_rearms_same_reason_without_sampled_recovery(config):
+    sender = Mock()
+    first = provider_item()
+    assert tick(config, [first], sender)['status'] == 'delivered'
+    unchanged = provider_item(sequence=2, observed=NOW+1)
+    assert tick(config, [unchanged], sender, NOW+2)['status'] == 'quiet'
+    second = provider_item(generation='msg_two', started=NOW+3, observed=NOW+4)
+    assert tick(config, [second], sender, NOW+5)['status'] == 'delivered'
+    assert sender.call_count == 2
+    assert 'msg_one' not in (Path(config.state_dir)/'delivery.json').read_text()
+
+
+def test_provider_stale_replayed_and_conflicting_evidence_fail_closed(config):
+    sender = Mock()
+    assert tick(config, [provider_item(sequence=2)], sender)['status'] == 'delivered'
+    with pytest.raises(n.NotificationError, match='evidence_out_of_order'):
+        tick(config, [provider_item(sequence=1, observed=NOW+1)], sender, NOW+2)
+    newer = provider_item(generation='msg_two', started=NOW+3, observed=NOW+4)
+    assert tick(config, [newer], sender, NOW+5)['status'] == 'delivered'
+    with pytest.raises(n.NotificationError, match='generation_out_of_order'):
+        tick(config, [provider_item(observed=NOW+6)], sender, NOW+7)
+    conflict = provider_item('provider_error', generation='msg_two', started=NOW+3, observed=NOW+7,
+                             progress='blocked', reason='Different')
+    with pytest.raises(n.NotificationError, match='evidence_conflict'):
+        tick(config, [conflict], sender, NOW+8)
+    assert sender.call_count == 2
+
+
+def test_distinct_provider_incidents_and_repeated_evidence(config):
+    sender = Mock()
+    first = provider_item()
+    assert tick(config, [first], sender)['status'] == 'delivered'
+    repeated = provider_item(sequence=2, observed=NOW+1)
+    assert tick(config, [repeated], sender, NOW+2)['status'] == 'quiet'
+    second = provider_item(sequence=3, observed=NOW+3, identity='provider:session:b', incident='b'*64)
+    assert tick(config, [repeated, second], sender, NOW+5)['count'] == 1
+    assert sender.call_count == 2
+
+
+def test_unknown_provider_delivery_does_not_acknowledge_second_incident(config):
+    unknown = Mock(side_effect=n.NotificationError('delivery_unknown', unknown=True))
+    first = provider_item()
+    attempt = tick(config, [first], unknown)['attempt']['id']
+    second = provider_item(sequence=2, observed=NOW+2, identity='provider:session:b', incident='b'*64)
+    assert tick(config, [first, second], unknown, NOW+3)['status'] == 'unknown'
+    n.resolve(config, attempt, 'delivered')
+    success = Mock()
+    result = tick(config, [first, second], success, NOW+31)
+    assert result['status'] == 'delivered' and result['count'] == 1
+    success.assert_called_once()
+
+
+def test_preincident_unknown_state_cannot_acknowledge_identified_incident(config):
+    folder = Path(config.state_dir)
+    folder.mkdir(mode=0o700)
+    old = n.Entry(fingerprint=n.digest({'kind': 'provider_permission_wait'}),
+                  authority=n.digest('msg_one'), authority_started_at=NOW-10, authority_sequence=1)
+    old_key = n.digest('old')
+    attempt = n.Attempt(outcome='unknown', members={old_key: old.model_copy(deep=True)})
+    n.save_state(folder, n.DeliveryState(scope=n.scope(config), entries={old_key: old}, attempt=attempt))
+    current = provider_item()
+    assert tick(config, [current], Mock(), NOW+1)['status'] == 'unknown'
+    n.resolve(config, attempt.id, 'delivered')
+    sender = Mock()
+    assert tick(config, [current], sender, NOW+31)['status'] == 'delivered'
+    sender.assert_called_once()
+
+
+def test_provider_incident_survives_default_expiry_and_rate_limit_until_resolution(config):
+    config.min_interval_seconds = 300
+    sender = Mock()
+    assert tick(config, [item('prior')], sender)['status'] == 'delivered'
+
+    def attention(current, resolved=False):
+        observed = datetime.fromtimestamp(NOW+10, timezone.utc).isoformat()
+        rows = [] if resolved else [{
+            'provider': 'opencode', 'session_id': 'session', 'generation_id': 'generation',
+            'generation_started_at': datetime.fromtimestamp(NOW+5, timezone.utc).isoformat(),
+            'incident_id': 'a'*64, 'last_sequence': 1, 'reason': 'permission_wait',
+            'last_observed_at': observed, 'open_provenance': 'opencode.permission.updated',
+            'fresh': current <= NOW+100,
+        }]
+        generated = datetime.fromtimestamp(current, timezone.utc).isoformat()
+        return derive([], [], [], generated, rows)
+
+    assert n.poll(config, attention(NOW+10), sender=sender, current=NOW+10)['status'] == 'backoff'
+    assert n.poll(config, attention(NOW+101), sender=sender, current=NOW+101)['status'] == 'backoff'
+    assert n.poll(config, attention(NOW+301), sender=sender, current=NOW+301)['status'] == 'delivered'
+    assert n.poll(config, attention(NOW+302, resolved=True), sender=sender, current=NOW+302)['status'] == 'quiet'
+    assert sender.call_count == 2
 
 
 def test_details_require_opt_in_and_message_is_bounded(config):

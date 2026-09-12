@@ -24,7 +24,10 @@ Example placeholders (replace paths and URL in your private file):
   "credentials_file": "/path/to/private/pushover.env",
   "state_dir": "/path/to/private/workbench-notification-state",
   "title": "Workbench",
-  "categories": ["approval_needed", "collector_health", "agent_without_active_run"],
+  "categories": [
+    "approval_needed", "agent_without_active_run", "collector_health",
+    "provider_error", "provider_permission_wait", "provider_user_question"
+  ],
   "include_details": false,
   "poll_seconds": 30,
   "min_interval_seconds": 300,
@@ -92,6 +95,15 @@ no existing service needs restarting. `watch` rereads configuration each poll.
   category, progress classification or reason are meaningful. Task-title changes
   count only when title inclusion is enabled. Routine evidence timestamps and poll
   order do not trigger notifications.
+- Provider permission waits, user questions, and provider errors are actionable and
+  selectable. They are enabled by default like the other categories. Strong
+  provider idle is unsupported because its runtime event lacks generation identity;
+  it is never selectable and never sends a push.
+- Provider occurrences use the authoritative generation plus a locally hashed
+  permission, question, or error incident identity. Separate requests in one turn
+  remain separate; repeated evidence does not notify again. A new turn can notify
+  even when the session and reason are unchanged. Older generations, regressed
+  sequences, and contradictory evidence fail closed rather than rearming an alert.
 - Multiple pending items are coalesced into **one summary per delivery**, including
   initial startup and recovery after an outage. Default spacing is five minutes;
   new items wait behind that rate limit. Resolved pending items are removed.
@@ -99,6 +111,15 @@ no existing service needs restarting. `watch` rereads configuration each poll.
   There is no daily reminder. Observing an item's absence in a successful, fresh
   snapshot rearms it: a later outage/request can notify again. Recoveries themselves
   do not send a push. An outage and recovery entirely between polls cannot be seen.
+- Verified unresolved provider incidents remain pending after their 90-second
+  evidence freshness window, with wording that current status is unverified. This
+  lets them survive the default five-minute delivery spacing without pretending
+  stale evidence is fresh. A verified reply/terminal question state, or a newer
+  generation, removes the incident; expiry alone does not prove resolution.
+- The bridge does not emit terminal question evidence unless it emitted the
+  matching open incident. If an older queue already contains such an orphan
+  resolution, the API validates and consumes its exact sequence as a no-op so
+  later valid incidents are not starved; it creates no notification occurrence.
 - Snapshots older than three minutes, more than 30 seconds in the future, malformed
   or older than the last accepted snapshot cannot reset deduplication. Keep clocks
   synchronized. Duplicate identical IDs coalesce; contradictory duplicates fail
@@ -174,7 +195,8 @@ State grows with current eligible items, not the full event history.
 `uv run pytest -q tests/test_notifications.py` uses synthetic snapshots, isolated
 state and mocked HTTP delivery. Coverage includes category selection, content
 privacy, restarts, heartbeat churn, recovery, meaningful changes, bounded retries,
-backoff, acknowledgement checks, invalid credentials, stale/corrupt state, locking,
+provider recurrence and replay rejection, backoff, acknowledgement checks, invalid
+credentials, stale/corrupt state, locking,
 disabled operation and explicit test delivery. Ordinary tests never contact Pushover.
 
 Crash-boundary tests cover claimed-but-not-sent, possible remote acceptance, and

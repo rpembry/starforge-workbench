@@ -42,8 +42,9 @@ def derive(actions, runs, collectors, generated_at, provider_attention=()):
             title='OpenCode session', subject={'resource': 'provider_attention', 'id': observation['session_id']},
             progress=progress, reason=reason, next_action=next_action,
             evidence=[dict(resource='provider_attention', id=observation['session_id'],
-                generation_id=observation['generation_id'], incident_id=observation['incident_id'],
-                sequence=observation['last_sequence'], provenance=observation['open_provenance'],
+                generation_id=observation['generation_id'], generation_started_at=observation['generation_started_at'],
+                incident_id=observation['incident_id'], sequence=observation['last_sequence'],
+                provenance=observation['open_provenance'],
                 timestamps={'observed_at': observation['last_observed_at'], 'fresh_until': fresh_until})])
 
     def approval(action=None, run=None):

@@ -53,6 +53,7 @@ def test_supported_reasons_show_fresh_provenance_without_completing_actions(api)
         assert evidence['timestamps']['fresh_until'] > evidence['timestamps']['observed_at']
         assert api.get('/api/actions/'+accepted['id']).json()['status'] == 'accepted'
         assert evidence['generation_id'] == 'msg_generation' and evidence['sequence'] == sequence
+        assert evidence['generation_started_at']
         assert evidence['provenance'] in api.get('/').text
         api.headers['Authorization'] = 'Bearer '+COLLECTOR
 
