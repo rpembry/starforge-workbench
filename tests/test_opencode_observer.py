@@ -244,3 +244,70 @@ def test_attention_queue_replacement_resets_cursor_by_file_identity(tmp_path, re
         result = scan_attention(api, queue, state)
     assert result == dict(submitted=2, malformed=0, rejected=0, failed=0)
     assert calls == ['/api/provider-attention/generations', '/api/provider-attention/observations']
+
+
+@pytest.mark.parametrize('missing', ['database', 'queue'])
+def test_loop_reports_valid_degraded_heartbeat_and_recovers(tmp_path, monkeypatch, missing):
+    from workbench import opencode_observer as observer
+    from workbench.models import CollectorIn
+    import sys
+
+    state_dir = tmp_path/'state'
+    state_dir.mkdir(mode=0o700)
+    state_path = state_dir/'cursor.json'
+    original = {'cutoff_ms': 0, 'acknowledged': ['previously-accepted']}
+    state_path.write_text(json.dumps(original))
+    db = tmp_path/'missing.db' if missing == 'database' else database(tmp_path)
+    queue = state_dir/'events.jsonl'
+    argv = ['observer', '--database', str(db), '--state', str(state_path),
+            '--credentials-file', str(tmp_path/'unused-credentials')]
+    if missing == 'queue':
+        argv += ['--attention-events', str(queue)]
+    monkeypatch.setattr(sys, 'argv', argv)
+    heartbeats = []
+
+    def accept(request):
+        assert request.url.path == '/api/collectors/heartbeat'
+        payload = json.loads(request.content)
+        CollectorIn.model_validate(payload)
+        heartbeats.append(payload)
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(observer, 'client', lambda **kwargs: httpx.Client(
+        transport=httpx.MockTransport(accept), base_url='https://fixture.invalid'))
+    locks = []
+    flock = observer.fcntl.flock
+    def track_lock(fd, operation):
+        locks.append(fd)
+        return flock(fd, operation)
+    monkeypatch.setattr(observer.fcntl, 'flock', track_lock)
+
+    class Finished(Exception):
+        pass
+
+    def next_scan(seconds):
+        if len(heartbeats) == 2:
+            raise Finished
+        assert len(heartbeats) == 1
+        assert heartbeats[0]['status'] == 'degraded'
+        assert heartbeats[0]['reason'] == 'scan_failed'
+        saved = json.loads(state_path.read_text())
+        assert saved['cutoff_ms'] == original['cutoff_ms']
+        assert saved['acknowledged'] == original['acknowledged']
+        if missing == 'database':
+            assert not db.exists()
+            database(tmp_path).rename(db)
+        else:
+            assert not queue.exists()
+            queue.touch(mode=0o600)
+
+    monkeypatch.setattr(observer.time, 'sleep', next_scan)
+    try:
+        with pytest.raises(Finished):
+            observer.main()
+    finally:
+        for fd in locks:
+            os.close(fd)
+    assert heartbeats[1]['status'] == 'ok'
+    assert heartbeats[1]['reason'] == 'scan_complete'
+    assert heartbeats[0]['instance_id'] == heartbeats[1]['instance_id']
