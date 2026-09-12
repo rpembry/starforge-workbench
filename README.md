@@ -4,6 +4,8 @@ A personal workbench for keeping human commitments, AI activity, and daily atten
 
 I built this around my own tools and working habits, with AI doing much of the implementation. I'm sharing it as a working reference and a launch point for your own system. Expect to adapt it: this is an evolving personal project, not a polished application with a universal installer or a stable compatibility promise.
 
+At a glance, Workbench combines a tmux-based launcher for persistent AI sessions, an authenticated API for shared work state, local collectors that observe provider activity, and a browser dashboard that groups current work and items needing attention. It helps a person track and review work; observations never authorize an agent to act or prove that a task is complete.
+
 **The best way to understand the current feature set is to have your AI inspect the code and tests. This README is an orientation and is not necessarily kept current.** Ask your AI to distinguish implemented behavior from examples, assumptions, and unfinished work. Source inspection is the starting point; running the relevant tests and checking your environment still matter.
 
 ## Start with your AI
