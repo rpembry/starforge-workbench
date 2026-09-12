@@ -19,6 +19,7 @@ packages = ["src/workbench", "src/starforge_workbench"]
 [project.scripts]
 wb-api = "workbench.client:main"
 wb-collect = "workbench.collector:main"
+wb-notify = "workbench.notifications:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
