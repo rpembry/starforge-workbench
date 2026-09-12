@@ -136,3 +136,9 @@ For suspected vulnerabilities or accidental disclosures, use the private reporti
 ## Engineering workflow
 
 See [human-directed agent coordination](docs/multi-agent-coordination.md) for how this project uses GitHub, Workbench, and assigned AI agents to develop and review changes.
+
+### Canonical development repository
+
+This repository is the canonical home for application code, pull requests and issues. The former private development repository is retained as a historical archive. Personal configuration, credentials, operating guidance and runtime data belong outside Git. See [local setup and migration](docs/canonical-development.md).
+
+The optional [Google Keep collector](docs/google-keep-collector.md) reads one configured checklist through an existing browser connection. Its extraction logic has synthetic test coverage; live Google Keep extraction is still unverified.
