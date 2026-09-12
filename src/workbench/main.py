@@ -12,11 +12,15 @@ from starlette.exceptions import HTTPException
 
 from .auth import Auth, CloudflareAuth
 from .models import (ActionIn, ActionPatch, ArtifactIn, EventIn, ObjectiveIn,
-                     RunIn, RunPatch, Transition, CollectorIn, ImportBatch)
+                     RunIn, RunLink, RunPatch, Transition, CollectorIn, ImportBatch,
+                     ProviderAttentionIn, ProviderGenerationIn)
 from .repository import Problem, SQLiteRepository
+from .settings import load_settings
 
 
-def create_app(repository=None, auth=None):
+def create_app(repository=None, auth=None, settings=None):
+    if settings is None:
+        settings = load_settings()
     if auth is None:
         mode = os.environ.get('WB_AUTH_MODE', 'local')
         if mode == 'cloudflare':
@@ -40,6 +44,7 @@ def create_app(repository=None, auth=None):
         repository = SQLiteRepository(Path(path))
     app = FastAPI(title='AI Workbench', version='0.2.0', docs_url=None, redoc_url=None, openapi_url=None)
     app.state.repository = repository
+    app.state.settings = settings
 
     bearer = APIKeyHeader(name='Cf-Access-Jwt-Assertion', auto_error=False, description='Signed identity assertion injected by Cloudflare Access; machine clients authenticate at the edge with service-token headers.') if isinstance(auth, CloudflareAuth) else HTTPBearer(auto_error=False)
 
@@ -49,6 +54,11 @@ def create_app(repository=None, auth=None):
     def operator(who=Depends(principal)):
         if who.role != 'operator':
             raise Problem(403, 'operator_required', 'Collectors cannot commit or alter actions')
+        return who
+
+    def collector(who=Depends(principal)):
+        if who.role != 'collector':
+            raise Problem(403, 'collector_required', 'Only collectors can submit provider observations')
         return who
 
     @app.exception_handler(Problem)
@@ -91,7 +101,7 @@ def create_app(repository=None, auth=None):
     @app.get('/api/reports/{kind}', dependencies=[Depends(operator)])
     def report_data(kind: Literal['accomplishments', 'standup', 'todo']):
         from .reports import report
-        return report(repository, kind)
+        return report(repository, kind, zone=settings.zone)
 
     @app.get('/api/dashboard', dependencies=[Depends(operator)])
     def dashboard():
@@ -122,6 +132,8 @@ def create_app(repository=None, auth=None):
 
     @app.post('/api/actions', status_code=201)
     def action(body: ActionIn, who=Depends(principal)):
+        if body.execution_mode == 'human' and 'actor' not in body.model_fields_set:
+            body.actor = settings.human_name
         if who.role == 'collector' and body.status not in {'observed', 'proposed'}:
             raise Problem(403, 'operator_required', 'Collectors can only propose actions')
         if body.status not in {'observed', 'proposed', 'accepted'}:
@@ -150,6 +162,10 @@ def create_app(repository=None, auth=None):
 
     @app.post('/api/runs', status_code=201)
     def run(body: RunIn, who=Depends(principal)):
+        if body.action_id:
+            raise Problem(409, 'explicit_link_required', 'Create the run first, then link exact current records')
+        if who.role == 'collector' and body.objective_id:
+            raise Problem(403, 'operator_required', 'Collectors cannot assign a process generation to work')
         return repository.create('runs', body.model_dump(mode='json'), who.name)
 
     @app.patch('/api/runs/{identity}')
@@ -159,6 +175,10 @@ def create_app(repository=None, auth=None):
             raise Problem(422, 'invalid_null', 'Run status cannot be null')
         return repository.patch('runs', identity, data, who.name)
 
+    @app.post('/api/actions/{action_id}/runs/{run_id}/link')
+    def link_run(action_id: str, run_id: str, body: RunLink, who=Depends(operator)):
+        return repository.link_run(action_id, run_id, body.model_dump(mode='json'), who.name)
+
     @app.post('/api/imports', status_code=201)
     def import_batch(body: ImportBatch, who=Depends(operator)):
         return repository.import_batch(body.model_dump(mode='json'), who.name)
@@ -166,6 +186,14 @@ def create_app(repository=None, auth=None):
     @app.post('/api/collectors/heartbeat')
     def collector_heartbeat(body: CollectorIn, who=Depends(principal)):
         return repository.collector_heartbeat(body.model_dump(mode='json'), who.name)
+
+    @app.post('/api/provider-attention/generations', status_code=201)
+    def provider_generation(body: ProviderGenerationIn, who=Depends(collector)):
+        return repository.activate_provider_generation(body.model_dump(mode='json'), who.name)
+
+    @app.post('/api/provider-attention/observations', status_code=201)
+    def provider_attention(body: ProviderAttentionIn, who=Depends(collector)):
+        return repository.record_provider_attention(body.model_dump(mode='json'), who.name)
 
     @app.post('/api/artifacts', status_code=201)
     def artifact(body: ArtifactIn, who=Depends(operator)):
@@ -176,7 +204,7 @@ def create_app(repository=None, auth=None):
     @app.get('/reports/{kind}', response_class=HTMLResponse, dependencies=[Depends(operator)])
     def report_view(request: Request, kind: Literal['accomplishments', 'standup', 'todo']):
         from .reports import report
-        return templates.TemplateResponse(request=request, name='report.html', context={'report': report(repository, kind)})
+        return templates.TemplateResponse(request=request, name='report.html', context={'report': report(repository, kind, zone=settings.zone)})
 
     @app.get('/', response_class=HTMLResponse, dependencies=[Depends(operator)])
     def view(request: Request):
@@ -198,7 +226,7 @@ def create_app(repository=None, auth=None):
     def create_human_action(title: str = Form(...), details: str = Form(''), who=Depends(operator)):
         from pydantic import ValidationError
         try:
-            body = ActionIn(title=title, details=details, execution_mode='human', actor='Operator', status='accepted')
+            body = ActionIn(title=title, details=details, execution_mode='human', actor=settings.human_name, status='accepted')
         except ValidationError:
             raise Problem(422, 'validation_error', 'Provide a title of 1–500 characters and details under 10000 characters') from None
         repository.create('actions', body.model_dump(mode='json'), who.name)
