@@ -36,7 +36,8 @@ def derive(actions, runs, collectors, generated_at, provider_attention=()):
         fresh_until = (datetime.fromisoformat(observation['last_observed_at'])+timedelta(seconds=90)).isoformat()
         if not observation['fresh']:
             progress = 'unknown'
-            reason = reason.rstrip('.')+' was observed, but current status is unverified; review the matching session.'
+            reason = ('OpenCode reported this provider attention incident earlier, but current status is '
+                      'unverified; review the matching session.')
         items[identity] = dict(id=identity, kind=kind, priority=priority,
             title='OpenCode session', subject={'resource': 'provider_attention', 'id': observation['session_id']},
             progress=progress, reason=reason, next_action=next_action,
