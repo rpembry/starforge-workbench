@@ -385,3 +385,20 @@ def test_version_one_migration_preserves_acknowledgements_and_holds_uncertain_at
     assert result['status'] == ('unknown' if attempted else 'delivered')
     assert sender.call_count == (0 if attempted else 1)
     assert n.read_state(folder, config).version == 2
+
+
+def test_v1_preview_attempt_id_is_stable_and_resolvable_while_disabled(config):
+    folder = Path(config.state_dir)
+    folder.mkdir(mode=0o700)
+    old = n.LegacyState(scope=n.scope(config), attempts=1,
+        entries={n.digest('fixture'): n.LegacyEntry(fingerprint=n.fingerprint(item(), False))})
+    private_write(folder/'delivery.json', old.model_dump_json())
+    first = tick(config, [item()], Mock(), preview=True)['attempt']['id']
+    assert tick(config, [item()], Mock(), preview=True)['attempt']['id'] == first
+    config.enabled = False
+    n.resolve(config, first, 'delivered')
+    assert n.read_state(folder, config).version == 2
+    config.enabled = True
+    sender = Mock()
+    assert tick(config, [item()], sender)['status'] == 'quiet'
+    sender.assert_not_called()

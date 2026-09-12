@@ -237,12 +237,13 @@ def read_state(folder, config):
         data = json.loads(protected_read(folder/'delivery.json'))
         if data.get('version') == 1:
             old = LegacyState.model_validate(data)
-            entries = {key: Entry(**entry.model_dump(), outcome='delivered' if entry.delivered else 'pending',
+            migration_id = digest(data)
+            entries = {key: Entry(**entry.model_dump(), occurrence=digest([migration_id, key]), outcome='delivered' if entry.delivered else 'pending',
                                   blocked=old.blocked, failures=old.attempts if not entry.delivered else 0)
                        for key, entry in old.entries.items()}
             pending = {key: entry.model_copy(deep=True) for key, entry in entries.items() if not entry.delivered}
             # V1 cannot prove whether an unacknowledged attempt reached the service.
-            attempt = Attempt(outcome='unknown', members=pending) if old.attempts and pending else None
+            attempt = Attempt(id=migration_id, outcome='unknown', members=pending) if old.attempts and pending else None
             state = DeliveryState(scope=old.scope, entries=entries, not_before=old.not_before,
                                   last_snapshot=old.last_snapshot, delivered_at=old.delivered_at, attempt=attempt)
         else:
