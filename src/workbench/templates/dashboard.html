@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AI Workbench</title>
+<title>Starforge Workbench</title><link rel="icon" type="image/png" href="/assets/workbench-logo.png">
 <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"selfRequestsOnly":true,"historyCacheSize":0,"includeIndicatorStyles":false}'>
 <script src="/assets/htmx.min.js" defer></script>
 <script src="/assets/task-form.js" defer></script>
@@ -9,6 +9,6 @@
 a{color:#91b9ee}label{display:block;margin:12px 0}input,textarea{display:block;width:100%;box-sizing:border-box;background:#101722;color:#e5ebf3;border:1px solid #52657b;border-radius:6px;padding:10px;font:inherit}button{background:#91b9ee;color:#101722;border:0;border-radius:6px;padding:9px 14px;font:inherit;cursor:pointer}.capture{margin:24px 0}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #f5b971}footer{font-size:13px}
 </style>
 <nav aria-label="Main navigation"><a href="/guide"><strong>Everyday guide &amp; startup</strong></a> · <a href="/reports/standup">Standup</a> · <a href="/reports/accomplishments">Accomplishments</a> · <a href="/reports/todo">Actions</a></nav>
-<header><p class="muted">PERSONAL CONTROL PLANE</p><h1 style="display:flex;align-items:center;gap:14px"><img src="/assets/workbench-logo.png" width="64" height="64" alt="">AI Workbench</h1><p>Use your Workbench conversation to capture, review, and complete actions.</p><small>Snapshot {{ dashboard.generated_at }} · dashboard refreshes every 15 seconds</small></header>
+<header><p class="muted">PERSONAL CONTROL PLANE</p><h1 style="display:flex;align-items:center;gap:14px;flex-wrap:wrap"><img src="/assets/workbench-logo.png" width="64" height="64" alt="">Starforge Workbench</h1><p>Use your Workbench conversation to capture, review, and complete actions.</p><small>Snapshot {{ dashboard.generated_at }} · dashboard refreshes every 15 seconds</small></header>
 <section class="capture"><h2>CREATE A HUMAN ACTION</h2><form id="human-action-form" hx-disabled-elt="find button" hx-post="/ui/actions" hx-target="#action-result"><label>Task <input id="action-title" name="title" required maxlength="500" placeholder="What do you need to do?"></label><label>Details <textarea name="details" maxlength="10000" rows="2"></textarea></label><button type="submit">Create task</button><div id="action-result" aria-live="polite"></div></form></section>
 {% include 'sections.html' %}<footer>Observations do not commit actions. Autonomy levels are advisory; this service does not execute tasks.</footer></html>
