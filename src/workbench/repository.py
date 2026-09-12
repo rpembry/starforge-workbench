@@ -288,13 +288,14 @@ class SQLiteRepository:
                         last_observed_at=observed_at, resolved_at=None, open_provenance=data['provenance'],
                         resolution_provenance=None, last_sequence=data['sequence'], recorded_at=now(), recorded_by=principal))
             else:
-                if not incident or incident['state'] != 'open':
+                if incident and incident['state'] != 'open':
                     raise Problem(409, 'incident_not_open', 'Provider incident is not currently open')
-                db.execute('''UPDATE provider_attention_incidents SET state='resolved', resolved_at=?,
-                    resolution_provenance=?, last_sequence=?, recorded_at=?, recorded_by=?
-                    WHERE provider=? AND session_id=? AND generation_id=? AND incident_id=?''',
-                    (observed_at, data['provenance'], data['sequence'], now(), principal, data['provider'],
-                     data['session_id'], data['generation_id'], data['incident_id']))
+                if incident:
+                    db.execute('''UPDATE provider_attention_incidents SET state='resolved', resolved_at=?,
+                        resolution_provenance=?, last_sequence=?, recorded_at=?, recorded_by=?
+                        WHERE provider=? AND session_id=? AND generation_id=? AND incident_id=?''',
+                        (observed_at, data['provenance'], data['sequence'], now(), principal, data['provider'],
+                         data['session_id'], data['generation_id'], data['incident_id']))
             update = dict(last_sequence=data['sequence'], reason=data['reason'], observed_at=observed_at,
                            observation_provenance=data['provenance'], recorded_at=now(), recorded_by=principal)
             db.execute('''UPDATE provider_attention SET last_sequence=:last_sequence, reason=:reason,
@@ -306,7 +307,10 @@ class SQLiteRepository:
                 WHERE provider=? AND session_id=? AND generation_id=? AND incident_id=?''',
                 (data['provider'], data['session_id'], data['generation_id'], data['incident_id'])).fetchone()
             db.commit()
-            return dict(result)
+            return dict(result) if result else {
+                'provider': data['provider'], 'session_id': data['session_id'],
+                'generation_id': data['generation_id'], 'incident_id': data['incident_id'],
+                'sequence': data['sequence'], 'state': 'ignored_orphan_resolution'}
 
     def dashboard(self):
         with self.connection() as db:

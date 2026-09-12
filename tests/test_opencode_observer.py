@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 from workbench.opencode_observer import scan, scan_attention
+from test_api import COLLECTOR, OPERATOR, api, repo
 
 
 def database(tmp_path):
@@ -122,6 +123,59 @@ await hooks.event({{event:{{type:"session.status",properties:{{sessionID:"ses_te
     assert all(len(record['incident_id']) == 64 for record in observations)
     assert observations[-1]['generation_id'] == 'msg_new'
     assert records[-1]['generation_id'] == 'msg_resume'
+
+
+def test_orphan_terminal_queue_recovery_reaches_real_api_and_later_events(tmp_path, api):
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node.js is required to execute the synthetic OpenCode plugin fixture')
+    queue = tmp_path/'attention.jsonl'
+    plugin = Path(__file__).parents[1]/'config/opencode-attention.example.js'
+    test_plugin = tmp_path/'opencode-attention.mjs'
+    shutil.copyfile(plugin, test_plugin)
+    script = f'''import plugin from {json.dumps(test_plugin.as_uri())};
+const hooks = await plugin();
+await hooks["chat.message"]({{sessionID:"ses_orphan",messageID:"msg_generation"}},
+  {{message:{{id:"msg_generation",role:"user",time:{{created:Date.now()-1000}}}}}});
+await hooks.event({{event:{{type:"message.updated",properties:{{info:
+  {{id:"asst",sessionID:"ses_orphan",role:"assistant",parentID:"msg_generation",time:{{created:Date.now()-900}}}}}}}}}});
+const part = (callID, status) => {{
+  const value = {{id:"part_"+callID,sessionID:"ses_orphan",messageID:"asst",type:"tool",
+    tool:"question",callID,state:{{status,input:{{private:"PRIVATE"}}}}}};
+  return hooks.event({{event:{{type:"message.part.updated",properties:{{part:value}}}}}});
+}};
+await part("orphan_call", "error");
+await hooks["tool.execute.before"]({{tool:"question",sessionID:"ses_orphan",callID:"orphan_call"}},
+  {{args:{{private:"PRIVATE"}}}});
+await hooks.event({{event:{{type:"permission.updated",properties:
+  {{id:"valid_permission",sessionID:"ses_orphan",messageID:"asst",metadata:{{private:"PRIVATE"}}}}}}}});
+await part("valid_question", "running");
+await hooks["tool.execute.before"]({{tool:"question",sessionID:"ses_orphan",callID:"valid_question"}},
+  {{args:{{private:"PRIVATE"}}}});
+'''
+    env = dict(os.environ, WB_OPENCODE_ATTENTION_EVENTS=str(queue))
+    subprocess.run([node, '--input-type=module', '-e', script], check=True, env=env)
+    records = [json.loads(line) for line in queue.read_text().splitlines()]
+    observations = [record for record in records if record['kind'] == 'observation']
+    assert [(record['reason'], record['sequence']) for record in observations] == [
+        ('permission_wait', 1), ('user_question', 2)]
+    assert 'orphan_call' not in queue.read_text() and 'PRIVATE' not in queue.read_text()
+
+    # Model a queue already written by the previous bridge: consume the orphan as
+    # a verified no-op so its following contiguous records remain deliverable.
+    orphan = {**observations[1], 'incident_id': 'f'*64, 'sequence': 1,
+              'observed_at': records[0]['started_at'],
+              'state': 'resolved', 'provenance': 'opencode.question.completed'}
+    observations[0]['sequence'] = 2
+    observations[1]['sequence'] = 3
+    queue.write_text(''.join(json.dumps(record)+'\n' for record in [records[0], orphan, *observations]))
+    api.headers['Authorization'] = 'Bearer '+COLLECTOR
+    state = {}
+    assert scan_attention(api, queue, state) == dict(submitted=4, malformed=0, rejected=0, failed=0)
+    assert scan_attention(api, queue, state) == dict(submitted=0, malformed=0, rejected=0, failed=0)
+    api.headers['Authorization'] = 'Bearer '+OPERATOR
+    kinds = [item['kind'] for item in api.get('/api/attention').json()['items']]
+    assert set(kinds) == {'provider_permission_wait', 'provider_user_question'}
 
 
 def test_attention_queue_restart_replay_and_failure_ordering(tmp_path):

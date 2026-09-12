@@ -72,7 +72,10 @@ these structured hooks only:
   as idle because OpenCode also completes intermediate tool-call messages.
 - `message.part.updated` links a tool `callID` to its assistant message and
   originating generation before a question callback can be classified. A
-  terminal `completed` or `error` state explicitly resolves that question.
+  terminal `completed` or `error` state explicitly resolves that question only
+  when the bridge emitted its open observation first. An orphan terminal part
+  is ignored before sequence allocation and suppresses a delayed before hook
+  for the same call.
 - `permission.updated` becomes `permission_wait` only after its assistant
   message has been linked to the current generation. `permission.replied`
   explicitly resolves the same permission identity.
@@ -110,6 +113,12 @@ clock, rejects duplicate/out-of-order evidence, and rejects a generation whose
 OpenCode creation time is not newer than the current generation. Provider
 creation time and plugin wall-clock observation time must be timezone-aware;
 the API rejects clocks more than five minutes in the future.
+
+Queues written by the earlier bridge may already contain an orphan resolution.
+After validating its generation, source, provenance, clock, and exact next
+sequence, the API records that sequence as an ignored no-op without creating or
+closing an incident. This permits the next queued record to proceed. A
+resolution for an incident that exists but is already closed remains rejected.
 
 After observer restart, its byte cursor resumes the queue using byte offset,
 filesystem device, and inode. Replacement always resets to byte zero, including

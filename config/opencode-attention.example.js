@@ -30,7 +30,8 @@ export default async function opencodeAttention() {
     if (!sessionID || !messageID || typeof created !== 'number') return
     const current = sessions.get(sessionID)
     if (current?.id === messageID) return
-    const state = {id: messageID, sequence: 0, lastTime: created, messages: new Map(), calls: new Map(), permissions: new Map(), emitted: new Set()}
+    const state = {id: messageID, sequence: 0, lastTime: created, messages: new Map(), calls: new Map(),
+      permissions: new Map(), terminalCalls: new Set(), emitted: new Set()}
     append({kind: 'generation', provider: 'opencode', session_id: sessionID,
       generation_id: messageID, source: 'opencode-plugin', source_instance: sourceInstance,
       started_at: new Date(created).toISOString(), provenance: 'opencode.chat.message'})
@@ -39,8 +40,10 @@ export default async function opencodeAttention() {
 
   function observe(sessionID, generationID, reason, provenance, identity, stateName = 'open') {
     const state = sessions.get(sessionID)
+    if (!state || state.id !== generationID) return
     const key = stateName+':'+reason+':'+identity
-    if (!state || state.id !== generationID || state.emitted.has(key)) return
+    if (stateName === 'resolved' && !state.emitted.has('open:'+reason+':'+identity)) return
+    if (state.emitted.has(key)) return
     const sequence = state.sequence+1
     const observed = Math.max(Date.now(), state.lastTime+1)
     append({kind: 'observation', provider: 'opencode', session_id: sessionID,
@@ -74,6 +77,7 @@ export default async function opencodeAttention() {
           state.calls.set(part.callID, generationID)
           if (part.tool === 'question' && ['completed', 'error'].includes(part.state?.status)) {
             observe(part.sessionID, generationID, 'user_question', 'opencode.question.completed', part.callID, 'resolved')
+            state.terminalCalls.add(part.callID)
           }
         }
       }
@@ -94,6 +98,7 @@ export default async function opencodeAttention() {
     'tool.execute.before': async (input) => {
       if (input.tool !== 'question') return
       const state = sessions.get(input.sessionID)
+      if (state?.terminalCalls.has(input.callID)) return
       const generationID = state?.calls.get(input.callID)
       observe(input.sessionID, generationID, 'user_question', 'opencode.tool.question', input.callID)
     },

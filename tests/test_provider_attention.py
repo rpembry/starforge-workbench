@@ -97,9 +97,22 @@ def test_distinct_incidents_repeat_and_explicit_resolution(api):
     assert len(items) == 2 and len({item['id'] for item in items}) == 2
     api.headers['Authorization'] = 'Bearer '+COLLECTOR
     assert observation(api, 'permission_wait', sequence=4, incident=first, state='resolved').status_code == 201
+    closed = observation(api, 'permission_wait', sequence=5, incident=first, state='resolved')
+    assert closed.status_code == 409 and closed.json()['error']['code'] == 'incident_not_open'
     api.headers['Authorization'] = 'Bearer '+OPERATOR
     items = [item for item in api.get('/api/attention').json()['items'] if item['kind'] == 'provider_permission_wait']
     assert len(items) == 1 and items[0]['evidence'][0]['incident_id'] == second
+
+
+def test_queued_orphan_resolution_advances_sequence_without_incident(api):
+    api.headers['Authorization'] = 'Bearer '+COLLECTOR
+    generation(api)
+    orphan = observation(api, 'user_question', incident='c'*64, state='resolved')
+    assert orphan.status_code == 201 and orphan.json()['state'] == 'ignored_orphan_resolution'
+    assert observation(api, 'permission_wait', sequence=2, incident='d'*64).status_code == 201
+    api.headers['Authorization'] = 'Bearer '+OPERATOR
+    items = api.get('/api/attention').json()['items']
+    assert [item['kind'] for item in items] == ['provider_permission_wait']
 
 
 def test_auth_boundaries_validation_and_schema_upgrade(api, repo):
