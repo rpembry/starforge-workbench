@@ -1,5 +1,7 @@
 # Contributing
 
+See [human-directed agent coordination](docs/multi-agent-coordination.md) for assignments, review handoffs, GitHub/Workbench responsibilities, and provenance.
+
 Feedback, adaptations, bug reports, and small pull requests are welcome. Open an issue or discussion for a broad change so we can compare it with existing tools first. Email Randall Embry at rpembry@gmail.com if you prefer.
 
 Describe the problem, the resulting behavior, and how you checked it. Include your source commit and relevant platform/provider versions. Use synthetic examples instead of personal records. AI-assisted contributions are welcome; understand and verify what you submit.

@@ -125,3 +125,7 @@ For suspected vulnerabilities or accidental disclosures, use the private reporti
 ## License
 
 [MIT](LICENSE), copyright 2026 Randall Embry. You may adapt and redistribute it, including commercially, under the license terms. Contributions back are appreciated, not required. Vendored HTMX retains its [Zero-Clause BSD license](src/workbench/static/htmx-LICENSE.txt).
+
+## Engineering workflow
+
+See [human-directed agent coordination](docs/multi-agent-coordination.md) for how this project uses GitHub, Workbench, and assigned AI agents to develop and review changes.
