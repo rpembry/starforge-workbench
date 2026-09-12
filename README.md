@@ -5,6 +5,10 @@ For everyday use, open **Everyday guide & startup** from the dashboard navigatio
 
 A personal workbench for keeping human commitments, AI activity, and daily attention in one place.
 
+![Simulated AI Workbench dashboard showing task capture, attention, active collectors, next actions, and recent activity](docs/images/dashboard-simulated.png)
+
+*Simulated screenshot composed from two dashboard views, with illustrative activity. It is not a live status report.*
+
 I built this around my own tools and working habits, with AI doing much of the implementation. I'm sharing it as a working reference and a launch point for your own system. Expect to adapt it: this is an evolving personal project, not a polished application with a universal installer or a stable compatibility promise.
 
 At a glance, Workbench combines a tmux-based launcher for persistent AI sessions, an authenticated API for shared work state, local collectors that observe provider activity, and a browser dashboard that groups current work and items needing attention. It helps a person track and review work; observations never authorize an agent to act or prove that a task is complete.
