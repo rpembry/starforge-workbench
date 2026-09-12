@@ -94,7 +94,8 @@ published `@opencode-ai/plugin` and `@opencode-ai/sdk` `1.18.30` TypeScript
 declarations and pinned runtime source ([plugin package](https://www.npmjs.com/package/@opencode-ai/plugin/v/1.18.30),
 [SDK package](https://www.npmjs.com/package/@opencode-ai/sdk/v/1.18.30),
 [prompt loop](https://github.com/anomalyco/opencode/blob/v1.18.30/packages/opencode/src/session/prompt.ts),
-[run state](https://github.com/anomalyco/opencode/blob/v1.18.30/packages/opencode/src/session/run-state.ts)). It uses
+[run state](https://github.com/anomalyco/opencode/blob/v1.18.30/packages/opencode/src/session/run-state.ts),
+[runtime permission schema](https://github.com/anomalyco/opencode/blob/v1.18.30/packages/schema/src/v1/permission.ts)). It uses
 these structured hooks only:
 
 - `chat.message` activates a turn generation using the user message ID and its
@@ -108,9 +109,11 @@ these structured hooks only:
   when the bridge emitted its open observation first. An orphan terminal part
   is ignored before sequence allocation and suppresses a delayed before hook
   for the same call.
-- `permission.updated` becomes `permission_wait` only after its assistant
-  message has been linked to the current generation. `permission.replied`
-  explicitly resolves the same permission identity.
+- `permission.asked` becomes `permission_wait` only after its nested
+  `tool.messageID` has been linked to the current generation. `permission.replied`
+  resolves the same permission identity through `requestID`. Requests without
+  a linked tool identity remain unknown. The API also accepts the old
+  `opencode.permission.updated` provenance for already queued evidence.
 - `tool.execute.before` becomes `user_question` only for OpenCode's built-in
   `question` tool and a call ID previously linked to the current generation.
   Its arguments are discarded.
@@ -139,7 +142,7 @@ unauthenticated callers cannot submit them.
 An attention event cannot promote its own generation. Assistant parent IDs and
 permission message links prevent late records from an older turn from being
 attributed to a newer turn. The plugin assigns a contiguous sequence because
-the verified legacy plugin event contract does not expose event sequence
+the plugin event contract does not expose event sequence
 numbers. The API requires the next sequence and a strictly newer observation
 clock, rejects duplicate/out-of-order evidence, and rejects a generation whose
 OpenCode creation time is not newer than the current generation. Provider
@@ -172,8 +175,9 @@ OpenCode `1.18.30`'s session status and idle events do not carry a generation,
 so strong idle is unsupported. The generation-less `session.error` event also
 remains ignored. The bridge does not distinguish authentication, rate-limit, or
 other provider error subtypes. Subagents and child sessions need separate validation.
-No live-provider smoke check is included: existing sessions were not used as
-fixtures, so live support remains unverified. These observations never change
+A [disposable live smoke check](opencode-attention-live-smoke.md) verified
+question and permission lifecycles with OpenCode 1.18.30 and OpenAI Sol.
+Typed provider errors remain fixture-tested only. These observations never change
 an action, approve a request, authorize execution, or establish task
 completion.
 

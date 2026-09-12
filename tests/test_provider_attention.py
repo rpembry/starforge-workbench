@@ -22,7 +22,7 @@ def generation(api, session='ses_fixture', identity='msg_generation', started_at
 def observation(api, reason, sequence=1, session='ses_fixture', identity='msg_generation',
                 observed_at=None, incident=None, state='open', provenance=None):
     provenance = provenance or {
-        ('permission_wait', 'open'): 'opencode.permission.updated',
+        ('permission_wait', 'open'): 'opencode.permission.asked',
         ('permission_wait', 'resolved'): 'opencode.permission.replied',
         ('user_question', 'open'): 'opencode.tool.question',
         ('user_question', 'resolved'): 'opencode.question.completed',
