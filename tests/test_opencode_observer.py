@@ -88,6 +88,8 @@ await tool("asst_old", "call_one");
 await tool("asst_old", "call_late");
 await hooks.event({{event:{{type:"permission.updated",properties:{{id:"per_one",sessionID:"ses_test",messageID:"asst_old",metadata:{{secret:"PRIVATE"}}}}}}}});
 await hooks["tool.execute.before"]({{tool:"question",sessionID:"ses_test",callID:"call_one"}},{{args:{{question:"PRIVATE QUESTION"}}}});
+await hooks.event({{event:{{type:"permission.updated",properties:{{id:"per_one",sessionID:"ses_test",messageID:"asst_old",metadata:{{secret:"PRIVATE"}}}}}}}});
+await hooks["tool.execute.before"]({{tool:"question",sessionID:"ses_test",callID:"call_one"}},{{args:{{question:"PRIVATE QUESTION"}}}});
 await hooks.event({{event:{{type:"permission.replied",properties:{{sessionID:"ses_test",permissionID:"per_one",response:"once"}}}}}});
 await tool("asst_old", "call_one", "completed");
 await assistant("asst_old", "msg_old", {{finish:"tool-calls",time:{{created:Date.now()-500,completed:Date.now()}}}});
@@ -109,6 +111,7 @@ await hooks.event({{event:{{type:"session.status",properties:{{sessionID:"ses_te
     raw = queue.read_text()
     records = [json.loads(line) for line in raw.splitlines()]
     assert 'PRIVATE' not in raw
+    assert 'per_one' not in raw and 'call_one' not in raw
     assert [record['kind'] for record in records] == ['generation', 'observation', 'observation', 'observation', 'observation', 'generation', 'observation', 'generation']
     assert [record.get('reason') for record in records if record['kind'] == 'observation'] == [
         'permission_wait', 'user_question', 'permission_wait', 'user_question', 'provider_error']
