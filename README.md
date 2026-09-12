@@ -59,6 +59,15 @@ Some important distinctions guide the implementation:
 
 See [`src/workbench/main.py`](src/workbench/main.py), [the models](src/workbench/models.py), [attention derivation](src/workbench/attention.py), and [repository/state transitions](src/workbench/repository.py).
 
+### Optional attention notifications
+
+The separate `wb-notify` worker can send Pushover summaries of new or meaningfully
+changed attention items. It is disabled by default, keeps credentials and delivery
+state outside Git, suppresses unchanged alerts across restarts, and uses generic
+text unless title inclusion is explicitly enabled. Delivery never changes task
+commitments or runs. See [notification setup and policy](docs/notifications.md) for
+preview, explicit test delivery, retries, privacy and operational limits.
+
 ### Codex, Claude, and OpenCode collectors
 
 Collectors run locally and submit observations to the central API with a separate credential role. Their health is tracked independently. Cursors or acknowledged identities support restart recovery and duplicate suppression.
@@ -68,7 +77,7 @@ Collectors run locally and submit observations to the central API with a separat
 | Launcher/process collector | tmux metadata and Linux process metadata | Provider presence, process lifetime, and available activity timestamps. It does not read terminal contents. |
 | Codex observer | Local session JSONL records | Brief, attributed accomplishment summaries selected by a completion-word heuristic. **These summaries contain derived response text**; raw transcripts remain local. Sensitive-pattern filtering is limited and is not a general data-loss-prevention system. |
 | Claude observer | Local Claude assistant records | Allowlisted activity types, timestamps, and record/session identity. Prompt, response, reasoning, and tool payload text remain local. |
-| OpenCode observer | OpenCode's local SQLite message records, opened read-only | Allowlisted metadata for completed assistant messages. Message text, reasoning, tool payloads, and authentication data remain local. OpenCode is treated as a distinct application regardless of its model provider. |
+| OpenCode observer | OpenCode's local SQLite message records, opened read-only; optionally a private minimized plugin-event queue | Allowlisted metadata for completed assistant messages and, when explicitly configured, generation-checked permission, question, or provider-error incidents. Message text, questions, errors, reasoning, tool payloads, and authentication data remain local. OpenCode is treated as a distinct application regardless of its model provider. |
 
 The Codex observer still includes a bootstrap dependency on the legacy Worklog schema used during my migration. A new user should inspect and adapt that path rather than assume every collector is ready to enable. Claude and OpenCode also depend on provider-specific local formats that can change.
 

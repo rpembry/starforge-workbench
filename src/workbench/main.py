@@ -12,7 +12,8 @@ from starlette.exceptions import HTTPException
 
 from .auth import Auth, CloudflareAuth
 from .models import (ActionIn, ActionPatch, ArtifactIn, EventIn, ObjectiveIn,
-                     RunIn, RunPatch, Transition, CollectorIn, ImportBatch)
+                     RunIn, RunPatch, Transition, CollectorIn, ImportBatch,
+                     ProviderAttentionIn, ProviderGenerationIn)
 from .repository import Problem, SQLiteRepository
 from .settings import load_settings
 
@@ -53,6 +54,11 @@ def create_app(repository=None, auth=None, settings=None):
     def operator(who=Depends(principal)):
         if who.role != 'operator':
             raise Problem(403, 'operator_required', 'Collectors cannot commit or alter actions')
+        return who
+
+    def collector(who=Depends(principal)):
+        if who.role != 'collector':
+            raise Problem(403, 'collector_required', 'Only collectors can submit provider observations')
         return who
 
     @app.exception_handler(Problem)
@@ -172,6 +178,14 @@ def create_app(repository=None, auth=None, settings=None):
     @app.post('/api/collectors/heartbeat')
     def collector_heartbeat(body: CollectorIn, who=Depends(principal)):
         return repository.collector_heartbeat(body.model_dump(mode='json'), who.name)
+
+    @app.post('/api/provider-attention/generations', status_code=201)
+    def provider_generation(body: ProviderGenerationIn, who=Depends(collector)):
+        return repository.activate_provider_generation(body.model_dump(mode='json'), who.name)
+
+    @app.post('/api/provider-attention/observations', status_code=201)
+    def provider_attention(body: ProviderAttentionIn, who=Depends(collector)):
+        return repository.record_provider_attention(body.model_dump(mode='json'), who.name)
 
     @app.post('/api/artifacts', status_code=201)
     def artifact(body: ArtifactIn, who=Depends(operator)):

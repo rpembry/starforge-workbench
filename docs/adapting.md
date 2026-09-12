@@ -8,6 +8,10 @@ Copy `config/workbench.example.yaml` to `config/workbench.yaml` (ignored by Git)
 
 Provider executables are discovered on PATH, with historical installation-path fallbacks in `PROVIDERS`. The launcher still expects Linux process metadata, tmux, and zsh. The desktop bridge uses `/usr/bin/python3` with GObject introspection and the installed Ptyxis schemas. An optional `~/bin/ren.sh` title helper is attempted; its absence does not prevent provider startup. CLI flags, resume catalogs, and provider installations are expected adaptation points.
 
+Launcher metadata probes are bounded and distinguish confirmed absence from unknown
+state. See [tmux probe behavior](tmux-probes.md) for recovery semantics and isolated
+test coverage. Interactive attachment remains unbounded.
+
 Runtime state, locks, and exact conversation bindings live under `~/.local/state/starforge-ai-workbench`. The dedicated tmux server is also named `starforge-ai-workbench`. Do not run this copy alongside another installation using that same runtime namespace without first isolating it.
 
 ## Isolated local API
@@ -81,6 +85,97 @@ action uses `human_name`; an explicitly supplied actor, provider identity, and
 stored record are not changed. Reporting timezone affects report calculations
 and metadata only. Historical date-only imports retain their legacy timezone
 provenance and are not rewritten or reinterpreted.
+
+## OpenCode attention observations
+
+The optional [`config/opencode-attention.example.js`](../config/opencode-attention.example.js)
+bridge targets OpenCode `1.18.30`. Its contract was verified against the
+published `@opencode-ai/plugin` and `@opencode-ai/sdk` `1.18.30` TypeScript
+declarations and pinned runtime source ([plugin package](https://www.npmjs.com/package/@opencode-ai/plugin/v/1.18.30),
+[SDK package](https://www.npmjs.com/package/@opencode-ai/sdk/v/1.18.30),
+[prompt loop](https://github.com/anomalyco/opencode/blob/v1.18.30/packages/opencode/src/session/prompt.ts),
+[run state](https://github.com/anomalyco/opencode/blob/v1.18.30/packages/opencode/src/session/run-state.ts)). It uses
+these structured hooks only:
+
+- `chat.message` activates a turn generation using the user message ID and its
+  OpenCode creation time.
+- `message.updated` links an assistant message to its parent user message. A
+  typed error becomes `provider_error`. Completion timestamps are not treated
+  as idle because OpenCode also completes intermediate tool-call messages.
+- `message.part.updated` links a tool `callID` to its assistant message and
+  originating generation before a question callback can be classified. A
+  terminal `completed` or `error` state explicitly resolves that question only
+  when the bridge emitted its open observation first. An orphan terminal part
+  is ignored before sequence allocation and suppresses a delayed before hook
+  for the same call.
+- `permission.updated` becomes `permission_wait` only after its assistant
+  message has been linked to the current generation. `permission.replied`
+  explicitly resolves the same permission identity.
+- `tool.execute.before` becomes `user_question` only for OpenCode's built-in
+  `question` tool and a call ID previously linked to the current generation.
+  Its arguments are discarded.
+- Generation-less `session.status` and `session.idle` events are ignored. They
+  cannot safely attribute delayed idle, cancel, queued-turn, or resume ordering
+  to a user-message generation.
+
+The bridge writes a private local JSONL queue. It is disabled when
+`WB_OPENCODE_ATTENTION_EVENTS` is unset. To adapt it, create an owned directory
+with mode `0700`, copy the example into an OpenCode plugin directory, point the
+environment variable at an absolute queue path in that directory, and pass the
+same path to `workbench.opencode_observer --attention-events`. OpenCode loads
+plugins at startup, so restart OpenCode after installing or changing the local
+copy. Do not point two bridge instances at one queue.
+
+The bridge emits only provider/session IDs, user-message generation ID, a
+SHA-256 incident identity derived locally from a permission, question call, or
+assistant-message ID, bridge instance ID, fixed state/reason/provenance values,
+sequence, and timestamps. It
+never writes prompts, responses, reasoning, questions, error messages, tool
+arguments, permission patterns, model output, or credentials. The existing
+observer submits these records with its collector credential; operators and
+unauthenticated callers cannot submit them.
+
+`chat.message` is the only authority that can establish a current generation.
+An attention event cannot promote its own generation. Assistant parent IDs and
+permission message links prevent late records from an older turn from being
+attributed to a newer turn. The plugin assigns a contiguous sequence because
+the verified legacy plugin event contract does not expose event sequence
+numbers. The API requires the next sequence and a strictly newer observation
+clock, rejects duplicate/out-of-order evidence, and rejects a generation whose
+OpenCode creation time is not newer than the current generation. Provider
+creation time and plugin wall-clock observation time must be timezone-aware;
+the API rejects clocks more than five minutes in the future.
+
+Queues written by the earlier bridge may already contain an orphan resolution.
+After validating its generation, source, provenance, clock, and exact next
+sequence, the API records that sequence as an ignored no-op without creating or
+closing an incident. This permits the next queued record to proceed. A
+resolution for an incident that exists but is already closed remains rejected.
+
+After observer restart, its byte cursor resumes the queue using byte offset,
+filesystem device, and inode. Replacement always resets to byte zero, including
+an equal-sized or larger replacement; same-file truncation resets when its size
+falls below the offset. A response lost
+after an accepted write is safe: replay is rejected as a duplicate and then
+acknowledged locally. Queue rotation replays from the beginning against the
+same server checks. Plugin restart intentionally forgets in-memory turn state;
+until a new `chat.message` establishes a generation, lifecycle events are
+ignored and status remains unknown. Verified permission and question replies
+resolve their matching incidents; a newer generation supersedes incidents from
+the prior turn. An unresolved incident remains visible after 90 seconds with
+explicitly stale wording so a notification rate limit cannot erase it. It does
+not claim the request is still open. A stopped bridge, missing queue, or missed
+resolution therefore leaves current status unknown; process and collector
+observations remain the fallback.
+
+OpenCode `1.18.30`'s session status and idle events do not carry a generation,
+so strong idle is unsupported. The generation-less `session.error` event also
+remains ignored. The bridge does not distinguish authentication, rate-limit, or
+other provider error subtypes. Subagents and child sessions need separate validation.
+No live-provider smoke check is included: existing sessions were not used as
+fixtures, so live support remains unverified. These observations never change
+an action, approve a request, authorize execution, or establish task
+completion.
 
 ## Verification
 

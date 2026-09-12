@@ -55,9 +55,11 @@ class SQLiteRepository:
                 db.execute('INSERT INTO schema_migrations VALUES (?, ?)', (1, now()))
                 db.commit()
             versions = [r[0] for r in db.execute('SELECT version FROM schema_migrations ORDER BY version')]
-            if versions not in ([1], [1, 2], [1, 2, 3]):
+            if versions not in ([1], [1, 2], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5]):
                 raise RuntimeError('Unsupported database schema version')
-            for version, filename in [(2, '002_collectors.sql'), (3, '003_imports.sql')]:
+            for version, filename in [(2, '002_collectors.sql'), (3, '003_imports.sql'),
+                                      (4, '004_provider_attention.sql'),
+                                      (5, '005_provider_attention_incidents.sql')]:
                 if version not in versions:
                     migration = Path(__file__).with_name('migrations')/filename
                     db.executescript('BEGIN IMMEDIATE;\n'+migration.read_text())
@@ -207,6 +209,109 @@ class SQLiteRepository:
             db.commit()
             return row
 
+    def activate_provider_generation(self, data, principal):
+        from datetime import datetime, timedelta, timezone
+        data = dict(data)
+        data['generation_started_at'] = data.pop('started_at')
+        data['generation_provenance'] = data.pop('provenance')
+        started = datetime.fromisoformat(data['generation_started_at'])
+        if started > datetime.now(timezone.utc)+timedelta(minutes=5):
+            raise Problem(422, 'invalid_observation_clock', 'Provider generation clock is too far in the future')
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT * FROM provider_attention WHERE provider=? AND session_id=?',
+                             (data['provider'], data['session_id'])).fetchone()
+            if old and old['recorded_by'] != principal:
+                raise Problem(403, 'provider_attention_owner', 'Provider session belongs to another collector principal')
+            if old and old['generation_id'] == data['generation_id']:
+                immutable = ('generation_started_at', 'source', 'source_instance', 'generation_provenance')
+                if any(old[key] != data[key] for key in immutable):
+                    raise Problem(409, 'generation_conflict', 'Generation identity already has different provenance')
+                return dict(old)
+            if old and started <= datetime.fromisoformat(old['generation_started_at']):
+                raise Problem(409, 'stale_generation', 'An older provider generation cannot become current')
+            row = dict(data, last_sequence=0, reason=None, observed_at=None,
+                       observation_provenance=None, recorded_at=now(), recorded_by=principal)
+            if old:
+                assignments = ','.join(key+'=:'+key for key in row if key not in {'provider', 'session_id'})
+                db.execute(f'''UPDATE provider_attention SET {assignments}
+                    WHERE provider=:provider AND session_id=:session_id''', row)
+            else:
+                self.insert(db, 'provider_attention', row)
+            result = db.execute('SELECT * FROM provider_attention WHERE provider=? AND session_id=?',
+                                (row['provider'], row['session_id'])).fetchone()
+            db.commit()
+            return dict(result)
+
+    def record_provider_attention(self, data, principal):
+        from datetime import datetime, timedelta, timezone
+        data = dict(data)
+        observed = datetime.fromisoformat(data['observed_at'])
+        if observed > datetime.now(timezone.utc)+timedelta(minutes=5):
+            raise Problem(422, 'invalid_observation_clock', 'Provider observation clock is too far in the future')
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT * FROM provider_attention WHERE provider=? AND session_id=?',
+                             (data['provider'], data['session_id'])).fetchone()
+            if not old or old['generation_id'] != data['generation_id']:
+                raise Problem(409, 'stale_generation', 'Observation is not for the authoritative current generation')
+            if old['recorded_by'] != principal:
+                raise Problem(403, 'provider_attention_owner', 'Provider session belongs to another collector principal')
+            if old['source'] != data['source'] or old['source_instance'] != data['source_instance']:
+                raise Problem(409, 'generation_conflict', 'Observation provenance does not own this generation')
+            if data['sequence'] == old['last_sequence']:
+                raise Problem(409, 'duplicate_observation', 'Observation sequence was already recorded')
+            if data['sequence'] != old['last_sequence']+1:
+                raise Problem(409, 'out_of_order_observation', 'Observation sequence does not follow current evidence')
+            observed_at = data['observed_at']
+            if observed < datetime.fromisoformat(old['generation_started_at']) or (old['observed_at'] and observed <= datetime.fromisoformat(old['observed_at'])):
+                raise Problem(409, 'out_of_order_observation', 'Observation clock is not newer than current evidence')
+            incident = db.execute('''SELECT * FROM provider_attention_incidents
+                WHERE provider=? AND session_id=? AND generation_id=? AND incident_id=?''',
+                (data['provider'], data['session_id'], data['generation_id'], data['incident_id'])).fetchone()
+            if incident and incident['reason'] != data['reason']:
+                raise Problem(409, 'incident_conflict', 'Provider incident identity has different provenance')
+            if data['state'] == 'open':
+                if incident and incident['state'] != 'open':
+                    raise Problem(409, 'incident_closed', 'Resolved provider incident cannot reopen')
+                if incident and incident['open_provenance'] != data['provenance']:
+                    raise Problem(409, 'incident_conflict', 'Provider incident identity has different provenance')
+                if incident:
+                    db.execute('''UPDATE provider_attention_incidents SET last_observed_at=?, last_sequence=?,
+                        recorded_at=?, recorded_by=? WHERE provider=? AND session_id=? AND generation_id=? AND incident_id=?''',
+                        (observed_at, data['sequence'], now(), principal, data['provider'], data['session_id'],
+                         data['generation_id'], data['incident_id']))
+                else:
+                    self.insert(db, 'provider_attention_incidents', dict(
+                        provider=data['provider'], session_id=data['session_id'], generation_id=data['generation_id'],
+                        incident_id=data['incident_id'], reason=data['reason'], state='open', opened_at=observed_at,
+                        last_observed_at=observed_at, resolved_at=None, open_provenance=data['provenance'],
+                        resolution_provenance=None, last_sequence=data['sequence'], recorded_at=now(), recorded_by=principal))
+            else:
+                if incident and incident['state'] != 'open':
+                    raise Problem(409, 'incident_not_open', 'Provider incident is not currently open')
+                if incident:
+                    db.execute('''UPDATE provider_attention_incidents SET state='resolved', resolved_at=?,
+                        resolution_provenance=?, last_sequence=?, recorded_at=?, recorded_by=?
+                        WHERE provider=? AND session_id=? AND generation_id=? AND incident_id=?''',
+                        (observed_at, data['provenance'], data['sequence'], now(), principal, data['provider'],
+                         data['session_id'], data['generation_id'], data['incident_id']))
+            update = dict(last_sequence=data['sequence'], reason=data['reason'], observed_at=observed_at,
+                           observation_provenance=data['provenance'], recorded_at=now(), recorded_by=principal)
+            db.execute('''UPDATE provider_attention SET last_sequence=:last_sequence, reason=:reason,
+                observed_at=:observed_at, observation_provenance=:observation_provenance,
+                recorded_at=:recorded_at, recorded_by=:recorded_by
+                WHERE provider=:provider AND session_id=:session_id''',
+                dict(update, provider=data['provider'], session_id=data['session_id']))
+            result = db.execute('''SELECT * FROM provider_attention_incidents
+                WHERE provider=? AND session_id=? AND generation_id=? AND incident_id=?''',
+                (data['provider'], data['session_id'], data['generation_id'], data['incident_id'])).fetchone()
+            db.commit()
+            return dict(result) if result else {
+                'provider': data['provider'], 'session_id': data['session_id'],
+                'generation_id': data['generation_id'], 'incident_id': data['incident_id'],
+                'sequence': data['sequence'], 'state': 'ignored_orphan_resolution'}
+
     def dashboard(self):
         with self.connection() as db:
             actions = [dict(r) for r in db.execute('SELECT * FROM actions ORDER BY priority, due_date IS NULL, due_date, created_at')]
@@ -223,11 +328,21 @@ class SQLiteRepository:
                 age = (current-datetime.fromisoformat(collector['heartbeat_at'])).total_seconds()
                 collector['heartbeat_age_seconds'] = max(0, int(age))
                 collector['health'] = 'offline' if age > 90 else collector['status']
+            provider_attention = [dict(r) for r in db.execute('''SELECT i.*,g.generation_started_at
+                FROM provider_attention_incidents i JOIN provider_attention g
+                  ON g.provider=i.provider AND g.session_id=i.session_id AND g.generation_id=i.generation_id
+                WHERE i.state='open' ORDER BY i.provider,i.session_id,i.opened_at,i.incident_id''')]
+            for observation in provider_attention:
+                stamp = observation['last_observed_at']
+                age = (current-datetime.fromisoformat(stamp)).total_seconds()
+                observation['freshness_age_seconds'] = max(0, int(age))
+                observation['fresh'] = bool(observation['reason']) and age <= 90
             committed = {'accepted', 'in_progress', 'waiting', 'approval_needed'}
             from .attention import derive
             stamp = current.isoformat()
             return dict(generated_at=stamp, collectors=collectors,
-                attention=derive(actions, runs, collectors, stamp),
+                attention=derive(actions, runs, collectors, stamp, provider_attention),
+                provider_attention=provider_attention,
                 quarantined_imports=db.execute("SELECT count(*) FROM import_records WHERE disposition='quarantined'").fetchone()[0],
                 needs_you={'collectors': [c for c in collectors if c['health'] != 'ok'], 'actions': [a for a in actions if a['status'] in committed and (a['execution_mode'] in {'human', 'waiting'} or a['status'] in {'waiting', 'approval_needed'})],
                            'runs': [r for r in runs if not r['stale'] and r['status'] in {'waiting', 'approval_needed'}]},
