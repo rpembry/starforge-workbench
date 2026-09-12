@@ -1,0 +1,18 @@
+[Unit]
+Description=AI Workbench local Codex accomplishment observer
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/starforge-ai-workbench/collector-current/.venv/bin/python -m workbench.codex_observer --bootstrap-file %h/.config/starforge-ai-workbench/worklog-bootstrap.json --state %h/.local/state/starforge-ai-workbench/codex-observer/cursors.json --credentials-file %h/.config/starforge-ai-workbench/collector.json --interval 30
+UnsetEnvironment=WB_API_URL WB_CLIENT_CONFIG WB_CREDENTIALS_FILE
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

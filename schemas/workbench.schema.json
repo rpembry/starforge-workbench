@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Manual workbench manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "autostart",
+    "contexts"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "autostart": {
+      "const": false
+    },
+    "contexts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "cwd",
+          "provider",
+          "resume_policy",
+          "risk",
+          "enabled",
+          "startup_enabled",
+          "additional_cwds",
+          "environment_files"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,47}$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "enum": [
+              "codex",
+              "claude",
+              "antigravity",
+              "ollama",
+              "opencode"
+            ]
+          },
+          "resume_policy": {
+            "enum": [
+              "never",
+              "picker",
+              "last-in-directory",
+              "explicit-session",
+              "prompt"
+            ]
+          },
+          "risk": {
+            "enum": [
+              "local",
+              "company-dev",
+              "cloud-infrastructure",
+              "production"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "startup_enabled": {
+            "const": false
+          },
+          "additional_cwds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "environment_files": {
+            "type": "array",
+            "maxItems": 0
+          },
+          "disabled_reason": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

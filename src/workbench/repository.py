@@ -1,0 +1,238 @@
+"""SQLite repository boundary. Only the service opens the database."""
+import json
+import os
+import sqlite3
+import uuid
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Protocol
+
+from .models import now
+
+
+class Problem(Exception):
+    def __init__(self, status, code, message):
+        self.status, self.code, self.message = status, code, message
+
+
+class Repository(Protocol):
+    def list(self, resource: str, limit: int = 100, offset: int = 0) -> list[dict]: ...
+    def get(self, resource: str, identity: str) -> dict: ...
+    def create(self, resource: str, data: dict, principal: str) -> dict: ...
+    def patch(self, resource: str, identity: str, data: dict, principal: str) -> dict: ...
+
+
+TABLES = {'objectives', 'actions', 'runs', 'events', 'artifacts', 'collectors', 'import_batches', 'import_records'}
+TRANSITIONS = {
+    'observed': {'proposed', 'rejected'},
+    'proposed': {'accepted', 'rejected', 'approval_needed'},
+    'accepted': {'in_progress', 'done', 'waiting', 'approval_needed', 'canceled'},
+    'in_progress': {'done', 'waiting', 'approval_needed', 'canceled'},
+    'waiting': {'accepted', 'in_progress', 'done', 'canceled'},
+    'approval_needed': {'accepted', 'rejected', 'canceled'},
+    'done': set(), 'rejected': set(), 'canceled': set(),
+}
+
+
+class SQLiteRepository:
+    def __init__(self, path: Path):
+        self.path = path
+        if path.is_symlink() or path.parent.is_symlink():
+            raise RuntimeError('Database and state directory must not be symlinks')
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if path.parent.stat().st_uid != os.getuid() or path.parent.stat().st_mode & 0o077:
+            raise RuntimeError('Database directory must be owned by this user with mode 0700')
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        os.close(fd)
+        if path.stat().st_uid != os.getuid() or path.stat().st_mode & 0o077:
+            raise RuntimeError('Database file must be owned by this user with mode 0600')
+        with self.connection() as db:
+            db.execute('PRAGMA journal_mode=WAL')
+            exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='schema_migrations'").fetchone()
+            if not exists:
+                migration = Path(__file__).with_name('migrations')/'001_initial.sql'
+                db.executescript('BEGIN IMMEDIATE;\n'+migration.read_text())
+                db.execute('INSERT INTO schema_migrations VALUES (?, ?)', (1, now()))
+                db.commit()
+            versions = [r[0] for r in db.execute('SELECT version FROM schema_migrations ORDER BY version')]
+            if versions not in ([1], [1, 2], [1, 2, 3]):
+                raise RuntimeError('Unsupported database schema version')
+            for version, filename in [(2, '002_collectors.sql'), (3, '003_imports.sql')]:
+                if version not in versions:
+                    migration = Path(__file__).with_name('migrations')/filename
+                    db.executescript('BEGIN IMMEDIATE;\n'+migration.read_text())
+                    db.execute('INSERT INTO schema_migrations VALUES (?, ?)', (version, now()))
+                    db.commit()
+
+    @contextmanager
+    def connection(self):
+        db = sqlite3.connect(self.path, timeout=5)
+        db.row_factory = sqlite3.Row
+        db.execute('PRAGMA foreign_keys=ON')
+        try:
+            yield db
+        finally:
+            db.close()
+
+    @staticmethod
+    def table(resource):
+        if resource not in TABLES:
+            raise Problem(404, 'not_found', 'Unknown resource')
+        return resource
+
+    def list(self, resource, limit=100, offset=0):
+        table = self.table(resource)
+        order = 'occurred_at DESC, id' if table == 'events' else 'rowid DESC'
+        with self.connection() as db:
+            return [dict(r) for r in db.execute(f'SELECT * FROM {table} ORDER BY {order} LIMIT ? OFFSET ?', (limit, offset))]
+
+    def get(self, resource, identity):
+        with self.connection() as db:
+            return self._get(db, resource, identity)
+
+    def _get(self, db, resource, identity):
+        row = db.execute(f'SELECT * FROM {self.table(resource)} WHERE id=?', (identity,)).fetchone()
+        if not row:
+            raise Problem(404, 'not_found', 'Resource does not exist')
+        return dict(row)
+
+    @staticmethod
+    def insert(db, table, data):
+        columns = ','.join(data)
+        db.execute(f'INSERT INTO {table} ({columns}) VALUES ({",".join("?" for _ in data)})', tuple(data.values()))
+
+    def audit(self, db, action_id, summary, principal, details=''):
+        self.insert(db, 'events', dict(id=str(uuid.uuid4()), kind='action_transition', summary=summary,
+            details=details, project=None, action_id=action_id, run_id=None, source='workbench-api',
+            source_id=str(uuid.uuid4()), occurred_at=now(), recorded_at=now(), recorded_by=principal))
+
+    def create(self, resource, data, principal):
+        table = self.table(resource)
+        data = dict(data)
+        with self.connection() as db:
+            try:
+                db.execute('BEGIN IMMEDIATE')
+                # Stable collector IDs deduplicate retries. Changed immutable observations
+                # and action intent conflict instead of silently overwriting a previous fact.
+                if table in {'events', 'actions', 'runs'} and data.get('source_id'):
+                    row = db.execute(f'SELECT * FROM {table} WHERE source=? AND source_id=?', (data['source'], data['source_id'])).fetchone()
+                    if row:
+                        if table == 'runs':
+                            if row['context'] != data['context'] or row['provider'] != data['provider']:
+                                raise Problem(409, 'identity_conflict', 'Run identity cannot change context or provider')
+                            if data['started_at'] != row['started_at']:
+                                raise Problem(409, 'identity_conflict', 'A process restart requires a new run identity')
+                            # A heartbeat cannot erase operator-assigned work or an
+                            # explicit waiting/approval state with process-presence data.
+                            update = {k: data[k] for k in ['last_activity_at', 'activity_basis']}
+                            if row['status'] not in {'waiting', 'approval_needed'}:
+                                update['status'] = data['status']
+                            update.update(heartbeat_at=now(), version=row['version']+1)
+                            self._update(db, table, row['id'], update)
+                        elif any(row[k] != v for k, v in data.items() if not (k == 'occurred_at' and v is None)):
+                            raise Problem(409, 'idempotency_conflict', 'Source ID already exists with different content')
+                        result = self._get(db, table, row['id'])
+                        db.commit()
+                        return result
+                data['id'] = str(uuid.uuid4())
+                if table == 'events':
+                    data.update(occurred_at=data.get('occurred_at') or now(), recorded_at=now(), recorded_by=principal)
+                elif table == 'runs':
+                    data.update(heartbeat_at=now(), version=1)
+                else:
+                    data['created_at'] = now()
+                    if table == 'actions':
+                        data.update(updated_at=now(), version=1)
+                self.insert(db, table, data)
+                if table == 'actions':
+                    self.audit(db, data['id'], 'Action '+data['status'], principal)
+                db.commit()
+                return data
+            except sqlite3.IntegrityError:
+                raise Problem(409, 'constraint_conflict', 'Related resource missing or identity already exists') from None
+
+    @staticmethod
+    def _update(db, table, identity, data):
+        db.execute(f'UPDATE {table} SET {",".join(k+"=?" for k in data)} WHERE id=?', (*data.values(), identity))
+
+    def patch(self, resource, identity, data, principal):
+        if resource not in {'actions', 'runs'}:
+            raise Problem(405, 'immutable', 'This resource cannot be edited')
+        data = dict(data)
+        with self.connection() as db:
+            try:
+                db.execute('BEGIN IMMEDIATE')
+                old = self._get(db, resource, identity)
+                version = data.pop('version')
+                if old['version'] != version:
+                    raise Problem(409, 'version_conflict', 'Read the latest resource before updating it')
+                if resource == 'actions':
+                    target = data.get('status', old['status'])
+                    if target != old['status'] and target not in TRANSITIONS[old['status']]:
+                        raise Problem(409, 'invalid_transition', f'Cannot move {old["status"]} to {target}')
+                    data.update(updated_at=now())
+                    self.audit(db, identity, 'Action '+target, principal,
+                               json.dumps({'from': old['status'], 'to': target, 'changed_fields': sorted(data)}))
+                data['version'] = version+1
+                self._update(db, resource, identity, data)
+                result = self._get(db, resource, identity)
+                db.commit()
+                return result
+            except sqlite3.IntegrityError:
+                raise Problem(409, 'constraint_conflict', 'Related resource missing or invalid field') from None
+
+    def import_batch(self, data, principal):
+        from .legacy import apply_batch
+        return apply_batch(self, data, principal)
+
+    def collector_heartbeat(self, data, principal):
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT * FROM collectors WHERE source=?', (data['source'],)).fetchone()
+            if old and old['recorded_by'] != principal:
+                raise Problem(403, 'collector_owner', 'Collector identity belongs to another principal')
+            stamp = now()
+            row = dict(data, id=old['id'] if old else str(uuid.uuid4()), heartbeat_at=stamp,
+                       last_success_at=stamp if data['status'] == 'ok' else (old['last_success_at'] if old else None),
+                       recorded_by=principal)
+            if old:
+                self._update(db, 'collectors', old['id'], row)
+            else:
+                self.insert(db, 'collectors', row)
+            if not old or old['status'] != row['status'] or old['instance_id'] != row['instance_id']:
+                self.insert(db, 'events', dict(id=str(uuid.uuid4()), kind='observation',
+                    summary='Collector '+row['source']+': '+row['status'], details=row['reason'],
+                    project='AI Workbench', action_id=None, run_id=None, source='collector-health',
+                    source_id=str(uuid.uuid4()), occurred_at=stamp, recorded_at=stamp, recorded_by=principal))
+            db.commit()
+            return row
+
+    def dashboard(self):
+        with self.connection() as db:
+            actions = [dict(r) for r in db.execute('SELECT * FROM actions ORDER BY priority, due_date IS NULL, due_date, created_at')]
+            runs = [dict(r) for r in db.execute('SELECT * FROM runs ORDER BY heartbeat_at DESC')]
+            from datetime import datetime, timezone
+            current = datetime.now(timezone.utc)
+            for run in runs:
+                age = (current-datetime.fromisoformat(run['heartbeat_at'])).total_seconds()
+                run['stale'] = age > 90
+                run['heartbeat_age_seconds'] = max(0, int(age))
+                run['elapsed_seconds'] = max(0, int((current-datetime.fromisoformat(run['started_at'])).total_seconds()))
+            collectors = [dict(r) for r in db.execute('SELECT * FROM collectors ORDER BY source')]
+            for collector in collectors:
+                age = (current-datetime.fromisoformat(collector['heartbeat_at'])).total_seconds()
+                collector['heartbeat_age_seconds'] = max(0, int(age))
+                collector['health'] = 'offline' if age > 90 else collector['status']
+            committed = {'accepted', 'in_progress', 'waiting', 'approval_needed'}
+            from .attention import derive
+            stamp = current.isoformat()
+            return dict(generated_at=stamp, collectors=collectors,
+                attention=derive(actions, runs, collectors, stamp),
+                quarantined_imports=db.execute("SELECT count(*) FROM import_records WHERE disposition='quarantined'").fetchone()[0],
+                needs_you={'collectors': [c for c in collectors if c['health'] != 'ok'], 'actions': [a for a in actions if a['status'] in committed and (a['execution_mode'] in {'human', 'waiting'} or a['status'] in {'waiting', 'approval_needed'})],
+                           'runs': [r for r in runs if not r['stale'] and r['status'] in {'waiting', 'approval_needed'}]},
+                active=[r for r in runs if not r['stale'] and r['status'] in {'running', 'waiting', 'approval_needed'}],
+                stale_runs=[r for r in runs if r['stale'] and r['status'] != 'stopped'],
+                next=[a for a in actions if a['status'] == 'accepted'],
+                suggestions=[a for a in actions if a['status'] in {'observed', 'proposed'}],
+                recent=[dict(r) for r in db.execute('SELECT * FROM events ORDER BY occurred_at DESC, id LIMIT 50')])

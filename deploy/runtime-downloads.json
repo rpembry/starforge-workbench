@@ -1,0 +1,14 @@
+[
+  {
+    "name": "uv-x86_64-unknown-linux-gnu.tar.gz",
+    "version": "0.12.13",
+    "url": "https://github.com/astral-sh/uv/releases/download/0.12.13/uv-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "745765a3b6e360ad76743599ae5c42e9278c7edf8bbff9fc76d05bf2623a04dd"
+  },
+  {
+    "name": "cloudflared-linux-amd64",
+    "version": "2026.9.1",
+    "url": "https://github.com/cloudflare/cloudflared/releases/download/2026.9.1/cloudflared-linux-amd64",
+    "sha256": "03f1f25d1cc93b9ad6c60569d44060bc4f17ed97075760ed8cfca4b12dcd68cc"
+  }
+]

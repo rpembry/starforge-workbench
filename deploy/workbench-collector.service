@@ -1,0 +1,20 @@
+[Unit]
+Description=AI Workbench read-only launcher collector
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/starforge-ai-workbench/collector-current/.venv/bin/wb-collect --manifest %h/starforge-workbench/config/workbench.yaml --credentials-file %h/.config/starforge-ai-workbench/collector.json --context ai-workbench --context opencode --context claude-code --interval 30
+UnsetEnvironment=WB_API_URL WB_CLIENT_CONFIG WB_CREDENTIALS_FILE
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+# Keep the host /proc and /tmp view: tmux's existing socket lives in /tmp.
+# The collector only inspects metadata; it must not start or control providers.
+
+[Install]
+WantedBy=default.target

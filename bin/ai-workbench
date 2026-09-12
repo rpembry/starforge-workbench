@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd -- "$(dirname -- "$(readlink -f -- "$0")")/.." && pwd)"
+if [[ ! -x "$ROOT/.venv/bin/python" ]]; then
+  echo "Run uv sync in $ROOT before using the launcher." >&2
+  exit 2
+fi
+exec "$ROOT/.venv/bin/python" "$ROOT/src/starforge_workbench/cli.py" "$@"
