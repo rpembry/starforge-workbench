@@ -12,6 +12,7 @@ import uuid
 from unittest.mock import patch
 
 import yaml
+from tmux_guard import cleanup_fixture_server, guarded_tmux_run
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,13 +32,11 @@ class StartupIntegration(unittest.TestCase):
             cli.SERVER = server
             cli.TMUX_SOCKET = folder/'fixture.sock'
             original_run = cli.run
+            guarded_run = guarded_tmux_run(original_run, folder/'fixture.sock', environ={})
             def isolated_run(args, **kwargs):
                 if args[0] == '/usr/bin/tmux':
-                    self.assertIn('-S', args)
-                    self.assertEqual(args[args.index('-S')+1], str(folder/'fixture.sock'))
-                    self.assertNotIn('-L', args)
                     self.assertEqual(kwargs.get('cwd'), Path('/'))
-                return original_run(args, **kwargs)
+                return guarded_run(args, **kwargs)
             cli.run = isolated_run
             cli.HOME = folder
             fixture = folder/'provider'
@@ -115,7 +114,7 @@ m.main(sys.argv[1:])
             finally:
                 os.chdir(original_cwd)
                 assert cli.TMUX_SOCKET == folder/'fixture.sock'
-                subprocess.run(['tmux', '-S', str(folder/'fixture.sock'), 'kill-server'], capture_output=True, timeout=3)
+                cleanup_fixture_server(folder/'fixture.sock')
 
 
 if __name__ == '__main__':

@@ -42,6 +42,10 @@ The conversation is the everyday control surface: ask what needs attention, reco
 - Startup has bounded retries for early failures. The code also contains Antigravity and Ollama adapters. Provider commands, paths, local record schemas, and terminal behavior are compatibility points to inspect before using them on your machine.
 
 See [`src/starforge_workbench/`](src/starforge_workbench/) and the [example manifest](config/workbench.example.yaml).
+Provider compatibility claims and their evidence level are tracked in the
+[capability matrix](docs/provider-capabilities.md). Recheck that matrix and use
+its opt-in smoke procedure after provider upgrades; fixture coverage is not a
+claim that a real provider version was exercised end to end.
 
 ### Shared work state and attention
 
