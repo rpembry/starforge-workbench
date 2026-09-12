@@ -33,6 +33,8 @@
 !/tests/keep_collector.test.mjs
 !/docs/
 !/docs/*.md
+!/docs/images/
+!/docs/images/dashboard-simulated.png
 !/deploy/
 !/deploy/*.py
 !/deploy/*.sh
