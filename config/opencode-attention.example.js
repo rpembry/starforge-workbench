@@ -81,18 +81,18 @@ export default async function opencodeAttention() {
           }
         }
       }
-      if (event.type === 'permission.updated') {
+      if (event.type === 'permission.asked') {
         const permission = event.properties
         const state = sessions.get(permission.sessionID)
-        const generationID = state?.messages.get(permission.messageID)
+        const generationID = state?.messages.get(permission.tool?.messageID)
         if (state && generationID === state.id) state.permissions.set(permission.id, generationID)
-        observe(permission.sessionID, generationID, 'permission_wait', 'opencode.permission.updated', permission.id)
+        observe(permission.sessionID, generationID, 'permission_wait', 'opencode.permission.asked', permission.id)
       }
       if (event.type === 'permission.replied') {
         const reply = event.properties
         const state = sessions.get(reply.sessionID)
-        const generationID = state?.permissions.get(reply.permissionID)
-        observe(reply.sessionID, generationID, 'permission_wait', 'opencode.permission.replied', reply.permissionID, 'resolved')
+        const generationID = state?.permissions.get(reply.requestID)
+        observe(reply.sessionID, generationID, 'permission_wait', 'opencode.permission.replied', reply.requestID, 'resolved')
       }
     },
     'tool.execute.before': async (input) => {
