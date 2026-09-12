@@ -177,3 +177,12 @@ def test_everyday_guide_navigation_assets_and_access(api):
     assert api.get('/guide').status_code == 403
     api.headers.clear()
     assert api.get('/guide').status_code == 401
+
+
+def test_browser_policy_allows_only_same_origin_images(api):
+    for path in ['/', '/guide']:
+        policy = api.get(path).headers['content-security-policy']
+        directives = dict(part.strip().split(' ', 1) for part in policy.split(';'))
+        assert directives['img-src'] == "'self'"
+        assert directives['default-src'] == "'none'"
+        assert directives['script-src'] == "'self'"
