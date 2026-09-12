@@ -14,9 +14,12 @@ from .auth import Auth, CloudflareAuth
 from .models import (ActionIn, ActionPatch, ArtifactIn, EventIn, ObjectiveIn,
                      RunIn, RunPatch, Transition, CollectorIn, ImportBatch)
 from .repository import Problem, SQLiteRepository
+from .settings import load_settings
 
 
-def create_app(repository=None, auth=None):
+def create_app(repository=None, auth=None, settings=None):
+    if settings is None:
+        settings = load_settings()
     if auth is None:
         mode = os.environ.get('WB_AUTH_MODE', 'local')
         if mode == 'cloudflare':
@@ -40,6 +43,7 @@ def create_app(repository=None, auth=None):
         repository = SQLiteRepository(Path(path))
     app = FastAPI(title='AI Workbench', version='0.2.0', docs_url=None, redoc_url=None, openapi_url=None)
     app.state.repository = repository
+    app.state.settings = settings
 
     bearer = APIKeyHeader(name='Cf-Access-Jwt-Assertion', auto_error=False, description='Signed identity assertion injected by Cloudflare Access; machine clients authenticate at the edge with service-token headers.') if isinstance(auth, CloudflareAuth) else HTTPBearer(auto_error=False)
 
@@ -91,7 +95,7 @@ def create_app(repository=None, auth=None):
     @app.get('/api/reports/{kind}', dependencies=[Depends(operator)])
     def report_data(kind: Literal['accomplishments', 'standup', 'todo']):
         from .reports import report
-        return report(repository, kind)
+        return report(repository, kind, zone=settings.zone)
 
     @app.get('/api/dashboard', dependencies=[Depends(operator)])
     def dashboard():
@@ -122,6 +126,8 @@ def create_app(repository=None, auth=None):
 
     @app.post('/api/actions', status_code=201)
     def action(body: ActionIn, who=Depends(principal)):
+        if body.execution_mode == 'human' and 'actor' not in body.model_fields_set:
+            body.actor = settings.human_name
         if who.role == 'collector' and body.status not in {'observed', 'proposed'}:
             raise Problem(403, 'operator_required', 'Collectors can only propose actions')
         if body.status not in {'observed', 'proposed', 'accepted'}:
@@ -176,7 +182,7 @@ def create_app(repository=None, auth=None):
     @app.get('/reports/{kind}', response_class=HTMLResponse, dependencies=[Depends(operator)])
     def report_view(request: Request, kind: Literal['accomplishments', 'standup', 'todo']):
         from .reports import report
-        return templates.TemplateResponse(request=request, name='report.html', context={'report': report(repository, kind)})
+        return templates.TemplateResponse(request=request, name='report.html', context={'report': report(repository, kind, zone=settings.zone)})
 
     @app.get('/', response_class=HTMLResponse, dependencies=[Depends(operator)])
     def view(request: Request):
@@ -198,7 +204,7 @@ def create_app(repository=None, auth=None):
     def create_human_action(title: str = Form(...), details: str = Form(''), who=Depends(operator)):
         from pydantic import ValidationError
         try:
-            body = ActionIn(title=title, details=details, execution_mode='human', actor='Operator', status='accepted')
+            body = ActionIn(title=title, details=details, execution_mode='human', actor=settings.human_name, status='accepted')
         except ValidationError:
             raise Problem(422, 'validation_error', 'Provide a title of 1–500 characters and details under 10000 characters') from None
         repository.create('actions', body.model_dump(mode='json'), who.name)
