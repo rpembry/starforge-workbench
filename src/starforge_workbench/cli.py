@@ -24,6 +24,8 @@ SELF = ROOT / 'bin/ai-workbench'
 HOME = Path.home()
 STATE = HOME / '.local/state/starforge-ai-workbench'
 SERVER = 'starforge-ai-workbench'
+TMUX_SOCKET = None  # Optional explicit socket, primarily for isolated integration tests.
+TMUX_TIMEOUT = 3
 PROVIDERS = {'opencode': str(HOME/'.opencode/bin/opencode'), 'codex': str(HOME/'bin/codex'), 'claude': str(HOME/'.local/share/npm-global/lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64/claude'),
              'antigravity': str(HOME/'.local/bin/agy'), 'ollama': str(HOME/'.local/bin/ollama')}
 # Prefer the user's installed command; retain fallbacks for existing setups.
@@ -103,35 +105,103 @@ def lock(name, blocking=True):
 def run(args, **kwargs):
     return subprocess.run(args, env=clean_env(), text=True, **kwargs)
 
+class TmuxUnknown(ValueError):
+    """No mutation may be inferred from this failed/uncertain observation."""
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__('tmux state unknown: '+reason+'; preserve sessions and retry inspection')
+
+
+def tmux_command(*args):
+    socket = ['-S', str(TMUX_SOCKET)] if TMUX_SOCKET is not None else ['-L', SERVER]
+    return ['/usr/bin/tmux', '-f', str(ROOT/'config/tmux.conf'), *socket, *args]
+
+
 def tmux(*args, check=True):
-    p = run(['/usr/bin/tmux', '-f', str(ROOT/'config/tmux.conf'), '-L', SERVER, *args], capture_output=True)
+    try:
+        p = run(tmux_command(*args), capture_output=True, timeout=TMUX_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise TmuxUnknown('timeout') from None
+    except (OSError, UnicodeError):
+        raise TmuxUnknown('transport_error') from None
     if check and p.returncode:
-        raise ValueError('tmux: '+p.stderr.strip())
+        raise TmuxUnknown('command_failed')
     return p
+
+
+def probe(*args, allow_missing_server=False):
+    result = tmux(*args, check=False)
+    if result.returncode:
+        error = result.stderr.strip()
+        # Only a missing socket is confirmed absence. Refused connections and a
+        # stale socket are uncertain: a server may be starting or recovering.
+        if allow_missing_server and not result.stdout and error == 'no sessions':
+            return None
+        match = re.fullmatch(r'error connecting to (.+) \(No such file or directory\)', error)
+        if allow_missing_server and not result.stdout and match:
+            socket = Path(match[1])
+            if (TMUX_SOCKET is not None and socket != Path(TMUX_SOCKET)) or (TMUX_SOCKET is None and socket.name != SERVER):
+                raise TmuxUnknown('unexpected_socket')
+            try:
+                socket.lstat()
+            except FileNotFoundError:
+                return None
+            except OSError:
+                pass
+        reason = 'protocol_mismatch' if 'protocol version mismatch' in error else 'probe_failed'
+        raise TmuxUnknown(reason)
+    if result.stderr.strip():
+        raise TmuxUnknown('unexpected_diagnostics')
+    return result.stdout
+
 
 def session(c):
     return 'sfwb-'+c['id']
 
+
 def target(c):
-    result = tmux('list-sessions', '-F', '#{session_name}|#{session_id}', check=False)
-    for line in result.stdout.splitlines():
-        name, identity = line.split('|', 1)
+    output = probe('list-sessions', '-F', '#{session_name}|#{session_id}', allow_missing_server=True)
+    if output is None:
+        return None
+    identities, names = set(), set()
+    found = None
+    if not output.strip():
+        raise TmuxUnknown('empty_session_list')
+    for line in output.splitlines():
+        parts = line.split('|')
+        if len(parts) != 2 or not parts[0] or not re.fullmatch(r'\$[0-9]+', parts[1]):
+            raise TmuxUnknown('malformed_session_list')
+        name, identity = parts
+        if name in names or identity in identities:
+            raise TmuxUnknown('ambiguous_session_list')
+        names.add(name); identities.add(identity)
         if name == session(c):
-            return identity
-    return None
+            found = identity
+    return found
+
+
+def required_target(c):
+    identity = target(c)
+    if identity is None:
+        raise TmuxUnknown('session_disappeared')
+    return identity
 
 
 def live(c):
     identity = target(c)
     if identity is None:
-        return None
-    p = tmux('display-message', '-p', '-t', identity, '#{session_attached}|#{pane_dead}|#{@sfwb_binding}|#{pane_pid}', check=False)
-    if p.returncode:
-        return None
-    attached, dead, binding, pane_pid = p.stdout.strip().split('|', 3)
+        return None  # Confirmed absence only; unknown observations raise above.
+    output = probe('display-message', '-p', '-t', identity,
+                   '#{session_attached}|#{pane_dead}|#{@sfwb_binding}|#{pane_pid}')
+    parts = output.strip().split('|')
+    if (len(parts) != 4 or not re.fullmatch(r'[0-9]+', parts[0]) or parts[1] not in {'0', '1'}
+            or not re.fullmatch(r'[a-f0-9]{64}', parts[2]) or not re.fullmatch(r'[1-9][0-9]*', parts[3])):
+        raise TmuxUnknown('malformed_pane_state')
+    attached, dead, binding, pane_pid = parts
     if binding != fingerprint(c):
         raise ValueError('Existing session binding changed; do not reattach: '+c['id'])
-    return {'attached': int(attached), 'dead': dead == '1', 'pane_pid': int(pane_pid)}
+    return {'attached': int(attached), 'dead': dead == '1', 'pane_pid': int(pane_pid), 'identity': identity}
+
 
 def provider_pids(c, pane_pid, proc_root=Path('/proc')):
     # Inspect only process metadata, never terminal output or provider environments.
@@ -273,8 +343,24 @@ ALIASES = {
 }
 
 def managed_ttys():
-    result = run(['/usr/bin/tmux', '-L', SERVER, 'list-panes', '-a', '-F', '#{pane_tty}'], capture_output=True)
-    return set(result.stdout.splitlines()) if result.returncode == 0 else set()
+    output = probe('list-panes', '-a', '-F', '#{pane_dead}|#{pane_tty}', allow_missing_server=True)
+    if output is None:
+        return set()
+    lines = output.splitlines()
+    if not lines:
+        raise TmuxUnknown('malformed_pane_list')
+    ttys = set()
+    for line in lines:
+        fields = line.split('|')
+        if len(fields) != 2 or fields[0] not in {'0', '1'}:
+            raise TmuxUnknown('malformed_pane_list')
+        dead, tty = fields
+        if dead == '1' and not tty:
+            continue  # A retained, exited pane can have no terminal anymore.
+        if not re.fullmatch(r'/dev/(?:pts/[0-9]+|tty[^/\s]+)', tty):
+            raise TmuxUnknown('malformed_pane_list')
+        ttys.add(tty)
+    return ttys
 
 def external_session(c, proc_root=Path('/proc')):
     labels = {c['title'].casefold(), *[s.casefold() for s in ALIASES.get(c['id'], [])]}
@@ -325,13 +411,14 @@ def up(c, manifest, headless=False):
         if not state:
             args = [str(SELF), '--manifest', str(manifest), '_menu', c['id']]
             tmux('new-session', '-d', '-s', session(c), '-c', str(cwd(c)), *args)
-            tmux('set-option', '-t', target(c), '@sfwb_binding', fingerprint(c))
-            tmux('set-option', '-t', target(c), 'remain-on-exit', 'on')
-            tmux('set-option', '-t', target(c), 'set-titles', 'on')
-            tmux('set-option', '-t', target(c), 'set-titles-string', c['title'].replace('#', '##'))
+            identity = required_target(c)
+            tmux('set-option', '-t', identity, '@sfwb_binding', fingerprint(c))
+            tmux('set-option', '-t', identity, 'remain-on-exit', 'on')
+            tmux('set-option', '-t', identity, 'set-titles', 'on')
+            tmux('set-option', '-t', identity, 'set-titles-string', c['title'].replace('#', '##'))
             state = live(c)
         elif state['dead']:
-            tmux('respawn-pane', '-t', target(c), '-c', str(cwd(c)),
+            tmux('respawn-pane', '-t', state.get('identity') or required_target(c), '-c', str(cwd(c)),
                  str(SELF), '--manifest', str(manifest), '_menu', c['id'])
             state = live(c)
         if not state:
@@ -345,8 +432,8 @@ def up(c, manifest, headless=False):
             raise ValueError('Unconfirmed prior tab request; use attach in an existing terminal, not another up')
         atomic(pending, {'context': c['id'], 'time': time.time()})
         open_tab(c, manifest)
-        pending.unlink()
         wait_provider(c)
+        pending.unlink()
         print(c['id']+': attached; provider process present')
 
 def attach(c):
@@ -362,7 +449,8 @@ def attach(c):
             return
         set_title(c)
         # Keep per-context flock held for the client lifetime; never detach another active client.
-        run(['/usr/bin/tmux', '-L', SERVER, 'attach-session', '-t', target(c)], check=True)
+        run(tmux_command('attach-session', '-t', state.get('identity') or required_target(c)), check=True)
+    live(c)  # Do not clear a pending receipt if the final observation is uncertain.
     pending = STATE/(c['id']+'-pending.json')
     if pending.exists():
         pending.unlink()
@@ -414,6 +502,7 @@ def provider_sessions(c):
 
 
 def bind_session(c, identity):
+    live(c)  # Catalog validation alone cannot establish tmux safety.
     source = str(cwd(c))
     if c['provider'] in {'codex', 'opencode'}:
         source = provider_sessions(c).get(identity)
@@ -590,6 +679,8 @@ def main(argv=None):
                 problems.append('Missing '+cmd)
         for c in selected:
             try:
+                state = live(c)
+                print(c['id']+': tmux '+('present' if state else 'absent'))
                 validate_context(c)
                 if c['resume_policy'] != 'never':
                     saved_session(c)
@@ -607,19 +698,19 @@ def main(argv=None):
             try:
                 state = live(c)
                 pids = provider_pids(c, state['pane_pid']) if state and not state['dead'] else []
-                print(c['id'], json.dumps({'external': external_session(c), 'managed': state, 'provider_pids': pids, 'binding': saved_session(c)}))
+                print(c['id'], json.dumps({'probe': 'present' if state else 'absent', 'external': external_session(c), 'managed': state, 'provider_pids': pids, 'binding': saved_session(c)}))
             except (ValueError, OSError) as exc:
                 failures.append(c['id'])
-                print(c['id'], json.dumps({'error': str(exc)}))
+                print(c['id'], json.dumps({'probe': 'unknown', 'error': str(exc)}))
         if failures:
             raise ValueError('Contexts need attention: '+', '.join(failures))
     elif args.command == 'up':
         failures = []
         for c in selected:
-            if not c['enabled'] and not args.contexts and not external_session(c):
-                print(c['id']+': skipped (disabled)')
-                continue
             try:
+                if not c['enabled'] and not args.contexts and not external_session(c):
+                    print(c['id']+': skipped (disabled)')
+                    continue
                 up(c, manifest, args.headless)
             except (ValueError, OSError) as exc:
                 failures.append(str(exc)); print(str(exc), file=sys.stderr)

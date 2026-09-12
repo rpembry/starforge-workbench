@@ -8,6 +8,10 @@ Copy `config/workbench.example.yaml` to `config/workbench.yaml` (ignored by Git)
 
 Provider executables are discovered on PATH, with historical installation-path fallbacks in `PROVIDERS`. The launcher still expects Linux process metadata, tmux, and zsh. The desktop bridge uses `/usr/bin/python3` with GObject introspection and the installed Ptyxis schemas. An optional `~/bin/ren.sh` title helper is attempted; its absence does not prevent provider startup. CLI flags, resume catalogs, and provider installations are expected adaptation points.
 
+Launcher metadata probes are bounded and distinguish confirmed absence from unknown
+state. See [tmux probe behavior](tmux-probes.md) for recovery semantics and isolated
+test coverage. Interactive attachment remains unbounded.
+
 Runtime state, locks, and exact conversation bindings live under `~/.local/state/starforge-ai-workbench`. The dedicated tmux server is also named `starforge-ai-workbench`. Do not run this copy alongside another installation using that same runtime namespace without first isolating it.
 
 ## Isolated local API

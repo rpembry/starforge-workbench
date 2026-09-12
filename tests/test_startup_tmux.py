@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 
 import yaml
 
@@ -27,6 +28,15 @@ class StartupIntegration(unittest.TestCase):
             spec.loader.exec_module(cli)
             cli.STATE = folder/'state'
             cli.SERVER = server
+            cli.TMUX_SOCKET = folder/'fixture.sock'
+            original_run = cli.run
+            def isolated_run(args, **kwargs):
+                if args[0] == '/usr/bin/tmux':
+                    self.assertIn('-S', args)
+                    self.assertEqual(args[args.index('-S')+1], str(folder/'fixture.sock'))
+                    self.assertNotIn('-L', args)
+                return original_run(args, **kwargs)
+            cli.run = isolated_run
             cli.HOME = folder
             fixture = folder/'provider'
             fixture.write_text('#!'+sys.executable+'\n'+f'''
@@ -51,6 +61,7 @@ spec.loader.exec_module(m)
 m.STATE = Path({str(cli.STATE)!r})
 m.HOME = Path({str(folder)!r})
 m.SERVER = {server!r}
+m.TMUX_SOCKET = Path({str(folder/'fixture.sock')!r})
 m.SELF = Path({str(runner)!r})
 m.PROVIDERS['ollama'] = {str(fixture)!r}
 m.main(sys.argv[1:])
@@ -64,6 +75,7 @@ m.main(sys.argv[1:])
             manifest = folder/'manifest.yaml'
             manifest.write_text(yaml.safe_dump(data))
             try:
+                self.assertIsNone(cli.target(c))
                 cli.up(c, manifest, headless=True)
                 before = cli.live(c)
                 pids = cli.provider_pids(c, before['pane_pid'])
@@ -72,8 +84,14 @@ m.main(sys.argv[1:])
                 cli.up(c, manifest, headless=True)
                 self.assertEqual(cli.provider_pids(c, cli.live(c)['pane_pid']), pids)
                 self.assertEqual((folder/'attempts').read_text(), '3')
+                with patch.object(cli, 'probe', side_effect=cli.TmuxUnknown('timeout')):
+                    with self.assertRaises(cli.TmuxUnknown):
+                        cli.up(c, manifest, headless=True)
+                self.assertEqual(cli.provider_pids(c, cli.live(c)['pane_pid']), pids)
+                self.assertEqual((folder/'attempts').read_text(), '3')
             finally:
-                subprocess.run(['tmux', '-L', server, 'kill-server'], capture_output=True)
+                assert cli.TMUX_SOCKET == folder/'fixture.sock'
+                subprocess.run(['tmux', '-S', str(folder/'fixture.sock'), 'kill-server'], capture_output=True, timeout=3)
 
 
 if __name__ == '__main__':
