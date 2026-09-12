@@ -12,7 +12,7 @@ from starlette.exceptions import HTTPException
 
 from .auth import Auth, CloudflareAuth
 from .models import (ActionIn, ActionPatch, ArtifactIn, EventIn, ObjectiveIn,
-                     RunIn, RunPatch, Transition, CollectorIn, ImportBatch,
+                     RunIn, RunLink, RunPatch, Transition, CollectorIn, ImportBatch,
                      ProviderAttentionIn, ProviderGenerationIn)
 from .repository import Problem, SQLiteRepository
 from .settings import load_settings
@@ -162,6 +162,10 @@ def create_app(repository=None, auth=None, settings=None):
 
     @app.post('/api/runs', status_code=201)
     def run(body: RunIn, who=Depends(principal)):
+        if body.action_id:
+            raise Problem(409, 'explicit_link_required', 'Create the run first, then link exact current records')
+        if who.role == 'collector' and body.objective_id:
+            raise Problem(403, 'operator_required', 'Collectors cannot assign a process generation to work')
         return repository.create('runs', body.model_dump(mode='json'), who.name)
 
     @app.patch('/api/runs/{identity}')
@@ -170,6 +174,10 @@ def create_app(repository=None, auth=None, settings=None):
         if data.get('status', 'unknown') is None:
             raise Problem(422, 'invalid_null', 'Run status cannot be null')
         return repository.patch('runs', identity, data, who.name)
+
+    @app.post('/api/actions/{action_id}/runs/{run_id}/link')
+    def link_run(action_id: str, run_id: str, body: RunLink, who=Depends(operator)):
+        return repository.link_run(action_id, run_id, body.model_dump(mode='json'), who.name)
 
     @app.post('/api/imports', status_code=201)
     def import_batch(body: ImportBatch, who=Depends(operator)):
