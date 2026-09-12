@@ -260,3 +260,10 @@ def test_default_spacing_survives_restart_and_failed_send_never_acknowledges(con
     assert not next(iter(n.read_state(Path(config.state_dir), config).entries.values())).delivered
     assert tick(config, [item('new')], sender, NOW+300)['status'] == 'delivered'
     assert sender.call_count == 1
+
+
+def test_existing_dotenv_spacing_and_unquoted_title_are_supported_without_execution(config):
+    private_write(Path(config.credentials_file), '# Fixture only\nexport PUSHOVER_USER_KEY = '+('u'*30)+'\nPUSHOVER_API_TOKEN='+('a'*30)+'\nPUSHOVER_TITLE=Example notification title # comment\n')
+    assert n.pushover_credentials(config) == ('u'*30, 'a'*30, 'Example notification title')
+    private_write(Path(config.credentials_file), 'PUSHOVER_USER_KEY='+('u'*30)+'\nPUSHOVER_API_TOKEN='+('a'*30)+'\nPUSHOVER_TITLE="$(touch should-not-exist)"\n')
+    assert n.pushover_credentials(config)[2] == '$(touch should-not-exist)'

@@ -106,17 +106,19 @@ def pushover_credentials(config):
     try:
         values = {}
         for line in protected_read(Path(config.credentials_file).expanduser()).splitlines():
-            parts = shlex.split(line, comments=True)
-            if parts and parts[0] == 'export':
-                parts.pop(0)
-            if not parts:
+            line = line.strip()
+            if not line or line.startswith('#'):
                 continue
-            if len(parts) != 1 or '=' not in parts[0]:
+            if line.startswith('export '):
+                line = line[7:].lstrip()
+            if '=' not in line:
                 raise ValueError()
-            key, value = parts[0].split('=', 1)
+            key, value = line.split('=', 1)
+            key = key.strip()
             if key not in {'PUSHOVER_USER_KEY', 'PUSHOVER_API_TOKEN', 'PUSHOVER_TITLE'} or key in values:
                 raise ValueError()
-            values[key] = value
+            # dotenv-style unquoted titles may contain spaces; no expansion or execution.
+            values[key] = ' '.join(shlex.split(value, comments=True))
         if any(not re.fullmatch(r'[A-Za-z0-9]{30}', values.get(key, ''))
                for key in ('PUSHOVER_USER_KEY', 'PUSHOVER_API_TOKEN')):
             raise ValueError()

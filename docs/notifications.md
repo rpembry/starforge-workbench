@@ -48,7 +48,7 @@ PUSHOVER_TITLE="Optional notification title"
 
 Placeholders are not valid credentials. Actual keys must be 30 alphanumeric
 characters. An optional title overrides the configured title; otherwise the default
-is `Workbench`. The file accepts assignments, quoted values, comments and optional
+is `Workbench`. The file accepts assignments, quoted values, unquoted titles with spaces, comments and optional
 `export`; it is parsed as data, never executed or imported into the environment.
 Service credential files can be used by pointing `credentials_file` to the file
 provided by your service manager. Do not commit either credential file.
