@@ -298,4 +298,18 @@ class LauncherTests(unittest.TestCase):
             (directory/'stat').write_text(f'{pid} ({name}) {state} {parent}')
         self.assertEqual(cli.provider_pids(self.c, 1, proc), [3])
 
+    def test_process_detection_names_are_fixture_verified_for_each_provider(self):
+        proc = self.path/'proc'
+        for index, (provider, process_name) in enumerate([('codex', 'codex'), ('claude', 'claude'),
+                ('opencode', 'opencode'), ('antigravity', 'agy'), ('ollama', 'ollama')], start=10):
+            root = proc/str(index)
+            child = proc/str(index+100)
+            root.mkdir(parents=True)
+            child.mkdir()
+            root.joinpath('comm').write_text('python')
+            root.joinpath('stat').write_text(f'{index} (python) S 1')
+            child.joinpath('comm').write_text(process_name)
+            child.joinpath('stat').write_text(f'{index+100} ({process_name}) S {index}')
+            self.assertEqual(cli.provider_pids({**self.c, 'provider': provider}, index, proc), [index+100])
+
 if __name__ == '__main__': unittest.main()

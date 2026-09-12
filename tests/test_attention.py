@@ -1,10 +1,11 @@
 from datetime import datetime, timedelta, timezone
+import pytest
 from test_api import api, repo, action, COLLECTOR
 
 
-def run(api, action_id=None, status='running', source_id='fixture'):
+def run(api, action_id=None, status='running', source_id='fixture', provider='codex'):
     response = api.post('/api/runs', json=dict(source='fixture', source_id=source_id, context='Fixture agent',
-        provider='codex', actor='Codex', status=status,
+        provider=provider, actor='Fixture agent', status=status,
         started_at=datetime.now(timezone.utc).isoformat()))
     assert response.status_code == 201
     result = response.json()
@@ -82,3 +83,13 @@ def test_collector_priority_dashboard_parity_and_read_only_access(api, repo):
     assert api.get('/api/attention').status_code == 403
     api.headers.clear()
     assert api.get('/api/attention').status_code == 401
+
+
+@pytest.mark.parametrize('provider', ['codex', 'claude', 'opencode', 'antigravity', 'ollama'])
+def test_explicit_attention_reason_is_provider_agnostic(api, provider):
+    r = run(api, status='approval_needed', provider=provider)
+    alert = items(api)[0]
+    assert alert['kind'] == 'approval_needed'
+    assert alert['reason'] == 'An explicit approval request needs your decision.'
+    assert alert['evidence'][0]['resource'] == 'runs'
+    assert alert['evidence'][0]['id'] == r['id']
