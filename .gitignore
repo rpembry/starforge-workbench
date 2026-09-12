@@ -19,6 +19,7 @@
 !/bin/ai-workbench
 !/config/
 !/config/workbench.example.yaml
+!/config/opencode-attention.example.js
 !/config/tmux.conf
 !/schemas/
 !/schemas/*.json

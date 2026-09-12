@@ -54,6 +54,71 @@ Claude collection starts with a persisted cutoff covering the preceding day. Ope
 
 No task execution scheduler is implied by run heartbeats or attention records. Reporting time windows and the default human actor label are simple personal conventions to adapt.
 
+## OpenCode attention observations
+
+The optional [`config/opencode-attention.example.js`](../config/opencode-attention.example.js)
+bridge targets OpenCode `1.18.30`. Its contract was verified against the
+published `@opencode-ai/plugin` and `@opencode-ai/sdk` `1.18.30` TypeScript
+declarations ([plugin package](https://www.npmjs.com/package/@opencode-ai/plugin/v/1.18.30),
+[SDK package](https://www.npmjs.com/package/@opencode-ai/sdk/v/1.18.30)). It uses
+these structured hooks only:
+
+- `chat.message` activates a turn generation using the user message ID and its
+  OpenCode creation time.
+- `message.updated` links an assistant message to its parent user message. A
+  typed error becomes `provider_error`; a numeric completion time becomes
+  `idle`, meaning provider-turn complete rather than task complete.
+- `permission.updated` becomes `permission_wait` only after its assistant
+  message has been linked to the current generation.
+- `tool.execute.before` becomes `user_question` only for OpenCode's built-in
+  `question` tool. Its arguments are discarded.
+
+The bridge writes a private local JSONL queue. It is disabled when
+`WB_OPENCODE_ATTENTION_EVENTS` is unset. To adapt it, create an owned directory
+with mode `0700`, copy the example into an OpenCode plugin directory, point the
+environment variable at an absolute queue path in that directory, and pass the
+same path to `workbench.opencode_observer --attention-events`. OpenCode loads
+plugins at startup, so restart OpenCode after installing or changing the local
+copy. Do not point two bridge instances at one queue.
+
+The bridge emits only provider/session IDs, user-message generation ID, bridge
+instance ID, fixed reason and provenance values, sequence, and timestamps. It
+never writes prompts, responses, reasoning, questions, error messages, tool
+arguments, permission patterns, model output, or credentials. The existing
+observer submits these records with its collector credential; operators and
+unauthenticated callers cannot submit them.
+
+`chat.message` is the only authority that can establish a current generation.
+An attention event cannot promote its own generation. Assistant parent IDs and
+permission message links prevent late records from an older turn from being
+attributed to a newer turn. The plugin assigns a contiguous sequence because
+the verified legacy plugin event contract does not expose event sequence
+numbers. The API requires the next sequence and a strictly newer observation
+clock, rejects duplicate/out-of-order evidence, and rejects a generation whose
+OpenCode creation time is not newer than the current generation. Provider
+creation time and plugin wall-clock observation time must be timezone-aware;
+the API rejects clocks more than five minutes in the future.
+
+After observer restart, its byte cursor resumes the queue. A response lost
+after an accepted write is safe: replay is rejected as a duplicate and then
+acknowledged locally. Queue rotation replays from the beginning against the
+same server checks. Plugin restart intentionally forgets in-memory turn state;
+until a new `chat.message` establishes a generation, lifecycle events are
+ignored and status remains unknown. Current reasons expire after 90 seconds by
+the server's UTC clock. A stopped bridge, missing queue, unsupported hook, or
+expired reason therefore removes the strong reason rather than claiming
+failure; process and collector observations remain the fallback.
+
+OpenCode `1.18.30`'s plugin `Event` type does not provide a generation-bearing
+`session.idle` or `session.error`, so this bridge deliberately ignores those
+events. It does not distinguish authentication, rate-limit, or other provider
+error subtypes, and it does not infer question/permission resolution before a
+later supported state. Subagents and child sessions need separate validation.
+No live-provider smoke check is included: existing sessions were not used as
+fixtures, so live support remains unverified. These observations never change
+an action, approve a request, authorize execution, or establish task
+completion.
+
 ## Verification
 
 Run `uv run pytest -q` for the combined automated suite. Browser tests need `WB_PLAYWRIGHT_MODULE` pointing to an installed Playwright Core module and a supported browser. `tests/integration_terminal.py` is an explicit graphical integration check, not part of routine pytest. The tmux startup tests use isolated fixture processes and a dedicated test server. A real reboot and your own daily workflow need separate validation.

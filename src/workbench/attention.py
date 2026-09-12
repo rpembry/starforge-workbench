@@ -1,4 +1,5 @@
 """Read-only attention rules. Missing evidence never proves failure."""
+from datetime import datetime, timedelta
 
 ACTIVE = {'running', 'waiting', 'approval_needed'}
 
@@ -8,13 +9,41 @@ def evidence(resource, row, fields):
                 timestamps={key: row.get(key) for key in fields})
 
 
-def derive(actions, runs, collectors, generated_at):
+def derive(actions, runs, collectors, generated_at, provider_attention=()):
     by_action = {a['id']: a for a in actions}
     linked = {}
     for run in runs:
         if run['action_id']:
             linked.setdefault(run['action_id'], []).append(run)
     items = {}
+
+    provider_reasons = {
+        'permission_wait': ('provider_permission_wait', 0, 'waiting',
+            'OpenCode reported that the current turn is waiting for permission.',
+            'Review the permission request in the matching OpenCode session before replying.'),
+        'user_question': ('provider_user_question', 0, 'waiting',
+            'OpenCode reported that the current turn is waiting for an answer.',
+            'Review the question in the matching OpenCode session before replying.'),
+        'provider_error': ('provider_error', 1, 'blocked',
+            'OpenCode reported a provider error for the current turn.',
+            'Inspect the matching OpenCode session and provider status; do not infer task failure.'),
+        'idle': ('provider_idle', 3, 'idle',
+            'OpenCode reported that the current turn ended and is idle. This is not task completion.',
+            'Review the matching session and explicit action state before deciding what happens next.'),
+    }
+    for observation in provider_attention:
+        if not observation['fresh'] or observation['reason'] not in provider_reasons:
+            continue
+        kind, priority, progress, reason, next_action = provider_reasons[observation['reason']]
+        identity = 'provider_attention:'+observation['provider']+':'+observation['session_id']
+        fresh_until = (datetime.fromisoformat(observation['observed_at'])+timedelta(seconds=90)).isoformat()
+        items[identity] = dict(id=identity, kind=kind, priority=priority,
+            title='OpenCode session', subject={'resource': 'provider_attention', 'id': observation['session_id']},
+            progress=progress, reason=reason, next_action=next_action,
+            evidence=[dict(resource='provider_attention', id=observation['session_id'],
+                generation_id=observation['generation_id'], sequence=observation['last_sequence'],
+                provenance=observation['observation_provenance'],
+                timestamps={'observed_at': observation['observed_at'], 'fresh_until': fresh_until})])
 
     def approval(action=None, run=None):
         resource, row = ('actions', action) if action else ('runs', run)

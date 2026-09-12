@@ -1,4 +1,4 @@
-"""Read completed OpenCode assistant metadata from its local SQLite database."""
+"""Read completed OpenCode metadata and optional minimized lifecycle hooks."""
 import argparse
 import fcntl
 import hashlib
@@ -15,6 +15,15 @@ from datetime import datetime, timezone
 import httpx
 from .client import client
 from .codex_observer import atomic_state
+
+
+ATTENTION_FIELDS = {
+    'generation': {'kind', 'provider', 'session_id', 'generation_id', 'source', 'source_instance',
+                   'started_at', 'provenance'},
+    'observation': {'kind', 'provider', 'session_id', 'generation_id', 'source', 'source_instance',
+                    'sequence', 'observed_at', 'reason', 'provenance'},
+}
+IDENTITY = re.compile(r'[A-Za-z0-9_.:-]{1,200}')
 
 
 def scan(api, database, state):
@@ -73,11 +82,64 @@ def scan(api, database, state):
     return counts
 
 
+def scan_attention(api, queue, state):
+    """Forward allowlisted plugin records in order; never read provider content."""
+    counts = dict(submitted=0, malformed=0, rejected=0, failed=0)
+    offset = state.get('attention_offset', 0)
+    with queue.open('rb') as source:
+        source.seek(0, os.SEEK_END)
+        if offset > source.tell():
+            offset = 0  # Rotation replays safely against server generation/sequence checks.
+        source.seek(offset)
+        while True:
+            start = source.tell()
+            raw = source.readline()
+            if not raw or not raw.endswith(b'\n'):
+                break
+            end = source.tell()
+            try:
+                record = json.loads(raw)
+                kind = record.get('kind') if isinstance(record, dict) else None
+                if kind not in ATTENTION_FIELDS or set(record) != ATTENTION_FIELDS[kind]:
+                    raise ValueError('shape')
+                if record['provider'] != 'opencode':
+                    raise ValueError('provider')
+                for field in ('session_id', 'generation_id', 'source_instance'):
+                    if not isinstance(record[field], str) or not IDENTITY.fullmatch(record[field]):
+                        raise ValueError('identity')
+                if record['source'] != 'opencode-plugin':
+                    raise ValueError('source')
+                endpoint = ('/api/provider-attention/generations' if kind == 'generation'
+                            else '/api/provider-attention/observations')
+                body = {key: value for key, value in record.items() if key != 'kind'}
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+                counts['malformed'] += 1
+                state.setdefault('attention_diagnostics', {})[hashlib.sha256(raw).hexdigest()] = 'invalid_metadata'
+                state['attention_offset'] = end
+                continue
+            try:
+                response = api.post(endpoint, json=body)
+                if response.status_code == 409 and response.json().get('error', {}).get('code') in {
+                    'duplicate_observation', 'out_of_order_observation', 'stale_generation',
+                    'generation_conflict'}:
+                    counts['rejected'] += 1
+                else:
+                    response.raise_for_status()
+                    counts['submitted'] += 1
+            except (ValueError, httpx.HTTPError):
+                counts['failed'] += 1
+                source.seek(start)
+                break
+            state['attention_offset'] = end
+    return counts
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--database',type=Path,default=Path.home()/'.local/share/opencode/opencode.db')
     p.add_argument('--state',type=Path,required=True)
     p.add_argument('--credentials-file',type=Path,required=True)
+    p.add_argument('--attention-events',type=Path,default=os.environ.get('WB_OPENCODE_ATTENTION_EVENTS'))
     args=p.parse_args()
     args.state.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
     if args.state.is_symlink() or args.state.parent.stat().st_mode & 0o077:
@@ -97,7 +159,16 @@ def main():
                     status='ok',reason='scan_complete',observed_runs=0)
                 try:
                     counts=scan(api,args.database,state)
-                    if counts['malformed'] or counts['failed']:
+                    if args.attention_events:
+                        queue_stat = args.attention_events.stat()
+                        parent_stat = args.attention_events.parent.stat()
+                        if (args.attention_events.is_symlink() or queue_stat.st_uid != os.getuid() or
+                            queue_stat.st_mode & 0o077 or parent_stat.st_uid != os.getuid() or
+                            parent_stat.st_mode & 0o077):
+                            raise ValueError('Attention event queue must be private')
+                        counts['attention'] = scan_attention(api,args.attention_events,state)
+                    attention = counts.get('attention', {})
+                    if counts['malformed'] or counts['failed'] or attention.get('malformed') or attention.get('failed'):
                         health.update(status='degraded',reason='scan_failed')
                     print(json.dumps(counts),flush=True)
                 except (OSError,ValueError,TypeError,sqlite3.Error):

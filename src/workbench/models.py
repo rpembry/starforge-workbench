@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Text = Annotated[str, Field(min_length=1, max_length=500)]
 Details = Annotated[str, Field(max_length=10000)]
@@ -160,6 +160,54 @@ class CollectorIn(Model):
     status: Literal['ok', 'degraded']
     reason: Literal['scan_complete', 'tmux_unavailable', 'scan_failed', 'submission_failed']
     observed_runs: Annotated[int, Field(ge=0)] = 0
+
+
+ProviderIdentity = Annotated[str, Field(pattern=r'^[A-Za-z0-9_.:-]{1,200}$')]
+
+
+class ProviderGenerationIn(Model):
+    provider: Literal['opencode']
+    session_id: ProviderIdentity
+    generation_id: ProviderIdentity
+    source: Text
+    source_instance: ProviderIdentity
+    started_at: datetime
+    provenance: Literal['opencode.chat.message']
+
+    @field_validator('started_at')
+    @classmethod
+    def aware_time(cls, value):
+        return EventIn.aware_time(value)
+
+
+class ProviderAttentionIn(Model):
+    provider: Literal['opencode']
+    session_id: ProviderIdentity
+    generation_id: ProviderIdentity
+    source: Text
+    source_instance: ProviderIdentity
+    sequence: Annotated[int, Field(ge=1)]
+    observed_at: datetime
+    reason: Literal['permission_wait', 'user_question', 'idle', 'provider_error']
+    provenance: Literal['opencode.permission.updated', 'opencode.tool.question',
+                        'opencode.message.completed', 'opencode.message.error']
+
+    @field_validator('observed_at')
+    @classmethod
+    def aware_time(cls, value):
+        return EventIn.aware_time(value)
+
+    @model_validator(mode='after')
+    def matching_provenance(self):
+        expected = {
+            'permission_wait': 'opencode.permission.updated',
+            'user_question': 'opencode.tool.question',
+            'idle': 'opencode.message.completed',
+            'provider_error': 'opencode.message.error',
+        }
+        if self.provenance != expected[self.reason]:
+            raise ValueError('Reason does not match provider provenance')
+        return self
 
 
 class RunPatch(Model):
