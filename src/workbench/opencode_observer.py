@@ -179,7 +179,7 @@ def main():
                         health.update(status='degraded',reason='scan_failed')
                     print(json.dumps(counts),flush=True)
                 except (OSError,ValueError,TypeError,sqlite3.Error):
-                    health.update(status='degraded',reason='database_unavailable')
+                    health.update(status='degraded',reason='scan_failed')
                 atomic_state(args.state,state)
                 api.post('/api/collectors/heartbeat',json=health).raise_for_status()
         except (OSError,ValueError,httpx.HTTPError):
