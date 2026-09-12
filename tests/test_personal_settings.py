@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import traceback
 
 import pytest
 from fastapi.testclient import TestClient
@@ -62,10 +63,22 @@ def test_custom_timezone_handles_dst_weekend_and_legacy_import_provenance(tmp_pa
 @pytest.mark.parametrize('contents, message', [
     ('human_name: ""\n', 'human_name'),
     ('reporting_timezone: Not/AZone\n', 'reporting_timezone'),
+    ('reporting_timezone: ../PRIVATE_SENTINEL\n', 'reporting_timezone'),
+    ('human_name: [PRIVATE_SENTINEL\n', 'settings YAML'),
 ])
 def test_invalid_settings_are_safe_and_specific(tmp_path, contents, message):
     path = tmp_path/'settings.yaml'
     path.write_text(contents)
     with pytest.raises(RuntimeError, match=message) as excinfo:
         load_settings(path)
-    assert contents.strip() not in str(excinfo.value)
+    rendered = ''.join(traceback.format_exception(excinfo.value))
+    assert 'PRIVATE_SENTINEL' not in rendered
+    assert contents.strip() not in rendered
+
+
+def test_invalid_settings_encoding_is_not_rendered_in_traceback(tmp_path):
+    path = tmp_path/'settings.yaml'
+    path.write_bytes(b'\xffPRIVATE_SENTINEL')
+    with pytest.raises(RuntimeError, match='decode') as excinfo:
+        load_settings(path)
+    assert 'PRIVATE_SENTINEL' not in ''.join(traceback.format_exception(excinfo.value))

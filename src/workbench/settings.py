@@ -29,9 +29,15 @@ def load_settings(path=None):
     if not path.is_absolute():
         raise RuntimeError('WB_SETTINGS_FILE must be an absolute path')
     try:
-        data = yaml.safe_load(path.read_text())
-    except (OSError, yaml.YAMLError) as exc:
-        raise RuntimeError('Unable to load Workbench settings file') from exc
+        text = path.read_text()
+    except OSError:
+        raise RuntimeError('Unable to load Workbench settings file') from None
+    except UnicodeError:
+        raise RuntimeError('Unable to decode Workbench settings file as text') from None
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        raise RuntimeError('Unable to parse Workbench settings YAML') from None
     if data is None:
         data = {}
     if not isinstance(data, dict):
@@ -48,6 +54,6 @@ def load_settings(path=None):
     timezone = timezone.strip()
     try:
         ZoneInfo(timezone)
-    except ZoneInfoNotFoundError as exc:
-        raise RuntimeError('Workbench setting reporting_timezone must be a valid IANA timezone name') from exc
+    except (ZoneInfoNotFoundError, ValueError, UnicodeError):
+        raise RuntimeError('Workbench setting reporting_timezone must be a valid IANA timezone name') from None
     return PersonalSettings(human_name=human_name.strip(), reporting_timezone=timezone)
