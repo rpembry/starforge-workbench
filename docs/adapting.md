@@ -14,6 +14,35 @@ test coverage. Interactive attachment remains unbounded.
 
 Runtime state, locks, and exact conversation bindings live under `~/.local/state/starforge-ai-workbench`. The dedicated tmux server is also named `starforge-ai-workbench`. Do not run this copy alongside another installation using that same runtime namespace without first isolating it.
 
+## Mouse scrolling and terminal preferences
+
+Ask AIW to configure scrolling when a terminal app behaves differently:
+
+> Make the mouse wheel scroll output in my tabs. Check which apps manage their
+> own scrolling, preserve live sessions, and save the settings for future launches.
+
+The dedicated server loads [`config/tmux.conf`](../config/tmux.conf). Most tabs
+use tmux scrollback; the `opencode` context forwards wheel events to the app when
+it requests mouse input and tmux copy mode is inactive. This matters for
+full-screen apps whose output is not retained in tmux history. Copy mode keeps
+its own scrolling, with vi keys (`q` returns to the app).
+
+The exception matches the session name `sfwb-opencode`, not the provider type.
+If you rename that context or add another app that manages its own scrolling,
+ask AIW to inspect the active mouse mode and adapt the binding to the exact
+context. Forwarding wheel events indiscriminately can make other prompts treat
+scrolling as input.
+
+AIW should check the live bindings and the configuration used by the installed
+launcher, apply changes only to the dedicated Workbench server, and confirm the
+result with you. Reloading that configuration does not require restarting
+providers. A live binding alone lasts only until the server exits; retain the
+change in source and in the installed configuration so a reboot or later release
+does not silently undo it. Personal overrides belong outside public Git; shared
+behavior fixes should be committed and reviewed. Mouse selection, clipboard, and
+link-opening preferences can also be requested, but depend on the terminal app
+and should be checked separately.
+
 ## Isolated local API
 
 After `uv sync --frozen`, create a private local credential file. The following generates fresh random values without printing them and refuses to overwrite an existing file:
