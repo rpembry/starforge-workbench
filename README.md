@@ -59,6 +59,15 @@ Some important distinctions guide the implementation:
 
 See [`src/workbench/main.py`](src/workbench/main.py), [the models](src/workbench/models.py), [attention derivation](src/workbench/attention.py), and [repository/state transitions](src/workbench/repository.py).
 
+### Optional attention notifications
+
+The separate `wb-notify` worker can send Pushover summaries of new or meaningfully
+changed attention items. It is disabled by default, keeps credentials and delivery
+state outside Git, suppresses unchanged alerts across restarts, and uses generic
+text unless title inclusion is explicitly enabled. Delivery never changes task
+commitments or runs. See [notification setup and policy](docs/notifications.md) for
+preview, explicit test delivery, retries, privacy and operational limits.
+
 ### Codex, Claude, and OpenCode collectors
 
 Collectors run locally and submit observations to the central API with a separate credential role. Their health is tracked independently. Cursors or acknowledged identities support restart recovery and duplicate suppression.
