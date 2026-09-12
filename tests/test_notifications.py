@@ -100,6 +100,20 @@ def test_quiet_hours_dst_wall_clock_policy(config):
     assert datetime.fromtimestamp(repeated['until'], ZoneInfo(zone)).strftime('%H:%M') == '01:30'
 
 
+def test_quiet_hours_when_dst_skips_entire_delivery_interval(config):
+    zone = 'America/New_York'
+    quiet(config, '03:00', '02:59', zone)
+    during = local_stamp(2027, 3, 13, 3, 0, zone)
+    sender = Mock(side_effect=AssertionError('sent during quiet hours'))
+    result = tick(config, [item()], sender, during)
+    assert result['status'] == 'deferred'
+    assert result['quiet_hours']['until'] == local_stamp(2027, 3, 15, 2, 59, zone)
+    assert len(n.read_state(Path(config.state_dir), config).entries) == 1
+    assert n.quiet_hours(config, local_stamp(2027, 3, 14, 3, 0, zone)) is not None
+    assert n.quiet_hours(config, local_stamp(2027, 3, 15, 2, 59, zone)) is None
+    sender.assert_not_called()
+
+
 def test_quiet_pending_reconciles_across_restart_and_releases_one_current_group(config):
     quiet(config)
     config.min_interval_seconds = 300

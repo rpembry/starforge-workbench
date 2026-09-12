@@ -317,7 +317,9 @@ def quiet_hours(config, current):
     # Search UTC minute boundaries so nonexistent and repeated local times follow
     # the actual zone transition rather than an invented wall-clock instant.
     boundary = int(current//60)*60+60
-    for _ in range(27*60):
+    # A transition can skip the entire non-quiet interval, so the next
+    # opening may be on the following day (including date-line jumps).
+    for _ in range(72*60):
         candidate = datetime.fromtimestamp(boundary, zone).strftime('%H:%M')
         still_active = ((quiet.start < quiet.end and quiet.start <= candidate < quiet.end)
                         or (quiet.start > quiet.end and (candidate >= quiet.start or candidate < quiet.end)))

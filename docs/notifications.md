@@ -208,7 +208,9 @@ Start is inclusive and end is exclusive. A start later than the end is an overni
 window; equal boundaries are rejected rather than interpreted as all day. Each poll
 uses the configured timezone's current wall clock. During a daylight-saving jump,
 a nonexistent boundary takes effect at the first real local minute outside the
-configured interval. During a repeated hour, both occurrences are evaluated by the
+configured interval. If the jump skips the entire non-quiet interval,
+notifications remain deferred until the next real opening, potentially on the
+following day. During a repeated hour, both occurrences are evaluated by the
 same wall-clock rule. If an end boundary falls within that hour, delivery can become
 eligible after the first boundary and quiet again when the clock repeats, until the
 second boundary. Choose a boundary outside transition hours if that gap is unwanted.
