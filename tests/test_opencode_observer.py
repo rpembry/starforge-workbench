@@ -80,12 +80,20 @@ const user = (id, created) => hooks["chat.message"]({{sessionID:"ses_test",messa
   {{message:{{id,role:"user",time:{{created}},system:"PRIVATE PROMPT"}},parts:[{{text:"PRIVATE"}}]}});
 const assistant = (id, parentID, extra={{}}) => hooks.event({{event:{{type:"message.updated",properties:{{info:
   {{id,sessionID:"ses_test",role:"assistant",parentID,time:{{created:Date.now()}},providerID:"fixture",modelID:"fixture",...extra,text:"PRIVATE RESPONSE"}}}}}}}});
+const tool = (messageID, callID) => hooks.event({{event:{{type:"message.part.updated",properties:{{part:
+  {{id:"part_"+callID,sessionID:"ses_test",messageID,type:"tool",callID,tool:"question",state:{{status:"running",input:{{question:"PRIVATE"}}}}}}}}}}}});
 await user("msg_old", Date.now()-1000);
 await assistant("asst_old", "msg_old");
+await tool("asst_old", "call_one");
+await tool("asst_old", "call_late");
 await hooks.event({{event:{{type:"permission.updated",properties:{{id:"per_one",sessionID:"ses_test",messageID:"asst_old",metadata:{{secret:"PRIVATE"}}}}}}}});
 await hooks["tool.execute.before"]({{tool:"question",sessionID:"ses_test",callID:"call_one"}},{{args:{{question:"PRIVATE QUESTION"}}}});
-await assistant("asst_old", "msg_old", {{time:{{created:Date.now()-500,completed:Date.now()}}}});
+await assistant("asst_old", "msg_old", {{finish:"tool-calls",time:{{created:Date.now()-500,completed:Date.now()}}}});
+await assistant("asst_step_two", "msg_old", {{finish:"stop",time:{{created:Date.now()-200,completed:Date.now()}}}});
+await hooks.event({{event:{{type:"session.status",properties:{{sessionID:"ses_test",status:{{type:"busy"}}}}}}}});
+await hooks.event({{event:{{type:"session.status",properties:{{sessionID:"ses_test",status:{{type:"idle"}}}}}}}});
 await user("msg_new", Date.now()+1);
+await hooks["tool.execute.before"]({{tool:"question",sessionID:"ses_test",callID:"call_late"}},{{args:{{question:"PRIVATE DELAYED"}}}});
 await assistant("asst_new", "msg_new", {{error:{{name:"APIError",data:{{message:"PRIVATE ERROR"}}}}}});
 await assistant("asst_late", "msg_old", {{time:{{created:Date.now(),completed:Date.now()+1}}}});
 '''
@@ -129,3 +137,35 @@ def test_attention_queue_restart_replay_and_failure_ordering(tmp_path):
     with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(503)), base_url='https://test') as api:
         assert scan_attention(api, queue, failed)['failed'] == 1
         assert failed.get('attention_offset', 0) == 0
+
+
+@pytest.mark.parametrize('relation', ['smaller', 'equal', 'larger'])
+def test_attention_queue_replacement_resets_cursor_by_file_identity(tmp_path, relation):
+    generation = {'kind': 'generation', 'provider': 'opencode', 'session_id': 'ses_new',
+        'generation_id': 'msg_new', 'source': 'opencode-plugin', 'source_instance': 'instance_new',
+        'started_at': '2026-09-12T12:00:00+00:00', 'provenance': 'opencode.chat.message'}
+    observation = {'kind': 'observation', 'provider': 'opencode', 'session_id': 'ses_new',
+        'generation_id': 'msg_new', 'source': 'opencode-plugin', 'source_instance': 'instance_new',
+        'sequence': 1, 'observed_at': '2026-09-12T12:00:01+00:00',
+        'reason': 'user_question', 'provenance': 'opencode.tool.question'}
+    replacement = ''.join(json.dumps(record)+'\n' for record in (generation, observation)).encode()
+    old = {**generation, 'session_id': 'ses_old', 'generation_id': 'msg_old'}
+    delta = {'smaller': -10, 'equal': 0, 'larger': 10}[relation]
+    old_size = len(replacement)+delta
+    serialized = json.dumps(old).encode()
+    assert old_size > len(serialized)+1
+    queue = tmp_path/'attention.jsonl'
+    queue.write_bytes(serialized+b' '*(old_size-len(serialized)-1)+b'\n')
+    calls = []
+    def accept(request):
+        calls.append(request.url.path); return httpx.Response(201, json={})
+    state = {}
+    with httpx.Client(transport=httpx.MockTransport(accept), base_url='https://test') as api:
+        scan_attention(api, queue, state)
+        calls.clear()
+        rotated = tmp_path/'replacement.jsonl'
+        rotated.write_bytes(replacement)
+        os.replace(rotated, queue)
+        result = scan_attention(api, queue, state)
+    assert result == dict(submitted=2, malformed=0, rejected=0, failed=0)
+    assert calls == ['/api/provider-attention/generations', '/api/provider-attention/observations']
