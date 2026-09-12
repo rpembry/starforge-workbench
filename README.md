@@ -86,9 +86,9 @@ Collectors run locally and submit observations to the central API with a separat
 | Claude observer | Local Claude assistant records | Allowlisted activity types, timestamps, and record/session identity. Prompt, response, reasoning, and tool payload text remain local. |
 | OpenCode observer | OpenCode's local SQLite message records, opened read-only; optionally a private minimized plugin-event queue | Allowlisted metadata for completed assistant messages and, when explicitly configured, generation-checked permission, question, or provider-error incidents. Message text, questions, errors, reasoning, tool payloads, and authentication data remain local. OpenCode is treated as a distinct application regardless of its model provider. |
 
-The Codex observer still includes a bootstrap dependency on the legacy Worklog schema used during my migration. A new user should inspect and adapt that path rather than assume every collector is ready to enable. Claude and OpenCode also depend on provider-specific local formats that can change.
+Collectors have provider-specific setup requirements and depend on local formats that can change. See the [adaptation notes](docs/adapting.md), [collector and observer modules](src/workbench/), and their tests for details.
 
-The [collector and observer modules](src/workbench/) and their tests are the detailed specification. The repository also includes a legacy importer with provenance and separation of inferred tasks from accepted work; it contains no personal database or migration data.
+The optional [Google Keep collector](docs/google-keep-collector.md) reads one configured checklist through an existing browser connection.
 
 ## Trying or adapting it
 
@@ -102,7 +102,7 @@ bin/ai-workbench --dry-run up
 
 The example manifest contains illustrative directories. Copy it to the Git-ignored `config/workbench.yaml`, adjust paths and enabled contexts, and inspect provider executable discovery before launching anything. Start one context at a time. The launcher falls back to the example when no personal manifest exists.
 
-See [local API setup and adaptation notes](docs/adapting.md) for credential creation, running the service, and deployment assumptions. Runtime directories retain the internal name `starforge-ai-workbench`; they are separate from this public repository's name.
+See [local API setup and adaptation notes](docs/adapting.md) for credential creation, running the service, and deployment assumptions.
 
 `deploy/` contains deployment helpers and systemd units from the working system. They install services and may enable collection when run. Treat them as recipes to inspect and adapt, not as commands the quickstart executes. No deployment or provider launch occurs merely from installing the Python package.
 
@@ -136,9 +136,3 @@ For suspected vulnerabilities or accidental disclosures, use the private reporti
 ## Engineering workflow
 
 See [human-directed agent coordination](docs/multi-agent-coordination.md) for how this project uses GitHub, Workbench, and assigned AI agents to develop and review changes.
-
-### Canonical development repository
-
-This repository is the canonical home for application code, pull requests and issues. The former private development repository is retained as a historical archive. Personal configuration, credentials, operating guidance and runtime data belong outside Git. See [local setup and migration](docs/canonical-development.md).
-
-The optional [Google Keep collector](docs/google-keep-collector.md) reads one configured checklist through an existing browser connection. Its extraction logic has synthetic test coverage; live Google Keep extraction is still unverified.
