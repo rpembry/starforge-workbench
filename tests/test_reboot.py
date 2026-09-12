@@ -13,6 +13,9 @@ from test_launcher import cli, ROOT
 
 class RebootTests(unittest.TestCase):
     def setUp(self):
+        absent = patch.object(cli, 'probe', return_value=None)
+        absent.start()
+        self.addCleanup(absent.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.state = Path(self.temp.name)

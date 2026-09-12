@@ -8,6 +8,10 @@ Copy `config/workbench.example.yaml` to `config/workbench.yaml` (ignored by Git)
 
 Provider executables are discovered on PATH, with historical installation-path fallbacks in `PROVIDERS`. The launcher still expects Linux process metadata, tmux, and zsh. The desktop bridge uses `/usr/bin/python3` with GObject introspection and the installed Ptyxis schemas. An optional `~/bin/ren.sh` title helper is attempted; its absence does not prevent provider startup. CLI flags, resume catalogs, and provider installations are expected adaptation points.
 
+Launcher metadata probes are bounded and distinguish confirmed absence from unknown
+state. See [tmux probe behavior](tmux-probes.md) for recovery semantics and isolated
+test coverage. Interactive attachment remains unbounded.
+
 Runtime state, locks, and exact conversation bindings live under `~/.local/state/starforge-ai-workbench`. The dedicated tmux server is also named `starforge-ai-workbench`. Do not run this copy alongside another installation using that same runtime namespace without first isolating it.
 
 ## Isolated local API
@@ -53,6 +57,34 @@ Claude collection starts with a persisted cutoff covering the preceding day. Ope
 `deploy/install-collector.py` expects a versioned release layout and protected client configuration. Options enable additional observer services. `deploy/install-release.sh` installs the server under `/opt/workbench` with state under `/var/lib/workbench`. Inspect paths, dependencies, service actions, and access configuration before running either helper. These recipes are not a universal installation workflow.
 
 No task execution scheduler is implied by run heartbeats or attention records. Reporting time windows and the default human actor label are simple personal conventions to adapt.
+
+## Personal display and reporting settings
+
+By default, new human actions use `Operator` and reports use `America/New_York`.
+To change either without editing tracked source, copy the synthetic
+[`config/settings.example.yaml`](../config/settings.example.yaml) outside the
+repository, then set `WB_SETTINGS_FILE` to that file's absolute path before
+starting the service:
+
+```sh
+export WB_SETTINGS_FILE="$HOME/.config/starforge-ai-workbench/settings.yaml"
+```
+
+The only precedence rule is: an explicitly set `WB_SETTINGS_FILE` overrides
+both defaults; without it, both defaults apply. Settings load once at app
+creation, so restart or reload the service after changing the file. Two
+installations can use the same checkout and separate private settings files,
+such as one naming its human actor `Avery Example` in `America/Los_Angeles`
+and another retaining the defaults.
+
+`human_name` must be a non-empty string of at most 500 characters and
+`reporting_timezone` must be an installed IANA timezone name. Invalid or
+unreadable settings stop startup with a field-specific error that does not
+print configuration values. An omitted actor for a newly created human API
+action uses `human_name`; an explicitly supplied actor, provider identity, and
+stored record are not changed. Reporting timezone affects report calculations
+and metadata only. Historical date-only imports retain their legacy timezone
+provenance and are not rewritten or reinterpreted.
 
 ## OpenCode attention observations
 
