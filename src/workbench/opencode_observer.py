@@ -21,7 +21,7 @@ ATTENTION_FIELDS = {
     'generation': {'kind', 'provider', 'session_id', 'generation_id', 'source', 'source_instance',
                    'started_at', 'provenance'},
     'observation': {'kind', 'provider', 'session_id', 'generation_id', 'source', 'source_instance',
-                    'sequence', 'observed_at', 'reason', 'provenance'},
+                     'incident_id', 'sequence', 'observed_at', 'reason', 'state', 'provenance'},
 }
 IDENTITY = re.compile(r'[A-Za-z0-9_.:-]{1,200}')
 
@@ -111,6 +111,9 @@ def scan_attention(api, queue, state):
                 for field in ('session_id', 'generation_id', 'source_instance'):
                     if not isinstance(record[field], str) or not IDENTITY.fullmatch(record[field]):
                         raise ValueError('identity')
+                if kind == 'observation' and (not isinstance(record['incident_id'], str) or
+                                              not re.fullmatch(r'[a-f0-9]{64}', record['incident_id'])):
+                    raise ValueError('incident')
                 if record['source'] != 'opencode-plugin':
                     raise ValueError('source')
                 endpoint = ('/api/provider-attention/generations' if kind == 'generation'

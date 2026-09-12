@@ -186,11 +186,14 @@ class ProviderAttentionIn(Model):
     generation_id: ProviderIdentity
     source: Text
     source_instance: ProviderIdentity
+    incident_id: Sha256
     sequence: Annotated[int, Field(ge=1)]
     observed_at: datetime
-    reason: Literal['permission_wait', 'user_question', 'idle', 'provider_error']
-    provenance: Literal['opencode.permission.updated', 'opencode.tool.question',
-                        'opencode.session.idle', 'opencode.message.error']
+    reason: Literal['permission_wait', 'user_question', 'provider_error']
+    state: Literal['open', 'resolved']
+    provenance: Literal['opencode.permission.updated', 'opencode.permission.replied',
+                        'opencode.tool.question', 'opencode.question.completed',
+                        'opencode.message.error']
 
     @field_validator('observed_at')
     @classmethod
@@ -200,12 +203,13 @@ class ProviderAttentionIn(Model):
     @model_validator(mode='after')
     def matching_provenance(self):
         expected = {
-            'permission_wait': 'opencode.permission.updated',
-            'user_question': 'opencode.tool.question',
-            'idle': 'opencode.session.idle',
-            'provider_error': 'opencode.message.error',
+            ('permission_wait', 'open'): 'opencode.permission.updated',
+            ('permission_wait', 'resolved'): 'opencode.permission.replied',
+            ('user_question', 'open'): 'opencode.tool.question',
+            ('user_question', 'resolved'): 'opencode.question.completed',
+            ('provider_error', 'open'): 'opencode.message.error',
         }
-        if self.provenance != expected[self.reason]:
+        if self.provenance != expected.get((self.reason, self.state)):
             raise ValueError('Reason does not match provider provenance')
         return self
 
