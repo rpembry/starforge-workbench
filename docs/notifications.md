@@ -31,7 +31,8 @@ Example placeholders (replace paths and URL in your private file):
   "include_details": false,
   "poll_seconds": 30,
   "min_interval_seconds": 300,
-  "max_attempts": 3
+  "max_attempts": 3,
+  "quiet_hours": null
 }
 ```
 
@@ -190,12 +191,46 @@ Corrupt, unsafe or source-mismatched state fails closed. The worker never resets
 silently. Changing deployment/client paths requires deliberate state reconciliation.
 State grows with current eligible items, not the full event history.
 
+## Optional quiet hours
+
+Quiet hours are disabled by default. Enable them only by supplying all three fields
+with an explicit IANA timezone and 24-hour `HH:MM` boundaries:
+
+```json
+"quiet_hours": {
+  "timezone": "America/New_York",
+  "start": "22:00",
+  "end": "07:00"
+}
+```
+
+Start is inclusive and end is exclusive. A start later than the end is an overnight
+window; equal boundaries are rejected rather than interpreted as all day. Each poll
+uses the configured timezone's current wall clock. During a daylight-saving jump,
+a nonexistent boundary takes effect at the first real local minute outside the
+configured interval. If the jump skips the entire non-quiet interval,
+notifications remain deferred until the next real opening, potentially on the
+following day. During a repeated hour, both occurrences are evaluated by the
+same wall-clock rule. If an end boundary falls within that hour, delivery can become
+eligible after the first boundary and quiet again when the clock repeats, until the
+second boundary. Choose a boundary outside transition hours if that gap is unwanted.
+
+Quiet polls still accept a fresh attention snapshot, remove resolved items and save
+pending delivery state, but they do not call Pushover. They do not acknowledge
+items, reset retry attempts, resolve uncertain delivery, or alter the global rate
+limit. After quiet hours, the worker fetches and reconciles attention again; the
+first eligible poll sends one grouped summary containing only items still pending.
+Any existing backoff remains in force, and the resulting grouped delivery starts
+the normal minimum interval, preventing a boundary burst. Preview reports
+`delivery: deferred_quiet_hours` and the local/epoch end of the current window.
+
 ## Tests
 
 `uv run pytest -q tests/test_notifications.py` uses synthetic snapshots, isolated
 state and mocked HTTP delivery. Coverage includes category selection, content
 privacy, restarts, heartbeat churn, recovery, meaningful changes, bounded retries,
-provider recurrence and replay rejection, backoff, acknowledgement checks, invalid
+provider recurrence and replay rejection, backoff, quiet-hour boundaries and DST,
+acknowledgement checks, invalid
 credentials, stale/corrupt state, locking,
 disabled operation and explicit test delivery. Ordinary tests never contact Pushover.
 

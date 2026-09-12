@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import Mock
 from urllib.parse import parse_qs
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -54,6 +55,106 @@ def private_write(path, content):
 
 def credentials(config):
     private_write(Path(config.credentials_file), 'PUSHOVER_USER_KEY='+('u'*30)+'\nPUSHOVER_API_TOKEN='+('a'*30)+'\nPUSHOVER_TITLE="Fixture title"\n')
+
+
+def local_stamp(year, month, day, hour, minute, zone='UTC', fold=0):
+    return datetime(year, month, day, hour, minute, tzinfo=ZoneInfo(zone), fold=fold).timestamp()
+
+
+def quiet(config, start='22:00', end='07:00', zone='UTC'):
+    config.quiet_hours = n.QuietHours(timezone=zone, start=start, end=end)
+    return config
+
+
+def test_quiet_hours_are_opt_in_strict_and_cover_boundaries(config):
+    assert config.quiet_hours is None
+    for invalid in [
+        {'timezone': 'UTC', 'start': '22:00'},
+        {'timezone': 'Not/AZone', 'start': '22:00', 'end': '07:00'},
+        {'timezone': 'UTC', 'start': '7:00', 'end': '08:00'},
+        {'timezone': 'UTC', 'start': '07:00', 'end': '07:00'},
+    ]:
+        with pytest.raises(ValueError):
+            n.Settings(quiet_hours=invalid)
+    quiet(config)
+    assert n.quiet_hours(config, local_stamp(2027, 1, 2, 21, 59)) is None
+    assert n.quiet_hours(config, local_stamp(2027, 1, 2, 22, 0))['until_local'].endswith('07:00:00+00:00')
+    assert n.quiet_hours(config, local_stamp(2027, 1, 3, 6, 59)) is not None
+    assert n.quiet_hours(config, local_stamp(2027, 1, 3, 7, 0)) is None
+    quiet(config, '09:00', '17:00')
+    assert n.quiet_hours(config, local_stamp(2027, 1, 3, 9, 0)) is not None
+    assert n.quiet_hours(config, local_stamp(2027, 1, 3, 17, 0)) is None
+
+
+def test_quiet_hours_dst_wall_clock_policy(config):
+    zone = 'America/New_York'
+    quiet(config, '22:00', '02:30', zone)
+    spring = n.quiet_hours(config, local_stamp(2027, 3, 14, 1, 59, zone))
+    assert datetime.fromtimestamp(spring['until'], ZoneInfo(zone)).strftime('%H:%M') == '03:00'
+    # The repeated wall hour applies the same rule twice: eligible after the first
+    # 01:30, then quiet again from the fallback until the second 01:30.
+    quiet(config, '22:00', '01:30', zone)
+    assert n.quiet_hours(config, local_stamp(2027, 11, 7, 1, 45, zone, fold=0)) is None
+    repeated = n.quiet_hours(config, local_stamp(2027, 11, 7, 1, 15, zone, fold=1))
+    assert datetime.fromtimestamp(repeated['until'], ZoneInfo(zone)).fold == 1
+    assert datetime.fromtimestamp(repeated['until'], ZoneInfo(zone)).strftime('%H:%M') == '01:30'
+
+
+def test_quiet_hours_when_dst_skips_entire_delivery_interval(config):
+    zone = 'America/New_York'
+    quiet(config, '03:00', '02:59', zone)
+    during = local_stamp(2027, 3, 13, 3, 0, zone)
+    sender = Mock(side_effect=AssertionError('sent during quiet hours'))
+    result = tick(config, [item()], sender, during)
+    assert result['status'] == 'deferred'
+    assert result['quiet_hours']['until'] == local_stamp(2027, 3, 15, 2, 59, zone)
+    assert len(n.read_state(Path(config.state_dir), config).entries) == 1
+    assert n.quiet_hours(config, local_stamp(2027, 3, 14, 3, 0, zone)) is not None
+    assert n.quiet_hours(config, local_stamp(2027, 3, 15, 2, 59, zone)) is None
+    sender.assert_not_called()
+
+
+def test_quiet_pending_reconciles_across_restart_and_releases_one_current_group(config):
+    quiet(config)
+    config.min_interval_seconds = 300
+    during = local_stamp(2027, 1, 2, 22, 30)
+    sender = Mock()
+    assert tick(config, [item('resolved'), item('kept')], sender, during)['status'] == 'deferred'
+    sender.assert_not_called()
+    restarted = n.Settings.model_validate_json(config.model_dump_json())
+    still_quiet = tick(restarted, [item('kept'), item('new')], sender, during+60)
+    assert still_quiet['status'] == 'deferred' and still_quiet['pending'] == 2
+    stored = n.read_state(Path(config.state_dir), restarted)
+    assert len(stored.entries) == 2 and all(not entry.delivered for entry in stored.entries.values())
+    released = tick(restarted, [item('kept'), item('new')], sender,
+                    local_stamp(2027, 1, 3, 7, 0))
+    assert released == {'status': 'delivered', 'count': 2}
+    sender.assert_called_once()
+    assert '2 approval request(s)' in sender.call_args.args[1]['message']
+    assert tick(restarted, [item('kept'), item('new'), item('later')], sender,
+                local_stamp(2027, 1, 3, 7, 1))['status'] == 'backoff'
+    sender.assert_called_once()
+
+
+def test_quiet_hours_preserve_retry_budget_unknown_hold_and_preview(config):
+    quiet(config)
+    failure = Mock(side_effect=n.NotificationError('delivery_not_submitted', retryable=True))
+    before = local_stamp(2027, 1, 2, 21, 50)
+    assert tick(config, [item()], failure, before)['status'] == 'retry_pending'
+    during = local_stamp(2027, 1, 2, 22, 30)
+    deferred = tick(config, [item()], Mock(), during)
+    assert deferred['status'] == 'deferred'
+    state = n.read_state(Path(config.state_dir), config)
+    assert next(iter(state.entries.values())).failures == 1
+    preview = tick(config, [item()], Mock(side_effect=AssertionError('sent')), during+60, preview=True)
+    assert preview['delivery'] == 'deferred_quiet_hours'
+    assert preview['quiet_hours']['until_local'].endswith('07:00:00+00:00')
+
+    unknown_config = config.model_copy(update={'state_dir': str(Path(config.state_dir).with_name('unknown'))}, deep=True)
+    uncertain = Mock(side_effect=n.NotificationError('delivery_unknown', unknown=True))
+    attempt = tick(unknown_config, [item()], uncertain, before)['attempt']['id']
+    held = tick(unknown_config, [item()], Mock(side_effect=AssertionError('sent')), during)
+    assert held['status'] == 'unknown' and held['attempt']['id'] == attempt
 
 
 def test_delivery_dedup_restart_heartbeat_recovery_and_meaningful_change(config):

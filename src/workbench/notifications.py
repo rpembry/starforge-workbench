@@ -16,6 +16,7 @@ import time
 import uuid
 from typing import Literal
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -39,6 +40,28 @@ class NotificationError(Exception):
         self.code, self.retryable, self.unknown = code, retryable, unknown
 
 
+class QuietHours(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    timezone: str = Field(min_length=1, max_length=100)
+    start: str = Field(pattern=r'^(?:[01][0-9]|2[0-3]):[0-5][0-9]$')
+    end: str = Field(pattern=r'^(?:[01][0-9]|2[0-3]):[0-5][0-9]$')
+
+    @field_validator('timezone')
+    @classmethod
+    def valid_timezone(cls, value):
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError('Use an installed IANA timezone name') from None
+        return value
+
+    @model_validator(mode='after')
+    def nonempty_window(self):
+        if self.start == self.end:
+            raise ValueError('Quiet-hours start and end must differ')
+        return self
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     enabled: bool = False
@@ -53,6 +76,7 @@ class Settings(BaseModel):
     poll_seconds: int = Field(default=30, ge=10, le=3600)
     min_interval_seconds: int = Field(default=300, ge=5, le=86400)
     max_attempts: int = Field(default=3, ge=1, le=5)
+    quiet_hours: QuietHours | None = None
 
     @field_validator('dashboard_url')
     @classmethod
@@ -279,6 +303,33 @@ def message(items, config):
     return dict(message='\n'.join(lines)[:1024], url=config.dashboard_url, url_title='Open Workbench', priority='0')
 
 
+def quiet_hours(config, current):
+    quiet = config.quiet_hours
+    if quiet is None:
+        return None
+    zone = ZoneInfo(quiet.timezone)
+    local = datetime.fromtimestamp(current, zone)
+    minute = local.strftime('%H:%M')
+    active = ((quiet.start < quiet.end and quiet.start <= minute < quiet.end)
+              or (quiet.start > quiet.end and (minute >= quiet.start or minute < quiet.end)))
+    if not active:
+        return None
+    # Search UTC minute boundaries so nonexistent and repeated local times follow
+    # the actual zone transition rather than an invented wall-clock instant.
+    boundary = int(current//60)*60+60
+    # A transition can skip the entire non-quiet interval, so the next
+    # opening may be on the following day (including date-line jumps).
+    for _ in range(72*60):
+        candidate = datetime.fromtimestamp(boundary, zone).strftime('%H:%M')
+        still_active = ((quiet.start < quiet.end and quiet.start <= candidate < quiet.end)
+                        or (quiet.start > quiet.end and (candidate >= quiet.start or candidate < quiet.end)))
+        if not still_active:
+            return dict(timezone=quiet.timezone, start=quiet.start, end=quiet.end,
+                        until=boundary, until_local=datetime.fromtimestamp(boundary, zone).isoformat())
+        boundary += 60
+    raise NotificationError('invalid_quiet_hours_window')
+
+
 def scope(config):
     return digest([config.api_client_file, config.dashboard_url])
 
@@ -420,8 +471,22 @@ def poll(config, snapshot, sender=None, current=None, preview=False, retry_pendi
     if preview:
         state = read_state(folder, config)
         pending = reconcile(state, items, config, stamp)
+        eligible = sum(not entry.delivered and not entry.blocked and entry.failures < config.max_attempts
+                       for entry in state.entries.values())
+        deferred = quiet_hours(config, current) if eligible and not state.blocked else None
+        if state.blocked:
+            delivery = 'blocked_unknown'
+        elif not pending:
+            delivery = 'none'
+        elif not eligible:
+            delivery = 'blocked'
+        elif deferred:
+            delivery = 'deferred_quiet_hours'
+        else:
+            delivery = 'backoff' if current < state.not_before else 'eligible'
         return dict(status='preview', pending=len(pending), blocked=state.blocked,
                     attempt=attempt_view(state), blocked_items=sum(e.blocked for e in state.entries.values() if not e.delivered), not_before=state.not_before,
+                    quiet_hours=deferred, delivery=delivery,
                     payload=message(pending, config) if pending else None)
     with locked_state(folder):
         state = read_state(folder, config)
@@ -439,6 +504,11 @@ def poll(config, snapshot, sender=None, current=None, preview=False, retry_pendi
         if not eligible:
             save_state(folder, state)
             return {'status': 'blocked' if pending else 'quiet', 'pending': len(pending)}
+        deferred = quiet_hours(config, current)
+        if deferred:
+            save_state(folder, state)
+            return {'status': 'deferred', 'reason': 'quiet_hours', 'pending': len(pending),
+                    'eligible': len(eligible), 'quiet_hours': deferred}
         if current < state.not_before:
             save_state(folder, state)
             return {'status': 'backoff', 'pending': len(pending), 'not_before': state.not_before}
