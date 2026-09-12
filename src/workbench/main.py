@@ -210,6 +210,14 @@ def create_app(repository=None, auth=None, settings=None):
     def view(request: Request):
         return templates.TemplateResponse(request=request, name='dashboard.html', context={'dashboard': repository.dashboard()})
 
+    @app.get('/guide', response_class=HTMLResponse, dependencies=[Depends(operator)])
+    def everyday_guide(request: Request):
+        return templates.TemplateResponse(request=request, name='guide.html', context={})
+
+    @app.get('/assets/workbench-logo.png')
+    def workbench_logo():
+        return FileResponse(Path(__file__).with_name('static')/'workbench-logo.png', media_type='image/png')
+
     @app.get('/assets/task-form.js')
     def task_form_script():
         return FileResponse(Path(__file__).with_name('static')/'task-form.js', media_type='application/javascript')

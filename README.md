@@ -1,5 +1,8 @@
 # Starforge Workbench
 
+For everyday use, open **Everyday guide & startup** from the dashboard navigation (`/guide`). It covers launching sessions, daily conversations, task updates, reports, and health checks.
+
+
 A personal workbench for keeping human commitments, AI activity, and daily attention in one place.
 
 I built this around my own tools and working habits, with AI doing much of the implementation. I'm sharing it as a working reference and a launch point for your own system. Expect to adapt it: this is an evolving personal project, not a polished application with a universal installer or a stable compatibility promise.
