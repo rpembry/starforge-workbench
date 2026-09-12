@@ -49,6 +49,9 @@ Provider compatibility claims and their evidence level are tracked in the
 its opt-in smoke procedure after provider upgrades; fixture coverage is not a
 claim that a real provider version was exercised end to end.
 
+For wheel scrolling, selection, and link behavior, ask AIW to inspect and adapt
+your terminal settings; see [mouse scrolling and terminal preferences](docs/adapting.md#mouse-scrolling-and-terminal-preferences).
+
 ### Shared work state and attention
 
 The Python/FastAPI service stores objectives, actions, events, runs, artifacts, and collector health in server-local SQLite. Jinja templates and HTMX provide the browser view. The JSON API lets an AI operate the same records through the `wb-api` client.
