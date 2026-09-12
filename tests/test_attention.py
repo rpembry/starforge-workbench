@@ -4,10 +4,17 @@ from test_api import api, repo, action, COLLECTOR
 
 def run(api, action_id=None, status='running', source_id='fixture'):
     response = api.post('/api/runs', json=dict(source='fixture', source_id=source_id, context='Fixture agent',
-        provider='codex', actor='Codex', status=status, action_id=action_id,
+        provider='codex', actor='Codex', status=status,
         started_at=datetime.now(timezone.utc).isoformat()))
     assert response.status_code == 201
-    return response.json()
+    result = response.json()
+    if action_id:
+        assigned = api.get('/api/actions/'+action_id).json()
+        linked = api.post(f'/api/actions/{action_id}/runs/{result["id"]}/link', json={
+            'action_version': assigned['version'], 'run_version': result['version']})
+        assert linked.status_code == 200
+        result = linked.json()['run']
+    return result
 
 
 def items(api):

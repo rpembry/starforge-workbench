@@ -104,10 +104,13 @@ def test_versions_missing_references_and_validation(api):
 
 def test_runs_heartbeat_staleness_restart_identity_and_relationships(api, repo):
     a = action(api, status='accepted')
-    body = dict(source='starforge', source_id='boot:pid:birth', context='ai-workbench', provider='codex', actor='codex', status='running', started_at=datetime.now(timezone.utc).isoformat(), action_id=a['id'])
+    body = dict(source='starforge', source_id='boot:pid:birth', context='ai-workbench', provider='codex', actor='codex', status='running', started_at=datetime.now(timezone.utc).isoformat())
     first = api.post('/api/runs', json=body).json()
     again = api.post('/api/runs', json=body).json()
     assert first['id'] == again['id'] and again['version'] == 2
+    a = api.patch('/api/actions/'+a['id'], json={'version': a['version'], 'execution_mode': 'agent'}).json()
+    linked = api.post(f'/api/actions/{a["id"]}/runs/{first["id"]}/link', json={
+        'action_version': a['version'], 'run_version': again['version']}).json()['run']
     assert api.get('/api/dashboard').json()['active'][0]['action_id'] == a['id']
     assert api.post('/api/runs', json={**body, 'context': 'other'}).status_code == 409
     assert api.post('/api/runs', json={**body, 'started_at': datetime.now(timezone.utc).isoformat()}).status_code == 409
@@ -116,7 +119,7 @@ def test_runs_heartbeat_staleness_restart_identity_and_relationships(api, repo):
         db.commit()
     dash = api.get('/api/dashboard').json()
     assert not dash['active'] and dash['stale_runs'][0]['id'] == first['id']
-    assert api.patch('/api/runs/'+first['id'], json={'version': 2, 'status': 'stopped'}).status_code == 200
+    assert api.patch('/api/runs/'+first['id'], json={'version': linked['version'], 'status': 'stopped'}).status_code == 200
 
 
 def test_migrations_reopen_permissions_and_artifact(api, repo):
@@ -144,10 +147,12 @@ def test_openapi_and_read_view_escape_content(api):
 
 
 def test_heartbeats_preserve_operator_assignments_and_approval_state(api):
-    a = action(api, status='accepted')
+    a = action(api, status='accepted', execution_mode='agent')
     body = dict(source='starforge', source_id='heartbeat-owned', context='ai-workbench', provider='codex', actor='codex', status='running', started_at=datetime.now(timezone.utc).isoformat())
     first = api.post('/api/runs', json=body).json()
-    updated = api.patch('/api/runs/'+first['id'], json={'version': 1, 'action_id': a['id'], 'status': 'approval_needed'})
+    linked = api.post(f'/api/actions/{a["id"]}/runs/{first["id"]}/link', json={
+        'action_version': a['version'], 'run_version': first['version']}).json()['run']
+    updated = api.patch('/api/runs/'+first['id'], json={'version': linked['version'], 'status': 'approval_needed'})
     assert updated.status_code == 200
     api.headers['Authorization'] = 'Bearer '+COLLECTOR
     heartbeat = api.post('/api/runs', json=body)

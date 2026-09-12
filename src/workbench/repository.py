@@ -20,6 +20,7 @@ class Repository(Protocol):
     def get(self, resource: str, identity: str) -> dict: ...
     def create(self, resource: str, data: dict, principal: str) -> dict: ...
     def patch(self, resource: str, identity: str, data: dict, principal: str) -> dict: ...
+    def link_run(self, action_id: str, run_id: str, data: dict, principal: str) -> dict: ...
 
 
 TABLES = {'objectives', 'actions', 'runs', 'events', 'artifacts', 'collectors', 'import_batches', 'import_records'}
@@ -182,6 +183,43 @@ class SQLiteRepository:
                 return result
             except sqlite3.IntegrityError:
                 raise Problem(409, 'constraint_conflict', 'Related resource missing or invalid field') from None
+
+    def link_run(self, action_id, run_id, data, principal):
+        from datetime import datetime, timezone
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            action = self._get(db, 'actions', action_id)
+            run = self._get(db, 'runs', run_id)
+            if action['version'] != data['action_version'] or run['version'] != data['run_version']:
+                raise Problem(409, 'version_conflict', 'Read both current records before linking them')
+            if action['execution_mode'] != 'agent' or action['status'] not in {
+                    'accepted', 'in_progress', 'waiting', 'approval_needed'}:
+                raise Problem(409, 'incompatible_action', 'Linking requires a committed agent action')
+            age = (datetime.now(timezone.utc)-datetime.fromisoformat(run['heartbeat_at'])).total_seconds()
+            if age > 90 or run['status'] in {'stopped', 'unknown'}:
+                raise Problem(409, 'incompatible_run', 'Linking requires a fresh non-stopped run')
+            previous = run['action_id']
+            expected = data.get('replace_action_id')
+            if previous == action_id:
+                if expected not in {None, action_id}:
+                    raise Problem(409, 'assignment_conflict', 'Replacement identity does not match the current link')
+                return {'changed': False, 'action': action, 'run': run, 'audit_event': None}
+            if previous and expected != previous:
+                raise Problem(409, 'assignment_conflict', 'Run is already linked; name its current action to reassign it')
+            if not previous and expected is not None:
+                raise Problem(409, 'assignment_conflict', 'Unlinked run does not match the requested replacement')
+            self._update(db, 'runs', run_id, {'action_id': action_id, 'version': run['version']+1})
+            linked = self._get(db, 'runs', run_id)
+            event = dict(id=str(uuid.uuid4()), kind='decision', summary='Run linked to action',
+                details=json.dumps({'action_id': action_id, 'action_version': action['version'],
+                    'run_id': run_id, 'run_version': linked['version'], 'previous_action_id': previous,
+                    'run_source': run['source'], 'run_source_id': run['source_id'],
+                    'run_started_at': run['started_at']}, sort_keys=True), project=action['project'],
+                action_id=action_id, run_id=run_id, source='workbench-api', source_id=str(uuid.uuid4()),
+                occurred_at=now(), recorded_at=now(), recorded_by=principal)
+            self.insert(db, 'events', event)
+            db.commit()
+            return {'changed': True, 'action': action, 'run': linked, 'audit_event': event}
 
     def import_batch(self, data, principal):
         from .legacy import apply_batch

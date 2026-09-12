@@ -217,8 +217,12 @@ class ProviderAttentionIn(Model):
 class RunPatch(Model):
     version: Annotated[int, Field(ge=1)]
     status: Literal['running', 'waiting', 'approval_needed', 'stopped', 'unknown'] | None = None
-    action_id: str | None = None
-    objective_id: str | None = None
+
+
+class RunLink(Model):
+    action_version: Annotated[int, Field(ge=1)]
+    run_version: Annotated[int, Field(ge=1)]
+    replace_action_id: str | None = None
 
 
 class ArtifactIn(Model):
