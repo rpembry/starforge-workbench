@@ -24,7 +24,10 @@ Example placeholders (replace paths and URL in your private file):
   "credentials_file": "/path/to/private/pushover.env",
   "state_dir": "/path/to/private/workbench-notification-state",
   "title": "Workbench",
-  "categories": ["approval_needed", "collector_health", "agent_without_active_run"],
+  "categories": [
+    "approval_needed", "agent_without_active_run", "collector_health",
+    "provider_error", "provider_permission_wait", "provider_user_question"
+  ],
   "include_details": false,
   "poll_seconds": 30,
   "min_interval_seconds": 300,
@@ -92,6 +95,13 @@ no existing service needs restarting. `watch` rereads configuration each poll.
   category, progress classification or reason are meaningful. Task-title changes
   count only when title inclusion is enabled. Routine evidence timestamps and poll
   order do not trigger notifications.
+- Provider permission waits, user questions, and provider errors are actionable and
+  selectable. They are enabled by default like the other categories. Routine
+  `provider_idle` observations are never selectable and never send a push.
+- Provider occurrences also use the authoritative generation identity and start
+  time. A new turn can notify even when the session and reason are unchanged and no
+  recovery was sampled. Older generations, regressed sequences, and contradictory
+  evidence fail closed rather than rearming an alert.
 - Multiple pending items are coalesced into **one summary per delivery**, including
   initial startup and recovery after an outage. Default spacing is five minutes;
   new items wait behind that rate limit. Resolved pending items are removed.
@@ -174,7 +184,8 @@ State grows with current eligible items, not the full event history.
 `uv run pytest -q tests/test_notifications.py` uses synthetic snapshots, isolated
 state and mocked HTTP delivery. Coverage includes category selection, content
 privacy, restarts, heartbeat churn, recovery, meaningful changes, bounded retries,
-backoff, acknowledgement checks, invalid credentials, stale/corrupt state, locking,
+provider recurrence and replay rejection, backoff, acknowledgement checks, invalid
+credentials, stale/corrupt state, locking,
 disabled operation and explicit test delivery. Ordinary tests never contact Pushover.
 
 Crash-boundary tests cover claimed-but-not-sent, possible remote acceptance, and

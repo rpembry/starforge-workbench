@@ -18,14 +18,19 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .client import client
 
 ENDPOINT = 'https://api.pushover.net/1/messages.json'
-CATEGORIES = {'approval_needed', 'collector_health', 'agent_without_active_run'}
+CATEGORIES = {'approval_needed', 'collector_health', 'agent_without_active_run',
+              'provider_permission_wait', 'provider_user_question', 'provider_error'}
+PROVIDER_CATEGORIES = {'provider_permission_wait', 'provider_user_question', 'provider_error'}
 LABELS = {'approval_needed': 'approval request(s)', 'collector_health': 'collector visibility alert(s)',
-          'agent_without_active_run': 'agent action(s) with unknown progress'}
+          'agent_without_active_run': 'agent action(s) with unknown progress',
+          'provider_permission_wait': 'provider permission request(s)',
+          'provider_user_question': 'provider question(s)',
+          'provider_error': 'provider error alert(s)'}
 
 
 class NotificationError(Exception):
@@ -42,7 +47,8 @@ class Settings(BaseModel):
     credentials_file: str | None = None
     state_dir: str = '~/.local/state/starforge-workbench-notifier'
     title: str = Field(default='Workbench', min_length=1, max_length=250)
-    categories: list[Literal['approval_needed', 'collector_health', 'agent_without_active_run']] = Field(default_factory=lambda: sorted(CATEGORIES))
+    categories: list[Literal['approval_needed', 'collector_health', 'agent_without_active_run',
+                             'provider_permission_wait', 'provider_user_question', 'provider_error']] = Field(default_factory=lambda: sorted(CATEGORIES))
     include_details: bool = False
     poll_seconds: int = Field(default=30, ge=10, le=3600)
     min_interval_seconds: int = Field(default=300, ge=5, le=86400)
@@ -83,6 +89,16 @@ class Entry(LegacyEntry):
     failures: int = Field(default=0, ge=0, le=5)
     blocked: bool = False
     outcome: Literal['pending', 'delivered', 'known_failed'] = 'pending'
+    authority: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
+    authority_started_at: float | None = Field(default=None, allow_inf_nan=False)
+    authority_sequence: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode='after')
+    def complete_authority(self):
+        fields = (self.authority, self.authority_started_at, self.authority_sequence)
+        if any(value is not None for value in fields) and not all(value is not None for value in fields):
+            raise ValueError('Authority metadata must be complete')
+        return self
 
 
 class Attempt(BaseModel):
@@ -196,6 +212,8 @@ def selected(snapshot, config, current):
                 continue
             if any(not isinstance(item.get(k), str) or not item[k] for k in ('id', 'progress', 'reason', 'title')):
                 raise ValueError()
+            if item['kind'] in PROVIDER_CATEGORIES:
+                provider_authority(item, stamp.timestamp())
             if item['kind'] not in config.categories:
                 continue
             key = digest(item['id'])
@@ -215,6 +233,33 @@ def fingerprint(item, include_details):
     if include_details:
         values['title'] = item['title']
     return digest(values)
+
+
+def provider_authority(item, snapshot_stamp=None):
+    if item['kind'] not in PROVIDER_CATEGORIES:
+        return None
+    evidence = item.get('evidence')
+    if not isinstance(evidence, list) or len(evidence) != 1 or not isinstance(evidence[0], dict):
+        raise ValueError()
+    record = evidence[0]
+    if record.get('resource') != 'provider_attention' or not isinstance(record.get('generation_id'), str) or not record['generation_id']:
+        raise ValueError()
+    if type(record.get('sequence')) is not int or record['sequence'] < 0:
+        raise ValueError()
+    timestamps = record.get('timestamps')
+    if not isinstance(timestamps, dict):
+        raise ValueError()
+    started = datetime.fromisoformat(record.get('generation_started_at', ''))
+    observed = datetime.fromisoformat(timestamps.get('observed_at', ''))
+    fresh_until = datetime.fromisoformat(timestamps.get('fresh_until', ''))
+    if any(value.tzinfo is None for value in (started, observed, fresh_until)):
+        raise ValueError()
+    started_stamp, observed_stamp, fresh_stamp = (value.timestamp() for value in (started, observed, fresh_until))
+    if started_stamp > observed_stamp or observed_stamp >= fresh_stamp:
+        raise ValueError()
+    if snapshot_stamp is not None and not observed_stamp <= snapshot_stamp <= fresh_stamp:
+        raise ValueError()
+    return digest(record['generation_id']), started_stamp, record['sequence']
 
 
 def message(items, config):
@@ -306,7 +351,25 @@ def reconcile(state, items, config, stamp):
     for key, item in items.items():
         signature = fingerprint(item, config.include_details)
         prior = state.entries.get(key)
-        entries[key] = prior if prior and prior.fingerprint == signature else Entry(fingerprint=signature)
+        authority = provider_authority(item, stamp)
+        if authority and prior and prior.authority:
+            authority_id, started_at, sequence = authority
+            if started_at < prior.authority_started_at or (started_at == prior.authority_started_at and authority_id != prior.authority):
+                raise NotificationError('provider_attention_generation_out_of_order')
+            if authority_id == prior.authority:
+                if started_at != prior.authority_started_at or sequence < prior.authority_sequence:
+                    raise NotificationError('provider_attention_evidence_out_of_order')
+                if sequence == prior.authority_sequence and prior.fingerprint != signature:
+                    raise NotificationError('provider_attention_evidence_conflict')
+        if prior and prior.fingerprint == signature and (not authority or authority[0] == prior.authority):
+            entries[key] = prior
+            if authority:
+                entries[key].authority_sequence = authority[2]
+        else:
+            fields = dict(fingerprint=signature)
+            if authority:
+                fields.update(authority=authority[0], authority_started_at=authority[1], authority_sequence=authority[2])
+            entries[key] = Entry(**fields)
     state.entries = entries  # Observed recovery rearms a later episode; API errors do not.
     state.last_snapshot = stamp
     return [item for key, item in items.items() if not entries[key].delivered]

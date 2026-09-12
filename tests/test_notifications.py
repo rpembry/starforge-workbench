@@ -22,6 +22,19 @@ def item(identity='fixture', kind='approval_needed', **extra):
                 evidence=[{'timestamps': {'heartbeat_at': 'earlier'}}], **extra)
 
 
+def provider_item(kind='provider_permission_wait', generation='msg_one', sequence=1,
+                  started=NOW-10, observed=NOW-1, identity='provider:session', **extra):
+    value = item(identity, kind)
+    value.update(progress='waiting', reason='Provider attention required',
+                 evidence=[{'resource': 'provider_attention', 'id': identity, 'generation_id': generation,
+                            'generation_started_at': datetime.fromtimestamp(started, timezone.utc).isoformat(),
+                            'sequence': sequence, 'provenance': 'opencode.fixture',
+                            'timestamps': {'observed_at': datetime.fromtimestamp(observed, timezone.utc).isoformat(),
+                                           'fresh_until': datetime.fromtimestamp(observed+90, timezone.utc).isoformat()}}])
+    value.update(extra)
+    return value
+
+
 @pytest.fixture
 def config(tmp_path):
     return n.Settings(enabled=True, dashboard_url='https://dashboard.example.test',
@@ -78,6 +91,61 @@ def test_categories_coalesce_and_routine_details_do_not_notify(config):
     assert tick(config, entries, sender, NOW+11)['status'] == 'delivered'
     assert tick(config, [], sender, NOW+12)['status'] == 'quiet'
     assert tick(config, entries, sender, NOW+20)['status'] == 'delivered'
+
+
+def test_actionable_provider_categories_coalesce_and_idle_is_never_selectable(config):
+    sender = Mock()
+    entries = [provider_item(),
+               provider_item('provider_user_question', generation='msg_two', started=NOW-9, identity='provider:question'),
+               provider_item('provider_error', generation='msg_three', started=NOW-8, identity='provider:error', progress='blocked'),
+               item('idle', 'provider_idle')]
+    assert tick(config, entries, sender)['count'] == 3
+    payload = sender.call_args.args[1]
+    assert all(label in payload['message'] for label in ('provider permission', 'provider question', 'provider error'))
+    assert 'idle' not in payload['message'] and 'PRIVATE' not in json.dumps(payload)
+    with pytest.raises(ValueError):
+        n.Settings(categories=['provider_idle'])
+
+
+def test_provider_generation_rearms_same_reason_without_sampled_recovery(config):
+    sender = Mock()
+    first = provider_item()
+    assert tick(config, [first], sender)['status'] == 'delivered'
+    unchanged = provider_item(sequence=2, observed=NOW+1)
+    assert tick(config, [unchanged], sender, NOW+2)['status'] == 'quiet'
+    second = provider_item(generation='msg_two', started=NOW+3, observed=NOW+4)
+    assert tick(config, [second], sender, NOW+5)['status'] == 'delivered'
+    assert sender.call_count == 2
+    assert 'msg_one' not in (Path(config.state_dir)/'delivery.json').read_text()
+
+
+def test_provider_stale_replayed_and_conflicting_evidence_fail_closed(config):
+    sender = Mock()
+    with pytest.raises(n.NotificationError, match='invalid_or_stale'):
+        tick(config, [provider_item(started=NOW-110, observed=NOW-100)], sender)
+    assert tick(config, [provider_item(sequence=2)], sender)['status'] == 'delivered'
+    with pytest.raises(n.NotificationError, match='evidence_out_of_order'):
+        tick(config, [provider_item(sequence=1, observed=NOW+1)], sender, NOW+2)
+    newer = provider_item(generation='msg_two', started=NOW+3, observed=NOW+4)
+    assert tick(config, [newer], sender, NOW+5)['status'] == 'delivered'
+    with pytest.raises(n.NotificationError, match='generation_out_of_order'):
+        tick(config, [provider_item(observed=NOW+6)], sender, NOW+7)
+    conflict = provider_item(generation='msg_two', started=NOW+3, observed=NOW+7, reason='Different')
+    with pytest.raises(n.NotificationError, match='evidence_conflict'):
+        tick(config, [conflict], sender, NOW+8)
+    assert sender.call_count == 2
+
+
+def test_unknown_provider_delivery_does_not_acknowledge_recurrent_generation(config):
+    unknown = Mock(side_effect=n.NotificationError('delivery_unknown', unknown=True))
+    first = provider_item()
+    attempt = tick(config, [first], unknown)['attempt']['id']
+    second = provider_item(generation='msg_two', started=NOW+1, observed=NOW+2)
+    assert tick(config, [second], unknown, NOW+3)['status'] == 'unknown'
+    n.resolve(config, attempt, 'delivered')
+    success = Mock()
+    assert tick(config, [second], success, NOW+31)['status'] == 'delivered'
+    success.assert_called_once()
 
 
 def test_details_require_opt_in_and_message_is_bounded(config):
