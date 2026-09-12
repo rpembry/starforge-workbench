@@ -4,7 +4,6 @@ import importlib.util
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,7 +11,7 @@ import uuid
 from unittest.mock import patch
 
 import yaml
-from tmux_guard import cleanup_fixture_server, guarded_tmux_run
+from tmux_guard import FixtureTmuxTarget, cleanup_fixture_server, guarded_tmux_run
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,9 +29,10 @@ class StartupIntegration(unittest.TestCase):
             spec.loader.exec_module(cli)
             cli.STATE = folder/'state'
             cli.SERVER = server
-            cli.TMUX_SOCKET = folder/'fixture.sock'
+            tmux_target = FixtureTmuxTarget(folder)
+            cli.TMUX_SOCKET = tmux_target.socket
             original_run = cli.run
-            guarded_run = guarded_tmux_run(original_run, folder/'fixture.sock', environ={})
+            guarded_run = guarded_tmux_run(original_run, tmux_target, environ={})
             def isolated_run(args, **kwargs):
                 if args[0] == '/usr/bin/tmux':
                     self.assertEqual(kwargs.get('cwd'), Path('/'))
@@ -65,7 +65,7 @@ spec.loader.exec_module(m)
 m.STATE = Path({str(cli.STATE)!r})
 m.HOME = Path({str(folder)!r})
 m.SERVER = {server!r}
-m.TMUX_SOCKET = Path({str(folder/'fixture.sock')!r})
+m.TMUX_SOCKET = Path({str(tmux_target.socket)!r})
 m.SELF = Path({str(runner)!r})
 m.PROVIDERS['ollama'] = {str(fixture)!r}
 m.main(sys.argv[1:])
@@ -113,8 +113,9 @@ m.main(sys.argv[1:])
                 self.assertEqual((folder/'attempts').read_text(), '4')
             finally:
                 os.chdir(original_cwd)
-                assert cli.TMUX_SOCKET == folder/'fixture.sock'
-                cleanup_fixture_server(folder/'fixture.sock')
+                assert cli.TMUX_SOCKET == tmux_target.socket
+                cleanup_fixture_server(tmux_target)
+                tmux_target.close()
 
 
 if __name__ == '__main__':

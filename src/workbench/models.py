@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Text = Annotated[str, Field(min_length=1, max_length=500)]
 Details = Annotated[str, Field(max_length=10000)]
@@ -162,11 +162,67 @@ class CollectorIn(Model):
     observed_runs: Annotated[int, Field(ge=0)] = 0
 
 
+ProviderIdentity = Annotated[str, Field(pattern=r'^[A-Za-z0-9_.:-]{1,200}$')]
+
+
+class ProviderGenerationIn(Model):
+    provider: Literal['opencode']
+    session_id: ProviderIdentity
+    generation_id: ProviderIdentity
+    source: Text
+    source_instance: ProviderIdentity
+    started_at: datetime
+    provenance: Literal['opencode.chat.message']
+
+    @field_validator('started_at')
+    @classmethod
+    def aware_time(cls, value):
+        return EventIn.aware_time(value)
+
+
+class ProviderAttentionIn(Model):
+    provider: Literal['opencode']
+    session_id: ProviderIdentity
+    generation_id: ProviderIdentity
+    source: Text
+    source_instance: ProviderIdentity
+    incident_id: Sha256
+    sequence: Annotated[int, Field(ge=1)]
+    observed_at: datetime
+    reason: Literal['permission_wait', 'user_question', 'provider_error']
+    state: Literal['open', 'resolved']
+    provenance: Literal['opencode.permission.updated', 'opencode.permission.replied',
+                        'opencode.tool.question', 'opencode.question.completed',
+                        'opencode.message.error']
+
+    @field_validator('observed_at')
+    @classmethod
+    def aware_time(cls, value):
+        return EventIn.aware_time(value)
+
+    @model_validator(mode='after')
+    def matching_provenance(self):
+        expected = {
+            ('permission_wait', 'open'): 'opencode.permission.updated',
+            ('permission_wait', 'resolved'): 'opencode.permission.replied',
+            ('user_question', 'open'): 'opencode.tool.question',
+            ('user_question', 'resolved'): 'opencode.question.completed',
+            ('provider_error', 'open'): 'opencode.message.error',
+        }
+        if self.provenance != expected.get((self.reason, self.state)):
+            raise ValueError('Reason does not match provider provenance')
+        return self
+
+
 class RunPatch(Model):
     version: Annotated[int, Field(ge=1)]
     status: Literal['running', 'waiting', 'approval_needed', 'stopped', 'unknown'] | None = None
-    action_id: str | None = None
-    objective_id: str | None = None
+
+
+class RunLink(Model):
+    action_version: Annotated[int, Field(ge=1)]
+    run_version: Annotated[int, Field(ge=1)]
+    replace_action_id: str | None = None
 
 
 class ArtifactIn(Model):

@@ -22,11 +22,14 @@ detection remains **unsupported**: a completed message is activity evidence, not
 proof that the application is idle. Live Google Keep extraction remains
 **unknown/unverified** and is not represented by synthetic records or version checks.
 
-The isolated tmux fixture is also fixture-only. Its shared guard parses the actual
-tmux argv and permits only one explicit, unique `-S` socket. Missing overrides,
-named servers, the default socket and an inherited live socket are rejected before
-the subprocess runs, including when `TMUX` is unset. Cleanup sends `kill-server`
-only through that same exact-socket guard. See
+The isolated tmux fixture is also fixture-only. Its shared guard creates a unique
+`0700` directory and `0600` ownership marker, then strictly parses tmux's global
+argv and permits only one separate `-S` selector for that owned socket. Attached,
+duplicate and alternate selectors, named/default/production targets, changed
+ownership and symlink targets are rejected before the subprocess runs, including
+when `TMUX` is unset. Provider-command options are not mistaken for global options.
+Cleanup rechecks the same ownership invariant before sending `kill-server` only to
+the fixture socket. See
 [`test_tmux_guard.py`](../tests/test_tmux_guard.py) and
 [`test_startup_tmux.py`](../tests/test_startup_tmux.py).
 
