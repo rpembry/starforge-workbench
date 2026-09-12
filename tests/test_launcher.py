@@ -19,6 +19,9 @@ spec.loader.exec_module(cli)
 
 class LauncherTests(unittest.TestCase):
     def setUp(self):
+        absent = patch.object(cli, 'probe', return_value=None)
+        absent.start()
+        self.addCleanup(absent.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name)
         self.data = yaml.safe_load((ROOT/'config/workbench.example.yaml').read_text())
