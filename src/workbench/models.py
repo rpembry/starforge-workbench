@@ -191,7 +191,7 @@ class ProviderAttentionIn(Model):
     observed_at: datetime
     reason: Literal['permission_wait', 'user_question', 'provider_error']
     state: Literal['open', 'resolved']
-    provenance: Literal['opencode.permission.updated', 'opencode.permission.replied',
+    provenance: Literal['opencode.permission.asked', 'opencode.permission.updated', 'opencode.permission.replied',
                         'opencode.tool.question', 'opencode.question.completed',
                         'opencode.message.error']
 
@@ -209,7 +209,9 @@ class ProviderAttentionIn(Model):
             ('user_question', 'resolved'): 'opencode.question.completed',
             ('provider_error', 'open'): 'opencode.message.error',
         }
-        if self.provenance != expected.get((self.reason, self.state)):
+        # Preserve already queued legacy evidence while new bridges report the runtime event.
+        valid_asked = (self.reason, self.state, self.provenance) == ('permission_wait', 'open', 'opencode.permission.asked')
+        if not valid_asked and self.provenance != expected.get((self.reason, self.state)):
             raise ValueError('Reason does not match provider provenance')
         return self
 

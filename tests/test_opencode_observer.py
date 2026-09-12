@@ -87,11 +87,15 @@ await user("msg_old", Date.now()-1000);
 await assistant("asst_old", "msg_old");
 await tool("asst_old", "call_one");
 await tool("asst_old", "call_late");
-await hooks.event({{event:{{type:"permission.updated",properties:{{id:"per_one",sessionID:"ses_test",messageID:"asst_old",metadata:{{secret:"PRIVATE"}}}}}}}});
+// An unlinked request and a legacy top-level message identity are not evidence.
+await hooks.event({{event:{{type:"permission.asked",properties:{{id:"unlinked",sessionID:"ses_test"}}}}}});
+await hooks.event({{event:{{type:"permission.asked",properties:{{id:"legacy_shape",sessionID:"ses_test",messageID:"asst_old"}}}}}});
+
+await hooks.event({{event:{{type:"permission.asked",properties:{{id:"per_one",sessionID:"ses_test",tool:{{messageID:"asst_old",callID:"call_permission"}},metadata:{{secret:"PRIVATE"}}}}}}}});
 await hooks["tool.execute.before"]({{tool:"question",sessionID:"ses_test",callID:"call_one"}},{{args:{{question:"PRIVATE QUESTION"}}}});
-await hooks.event({{event:{{type:"permission.updated",properties:{{id:"per_one",sessionID:"ses_test",messageID:"asst_old",metadata:{{secret:"PRIVATE"}}}}}}}});
+await hooks.event({{event:{{type:"permission.asked",properties:{{id:"per_one",sessionID:"ses_test",tool:{{messageID:"asst_old",callID:"call_permission"}},metadata:{{secret:"PRIVATE"}}}}}}}});
 await hooks["tool.execute.before"]({{tool:"question",sessionID:"ses_test",callID:"call_one"}},{{args:{{question:"PRIVATE QUESTION"}}}});
-await hooks.event({{event:{{type:"permission.replied",properties:{{sessionID:"ses_test",permissionID:"per_one",response:"once"}}}}}});
+await hooks.event({{event:{{type:"permission.replied",properties:{{sessionID:"ses_test",requestID:"per_one",reply:"once"}}}}}});
 await tool("asst_old", "call_one", "completed");
 await assistant("asst_old", "msg_old", {{finish:"tool-calls",time:{{created:Date.now()-500,completed:Date.now()}}}});
 await assistant("asst_step_two", "msg_old", {{finish:"stop",time:{{created:Date.now()-200,completed:Date.now()}}}});
@@ -118,6 +122,7 @@ await hooks.event({{event:{{type:"session.status",properties:{{sessionID:"ses_te
         'permission_wait', 'user_question', 'permission_wait', 'user_question', 'provider_error']
     observations = [record for record in records if record['kind'] == 'observation']
     assert [record['state'] for record in observations] == ['open', 'open', 'resolved', 'resolved', 'open']
+    assert observations[0]['provenance'] == 'opencode.permission.asked'
     assert observations[0]['incident_id'] == observations[2]['incident_id']
     assert observations[1]['incident_id'] == observations[3]['incident_id']
     assert all(len(record['incident_id']) == 64 for record in observations)
@@ -147,8 +152,8 @@ const part = (callID, status) => {{
 await part("orphan_call", "error");
 await hooks["tool.execute.before"]({{tool:"question",sessionID:"ses_orphan",callID:"orphan_call"}},
   {{args:{{private:"PRIVATE"}}}});
-await hooks.event({{event:{{type:"permission.updated",properties:
-  {{id:"valid_permission",sessionID:"ses_orphan",messageID:"asst",metadata:{{private:"PRIVATE"}}}}}}}});
+await hooks.event({{event:{{type:"permission.asked",properties:
+  {{id:"valid_permission",sessionID:"ses_orphan",tool:{{messageID:"asst",callID:"call_permission"}},metadata:{{private:"PRIVATE"}}}}}}}});
 await part("valid_question", "running");
 await hooks["tool.execute.before"]({{tool:"question",sessionID:"ses_orphan",callID:"valid_question"}},
   {{args:{{private:"PRIVATE"}}}});
