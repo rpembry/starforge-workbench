@@ -5,7 +5,7 @@ For everyday use, open **Everyday guide & startup** from the dashboard navigatio
 
 A personal workbench for keeping human commitments, AI activity, and daily attention in one place.
 
-![Simulated Starforge Workbench dashboard showing task capture, attention, active collectors, next actions, and recent activity](docs/images/dashboard-simulated.png)
+![Simulated Starforge Workbench dashboard showing task capture, attention, active collectors, next actions, and recent activity](docs/images/starforge-dashboard-simulated.png)
 
 *Simulated screenshot composed from two dashboard views, with illustrative activity. It is not a live status report.*
 
