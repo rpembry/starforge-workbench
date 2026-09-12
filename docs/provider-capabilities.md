@@ -22,6 +22,14 @@ detection remains **unsupported**: a completed message is activity evidence, not
 proof that the application is idle. Live Google Keep extraction remains
 **unknown/unverified** and is not represented by synthetic records or version checks.
 
+Separately, a [disposable live check on 2026-09-12](opencode-attention-live-smoke.md)
+verified OpenCode 1.18.30 with OpenAI Sol: question and permission requests
+reached the shared attention API and dashboard, replies cleared them, and
+observer restart/full queue replay did not restore cleared incidents. This
+covers structured provider attention, distinct from the explicit run/approval
+row above. Typed provider errors remain fixture-only; generation-less idle
+remains unsupported. The check did not deploy the bridge to existing sessions.
+
 The isolated tmux fixture is also fixture-only. Its shared guard creates a unique
 `0700` directory and `0600` ownership marker, then strictly parses tmux's global
 argv and permits only one separate `-S` selector for that owned socket. Attached,
