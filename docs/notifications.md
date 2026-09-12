@@ -103,21 +103,45 @@ no existing service needs restarting. `watch` rereads configuration each poll.
   or older than the last accepted snapshot cannot reset deduplication. Keep clocks
   synchronized. Duplicate identical IDs coalesce; contradictory duplicates fail
   closed rather than guessing.
-- Transient connection errors, timeouts, invalid JSON and server failures retain
-  pending entries. Attempts wait at least 30, then 60, then 120 seconds (or the
-  configured summary spacing, whichever is longer). At most three attempts by
-  default are allowed before delivery is blocked. Pending state survives restart.
-- Invalid credentials, HTTP 4xx (including quota exhaustion), or a response declaring
-  rejection block retries immediately. Fix configuration/quota first, then use
-  `once --retry-pending` to explicitly unblock and reset the attempt budget. It
-  preserves the rate limit and rechecks current attention before sending. A blocked
-  worker does not silently retry because its process restarts or new items arrive.
-- Receipt is recorded only after HTTP 200 **and** JSON `status: 1`. This means the
-  service accepted the message, not that a person read it. Pushover offers no
-  idempotency key for ordinary messages: a lost response, or a crash between remote
-  acceptance and local acknowledgement, can produce a duplicate on retry. Atomic
-  state, a process lock and persisted backoff reduce this risk but cannot promise
-  exactly-once delivery across that boundary.
+- Connect/pool failures known to precede submission retain pending work and retry
+  with bounded backoff. Budgets belong to each item occurrence, so new items do not
+  inherit an unrelated exhausted budget. HTTP 4xx and explicit rejection are
+  known-failed outcomes and block the affected items until `once --retry-pending`.
+- Before transport, the worker atomically persists a unique attempt ID, its
+  `sending` outcome and the exact hashed item fingerprints/occurrences. Interrupted
+  attempts become `unknown` on restart. Read/write errors, lost acknowledgements,
+  invalid JSON, malformed acknowledgements, redirects and server errors are also
+  conservatively unknown: remote acceptance cannot be ruled out.
+- **Unknown blocks the whole worker**, including new items, until explicitly resolved.
+  This small, conservative policy favors avoiding duplicate pushes over immediate
+  delivery of unrelated alerts. New attention is still reconciled locally. Preview
+  and `status` show the attempt ID, affected count, whole-worker hold and possible
+  duplicate warning. `once --retry-pending` cannot bypass an unknown hold.
+- Receipt is acknowledged only after HTTP 200 with integer JSON `status: 1` and
+  successful local persistence. This is acceptance, not proof a person read it.
+  There is no exactly-once guarantee across the remote/local persistence boundary.
+
+Resolve uncertainty using the exact attempt ID displayed by `status` or preview:
+
+```sh
+uv run wb-notify status --config /path/to/private/notifications.json
+# Only after independently confirming that this attempt was delivered:
+uv run wb-notify resolve --config /path/to/private/notifications.json --attempt-id ATTEMPT_ID --outcome delivered
+# Or explicitly accept possible duplication and permit a later retry:
+uv run wb-notify resolve --config /path/to/private/notifications.json --attempt-id ATTEMPT_ID --outcome retry --acknowledge-possible-duplicate
+```
+
+Resolution makes no HTTP request and is allowed while delivery is disabled. It
+updates only exact members of that attempt. Changed content or an outage that
+recovered and recurred is a different occurrence and cannot be accidentally
+acknowledged by resolving an older attempt. Retry resolution preserves rate limits;
+the next enabled poll rechecks attention before sending. Stale attempt IDs fail.
+
+Version-1 files migrate conservatively to version 2: acknowledged entries remain
+acknowledged; unacknowledged entries with a persisted attempt count become an
+unknown attempt. Migration cannot assume a previous process failed before sending.
+Unattempted entries remain pending. Preview/status migrate only in memory; an
+enabled poll or explicit resolution persists the migration under the state lock.
 
 These response and retry choices follow the [Pushover Message API](https://pushover.net/api).
 No response body or credential is printed on failure. CLI status reports include
@@ -152,3 +176,7 @@ state and mocked HTTP delivery. Coverage includes category selection, content
 privacy, restarts, heartbeat churn, recovery, meaningful changes, bounded retries,
 backoff, acknowledgement checks, invalid credentials, stale/corrupt state, locking,
 disabled operation and explicit test delivery. Ordinary tests never contact Pushover.
+
+Crash-boundary tests cover claimed-but-not-sent, possible remote acceptance, and
+acknowledgement before local persistence, plus conservative migration and exact
+operator resolution. All use synthetic senders; no real push is needed.

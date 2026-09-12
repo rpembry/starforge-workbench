@@ -13,6 +13,7 @@ import shlex
 import stat
 import tempfile
 import time
+import uuid
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -28,9 +29,9 @@ LABELS = {'approval_needed': 'approval request(s)', 'collector_health': 'collect
 
 
 class NotificationError(Exception):
-    def __init__(self, code, retryable=False):
+    def __init__(self, code, retryable=False, unknown=False):
         super().__init__(code)
-        self.code, self.retryable = code, retryable
+        self.code, self.retryable, self.unknown = code, retryable, unknown
 
 
 class Settings(BaseModel):
@@ -59,22 +60,51 @@ class Settings(BaseModel):
         return value
 
 
-class Entry(BaseModel):
+class LegacyEntry(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     fingerprint: str = Field(pattern=r'^[a-f0-9]{64}$')
     delivered: bool = False
 
 
-class DeliveryState(BaseModel):
+class LegacyState(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     version: Literal[1] = 1
     scope: str
-    entries: dict[str, Entry] = Field(default_factory=dict)
+    entries: dict[str, LegacyEntry] = Field(default_factory=dict)
     attempts: int = Field(default=0, ge=0, le=5)
     not_before: float = Field(default=0, ge=0, allow_inf_nan=False)
     last_snapshot: float = Field(default=0, ge=0, allow_inf_nan=False)
     delivered_at: float | None = None
     blocked: bool = False
+
+
+class Entry(LegacyEntry):
+    occurrence: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    failures: int = Field(default=0, ge=0, le=5)
+    blocked: bool = False
+    outcome: Literal['pending', 'delivered', 'known_failed'] = 'pending'
+
+
+class Attempt(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    outcome: Literal['sending', 'unknown', 'delivered', 'known_failed', 'resolved_retry', 'resolved_delivered']
+    members: dict[str, Entry]
+
+
+class DeliveryState(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    version: Literal[2] = 2
+    scope: str
+    entries: dict[str, Entry] = Field(default_factory=dict)
+    not_before: float = Field(default=0, ge=0, allow_inf_nan=False)
+    last_snapshot: float = Field(default=0, ge=0, allow_inf_nan=False)
+    delivered_at: float | None = None
+    attempt: Attempt | None = None
+
+    @property
+    def blocked(self):
+        return bool(self.attempt and self.attempt.outcome in {'sending', 'unknown'})
 
 
 def digest(value):
@@ -139,12 +169,16 @@ def send_pushover(config, payload, transport=None):
         if 400 <= response.status_code < 500:
             raise NotificationError('delivery_rejected')
         if response.status_code != 200:
-            raise NotificationError('delivery_unavailable', retryable=True)
+            raise NotificationError('delivery_unknown', unknown=True)
         result = response.json()
-        if not isinstance(result, dict) or type(result.get('status')) is not int or result['status'] != 1:
+        if not isinstance(result, dict) or type(result.get('status')) is not int:
+            raise NotificationError('delivery_unknown', unknown=True)
+        if result['status'] != 1:
             raise NotificationError('delivery_rejected')
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+        raise NotificationError('delivery_not_submitted', retryable=True) from None
     except (httpx.HTTPError, ValueError):
-        raise NotificationError('delivery_unavailable', retryable=True) from None
+        raise NotificationError('delivery_unknown', unknown=True) from None
 
 
 def selected(snapshot, config, current):
@@ -200,7 +234,21 @@ def scope(config):
 
 def read_state(folder, config):
     try:
-        state = DeliveryState.model_validate_json(protected_read(folder/'delivery.json'))
+        data = json.loads(protected_read(folder/'delivery.json'))
+        if data.get('version') == 1:
+            old = LegacyState.model_validate(data)
+            entries = {key: Entry(**entry.model_dump(), outcome='delivered' if entry.delivered else 'pending',
+                                  blocked=old.blocked, failures=old.attempts if not entry.delivered else 0)
+                       for key, entry in old.entries.items()}
+            pending = {key: entry.model_copy(deep=True) for key, entry in entries.items() if not entry.delivered}
+            # V1 cannot prove whether an unacknowledged attempt reached the service.
+            attempt = Attempt(outcome='unknown', members=pending) if old.attempts and pending else None
+            state = DeliveryState(scope=old.scope, entries=entries, not_before=old.not_before,
+                                  last_snapshot=old.last_snapshot, delivered_at=old.delivered_at, attempt=attempt)
+        else:
+            state = DeliveryState.model_validate(data)
+        if state.attempt and state.attempt.outcome == 'sending':
+            state.attempt.outcome = 'unknown'
         if state.scope != scope(config):
             raise NotificationError('notification_state_source_mismatch')
         if any(not re.fullmatch(r'[a-f0-9]{64}', key) for key in state.entries):
@@ -263,6 +311,34 @@ def reconcile(state, items, config, stamp):
     return [item for key, item in items.items() if not entries[key].delivered]
 
 
+def attempt_view(state):
+    if not state.blocked:
+        return None
+    return dict(id=state.attempt.id, outcome='unknown', affected=len(state.attempt.members),
+                blocks='whole_worker', warning='Delivery may already have occurred. Explicit retry can duplicate it.')
+
+
+def resolve(config, attempt_id, outcome, acknowledge_duplicate=False):
+    if outcome not in {'delivered', 'retry'}:
+        raise NotificationError('invalid_resolution_outcome')
+    if outcome == 'retry' and not acknowledge_duplicate:
+        raise NotificationError('possible_duplicate_acknowledgement_required')
+    folder = Path(config.state_dir).expanduser()
+    with locked_state(folder):
+        state = read_state(folder, config)
+        if not state.blocked or state.attempt.id != attempt_id:
+            raise NotificationError('unknown_attempt_mismatch')
+        for key, member in state.attempt.members.items():
+            entry = state.entries.get(key)
+            if entry and (entry.fingerprint, entry.occurrence) == (member.fingerprint, member.occurrence):
+                entry.delivered = outcome == 'delivered'
+                entry.outcome = 'delivered' if entry.delivered else 'pending'
+                entry.failures, entry.blocked = 0, False
+        state.attempt.outcome = 'resolved_'+outcome
+        save_state(folder, state)
+        return {'status': state.attempt.outcome, 'attempt_id': attempt_id}
+
+
 def poll(config, snapshot, sender=None, current=None, preview=False, retry_pending=False):
     if not config.enabled and not preview:
         return {'status': 'disabled'}
@@ -273,40 +349,54 @@ def poll(config, snapshot, sender=None, current=None, preview=False, retry_pendi
         state = read_state(folder, config)
         pending = reconcile(state, items, config, stamp)
         return dict(status='preview', pending=len(pending), blocked=state.blocked,
-                    not_before=state.not_before, payload=message(pending, config) if pending else None)
+                    attempt=attempt_view(state), blocked_items=sum(e.blocked for e in state.entries.values() if not e.delivered), not_before=state.not_before,
+                    payload=message(pending, config) if pending else None)
     with locked_state(folder):
         state = read_state(folder, config)
-        pending = reconcile(state, items, config, stamp)
+        reconcile(state, items, config, stamp)
+        if state.blocked:
+            save_state(folder, state)
+            return dict(status='unknown', attempt=attempt_view(state))
         if retry_pending:
-            state.blocked, state.attempts = False, 0
-        if not pending:
-            state.attempts = 0
+            for entry in state.entries.values():
+                if not entry.delivered:
+                    entry.blocked, entry.failures = False, 0
+        pending = {key: item for key, item in items.items() if not state.entries[key].delivered}
+        eligible = {key: item for key, item in pending.items()
+                    if not state.entries[key].blocked and state.entries[key].failures < config.max_attempts}
+        if not eligible:
             save_state(folder, state)
-            return {'status': 'quiet', 'pending': 0}
-        if state.blocked or state.attempts >= config.max_attempts:
-            state.blocked = True
-            save_state(folder, state)
-            return {'status': 'blocked', 'pending': len(pending)}
+            return {'status': 'blocked' if pending else 'quiet', 'pending': len(pending)}
         if current < state.not_before:
             save_state(folder, state)
             return {'status': 'backoff', 'pending': len(pending), 'not_before': state.not_before}
-        payload = message(pending, config)
-        state.attempts += 1
-        state.not_before = current+max(config.min_interval_seconds, 30*2**(state.attempts-1))
-        # Persist the pending attempt/backoff before HTTP; only success marks delivery.
-        save_state(folder, state)
+        payload = message(list(eligible.values()), config)
+        state.attempt = Attempt(outcome='sending', members={key: state.entries[key].model_copy(deep=True) for key in eligible})
+        failures = max(state.entries[key].failures for key in eligible)
+        state.not_before = current+max(config.min_interval_seconds, 30*2**failures)
+        save_state(folder, state)  # A crash from here through acknowledgement persistence is unknown.
         try:
             (sender or send_pushover)(config, payload)
         except NotificationError as exc:
-            state.blocked = not exc.retryable or state.attempts >= config.max_attempts
+            state.attempt.outcome = 'unknown' if exc.unknown else 'known_failed'
+            if not exc.unknown:
+                for key in eligible:
+                    entry = state.entries[key]
+                    entry.failures += 1
+                    entry.outcome = 'known_failed'
+                    entry.blocked = not exc.retryable or entry.failures >= config.max_attempts
             save_state(folder, state)
-            return dict(status='blocked' if state.blocked else 'retry_pending', pending=len(pending), error=exc.code)
-        for entry in state.entries.values():
-            entry.delivered = True
-        state.attempts, state.delivered_at = 0, current
+            return dict(status='unknown' if exc.unknown else ('blocked' if all(state.entries[k].blocked for k in eligible) else 'retry_pending'),
+                        pending=len(pending), error=exc.code, attempt=attempt_view(state))
+        for key in eligible:
+            entry = state.entries[key]
+            entry.delivered, entry.outcome = True, 'delivered'
+            entry.failures, entry.blocked = 0, False
+        state.attempt.outcome = 'delivered'
+        state.delivered_at = current
         state.not_before = current+config.min_interval_seconds
         save_state(folder, state)
-        return {'status': 'delivered', 'count': len(pending)}
+        return {'status': 'delivered', 'count': len(eligible)}
 
 
 def fetch_snapshot(config):
@@ -323,17 +413,34 @@ def fetch_snapshot(config):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['once', 'watch', 'preview', 'test'])
+    parser.add_argument('command', choices=['once', 'watch', 'preview', 'test', 'status', 'resolve'])
     parser.add_argument('--config', type=Path, default=Path.home()/'.config/starforge-workbench/notifications.json')
     parser.add_argument('--snapshot', type=Path, help='Synthetic JSON snapshot for preview only')
     parser.add_argument('--send', action='store_true', help='Explicitly send one test notification (test command only)')
     parser.add_argument('--retry-pending', action='store_true', help='Explicitly unblock corrected delivery settings (once only)')
+    parser.add_argument('--attempt-id')
+    parser.add_argument('--outcome', choices=['delivered', 'retry'])
+    parser.add_argument('--acknowledge-possible-duplicate', action='store_true')
     args = parser.parse_args(argv)
+    if args.command == 'resolve' and (not args.attempt_id or not args.outcome):
+        parser.error('Resolution requires the exact attempt ID and outcome')
+    if args.command != 'resolve' and (args.attempt_id or args.outcome or args.acknowledge_possible_duplicate):
+        parser.error('Resolution flags require resolve')
     if args.snapshot and args.command != 'preview' or args.send and args.command != 'test' or args.retry_pending and args.command != 'once':
         parser.error('Snapshot, send, or retry flag used with the wrong command')
     while True:
         try:
             config = settings(args.config.expanduser())
+            if args.command == 'status':
+                state = read_state(Path(config.state_dir).expanduser(), config)
+                print(json.dumps(dict(status='unknown' if state.blocked else 'idle', attempt=attempt_view(state),
+                                      pending=sum(not e.delivered for e in state.entries.values()),
+                                      known_failed=sum(e.outcome == 'known_failed' for e in state.entries.values()),
+                                      blocked_items=sum(e.blocked for e in state.entries.values() if not e.delivered))))
+                return 0
+            if args.command == 'resolve':
+                print(json.dumps(resolve(config, args.attempt_id, args.outcome, args.acknowledge_possible_duplicate)))
+                return 0
             if args.command == 'test':
                 payload = dict(message='Workbench notification delivery test. No task state was changed.',
                                url=config.dashboard_url, url_title='Open Workbench', priority='0')
@@ -356,7 +463,7 @@ def main(argv=None):
             result = {'status': 'error', 'error': exc.code if isinstance(exc, NotificationError) else 'notification_local_error'}
             print(json.dumps(result), flush=True)
         if args.command != 'watch':
-            return 2 if result['status'] in {'error', 'blocked', 'retry_pending'} else 0
+            return 2 if result['status'] in {'error', 'blocked', 'retry_pending', 'unknown'} else 0
         time.sleep(config.poll_seconds if 'config' in locals() else 30)
 
 

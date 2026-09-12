@@ -183,8 +183,8 @@ def test_missing_and_invalid_credentials_keep_pending_without_exposure(config, c
 
 
 @pytest.mark.parametrize('status,body,retryable', [(400, {'status':0,'errors':['PRIVATE']}, False),
-    (429, {'status':0}, False), (503, {'status':0}, True), (200, {'status':0}, False),
-    (200, [], False), (302, {}, True)])
+    (429, {'status':0}, False), (503, {'status':0}, False), (200, {'status':0}, False),
+    (200, [], False), (302, {}, False)])
 def test_mocked_rejections_never_echo_body_or_credentials(config, status, body, retryable):
     credentials(config)
     transport = httpx.MockTransport(lambda r: httpx.Response(status, json=body))
@@ -208,7 +208,7 @@ def test_mocked_delivery_success_and_timeout(config):
     def timeout(request): raise httpx.ReadTimeout('PRIVATE timeout details', request=request)
     with pytest.raises(n.NotificationError) as exc:
         n.send_pushover(config, n.message([item()], config), httpx.MockTransport(timeout))
-    assert exc.value.retryable and 'PRIVATE' not in str(exc.value)
+    assert exc.value.unknown and not exc.value.retryable and 'PRIVATE' not in str(exc.value)
 
 
 def test_test_command_sends_only_with_explicit_flag(config, tmp_path, monkeypatch):
@@ -232,7 +232,7 @@ def test_api_consumption_is_read_only_and_rejected_delivery_blocks_until_explici
     assert n.fetch_snapshot(config) == snapshot([item()])
     rejected = Mock(side_effect=n.NotificationError('delivery_rejected'))
     assert tick(config, [item()], rejected)['status'] == 'blocked'
-    assert tick(config, [item('new')], rejected, NOW+10000)['status'] == 'blocked'
+    assert tick(config, [item()], rejected, NOW+10000)['status'] == 'blocked'
     rejected.assert_called_once()
 
 
@@ -253,7 +253,7 @@ def test_default_spacing_survives_restart_and_failed_send_never_acknowledges(con
     config.min_interval_seconds = 300
     credentials(config)
     def failure(settings, payload):
-        n.send_pushover(settings, payload, httpx.MockTransport(lambda r: httpx.Response(503, text='PRIVATE RESPONSE')))
+        raise n.NotificationError('delivery_not_submitted', retryable=True)
     assert tick(config, [item()], failure)['status'] == 'retry_pending'
     sender = Mock()
     assert tick(config, [item('new')], sender, NOW+299)['status'] == 'backoff'
@@ -267,3 +267,121 @@ def test_existing_dotenv_spacing_and_unquoted_title_are_supported_without_execut
     assert n.pushover_credentials(config) == ('u'*30, 'a'*30, 'Example notification title')
     private_write(Path(config.credentials_file), 'PUSHOVER_USER_KEY='+('u'*30)+'\nPUSHOVER_API_TOKEN='+('a'*30)+'\nPUSHOVER_TITLE="$(touch should-not-exist)"\n')
     assert n.pushover_credentials(config)[2] == '$(touch should-not-exist)'
+
+
+@pytest.mark.parametrize('boundary', ['before_transport', 'after_acceptance', 'before_ack_persistence'])
+def test_crash_boundaries_hold_unknown_across_restart(config, monkeypatch, boundary):
+    accepted = []
+    original = n.save_state
+    def save(folder, state):
+        if boundary == 'before_ack_persistence' and state.attempt and state.attempt.outcome == 'delivered':
+            raise SystemExit('synthetic persistence crash')
+        original(folder, state)
+    monkeypatch.setattr(n, 'save_state', save)
+    def sender(settings, payload):
+        if boundary != 'before_transport': accepted.append(payload)
+        if boundary != 'before_ack_persistence': raise SystemExit('synthetic crash')
+    with pytest.raises(SystemExit): tick(config, [item()], sender)
+    monkeypatch.setattr(n, 'save_state', original)
+    retry = Mock()
+    result = tick(config, [item()], retry, NOW+10000, retry_pending=True)
+    assert result['status'] == 'unknown'
+    assert result['attempt']['blocks'] == 'whole_worker'
+    assert result['attempt']['affected'] == 1
+    assert tick(config, [item('unrelated')], retry, NOW+10001)['status'] == 'unknown'
+    retry.assert_not_called()
+    assert len(accepted) == (0 if boundary == 'before_transport' else 1)
+    view = tick(config, [item('unrelated')], retry, NOW+10002, preview=True)
+    assert view['attempt']['id'] == result['attempt']['id'] and view['blocked']
+
+
+@pytest.mark.parametrize('failure', ['read', 'write', 'json', 'server'])
+def test_ambiguous_http_outcome_is_persisted_unknown(config, failure):
+    credentials(config)
+    def transport(request):
+        if failure == 'read': raise httpx.ReadTimeout('private', request=request)
+        if failure == 'write': raise httpx.WriteError('private', request=request)
+        return httpx.Response(200 if failure == 'json' else 503, text='invalid acknowledgement')
+    def sender(settings, payload):
+        n.send_pushover(settings, payload, httpx.MockTransport(transport))
+    assert tick(config, [item()], sender)['status'] == 'unknown'
+    unexpected = Mock()
+    assert tick(config, [item()], unexpected, NOW+10000)['status'] == 'unknown'
+    unexpected.assert_not_called()
+
+
+def test_connect_failure_is_known_safe_and_fresh_item_has_own_budget(config):
+    credentials(config)
+    config.max_attempts = 1
+    def transport(request): raise httpx.ConnectTimeout('private', request=request)
+    def sender(settings, payload): n.send_pushover(settings, payload, httpx.MockTransport(transport))
+    assert tick(config, [item()], sender)['status'] == 'blocked'
+    state = n.read_state(Path(config.state_dir), config)
+    assert state.attempt.outcome == 'known_failed'
+    success = Mock()
+    assert tick(config, [item(), item('fresh')], success, NOW+100)['count'] == 1
+    assert tick(config, [item(), item('fresh')], success, NOW+200)['status'] == 'blocked'
+    success.assert_called_once()
+
+
+def test_resolution_requires_matching_attempt_and_duplicate_acknowledgement(config):
+    unknown = Mock(side_effect=n.NotificationError('delivery_unknown', unknown=True))
+    attempt = tick(config, [item()], unknown)['attempt']['id']
+    with pytest.raises(n.NotificationError, match='mismatch'):
+        n.resolve(config, 'wrong-attempt', 'delivered')
+    with pytest.raises(n.NotificationError, match='acknowledgement_required'):
+        n.resolve(config, attempt, 'retry')
+    n.resolve(config, attempt, 'retry', acknowledge_duplicate=True)
+    success = Mock()
+    assert tick(config, [item()], success, NOW+100)['status'] == 'delivered'
+    success.assert_called_once()
+
+
+def test_resolution_cannot_acknowledge_changed_fingerprint_or_recurrent_incident(config):
+    unknown = Mock(side_effect=n.NotificationError('delivery_unknown', unknown=True))
+    attempt = tick(config, [item()], unknown)['attempt']['id']
+    # Recovery while held must not discard evidence of the unknown attempt.
+    assert tick(config, [], unknown, NOW+1)['status'] == 'unknown'
+    assert tick(config, [item()], unknown, NOW+2)['status'] == 'unknown'
+    n.resolve(config, attempt, 'delivered')
+    success = Mock()
+    assert tick(config, [item()], success, NOW+100)['status'] == 'delivered'
+    attempt = tick(config, [item('other')], unknown, NOW+200)['attempt']['id']
+    changed = {**item('other'), 'reason': 'Changed reason'}
+    tick(config, [changed], unknown, NOW+201)
+    n.resolve(config, attempt, 'delivered')
+    assert tick(config, [changed], success, NOW+300)['status'] == 'delivered'
+
+
+def test_confirmed_resolution_suppresses_only_exact_members_and_can_run_disabled(config, tmp_path, capsys):
+    unknown = Mock(side_effect=n.NotificationError('delivery_unknown', unknown=True))
+    attempt = tick(config, [item()], unknown)['attempt']['id']
+    config.enabled = False
+    path = tmp_path/'config.json'
+    private_write(path, config.model_dump_json())
+    assert n.main(['status', '--config', str(path)]) == 0
+    assert 'whole_worker' in capsys.readouterr().out
+    assert n.main(['resolve', '--attempt-id', attempt, '--outcome', 'delivered', '--config', str(path)]) == 0
+    config.enabled = True
+    success = Mock()
+    assert tick(config, [item()], success, NOW+100)['status'] == 'quiet'
+    success.assert_not_called()
+
+
+@pytest.mark.parametrize('attempted', [0, 1, 3])
+def test_version_one_migration_preserves_acknowledgements_and_holds_uncertain_attempts(config, attempted):
+    folder = Path(config.state_dir)
+    folder.mkdir(mode=0o700)
+    old = n.LegacyState(scope=n.scope(config), attempts=attempted,
+        entries={n.digest('done'): n.LegacyEntry(fingerprint=n.fingerprint(item('done'), False), delivered=True),
+                 n.digest('pending'): n.LegacyEntry(fingerprint=n.fingerprint(item('pending'), False))})
+    private_write(folder/'delivery.json', old.model_dump_json())
+    before = (folder/'delivery.json').read_bytes()
+    preview = tick(config, [item('done'), item('pending')], Mock(), preview=True)
+    assert preview['blocked'] == bool(attempted)
+    assert (folder/'delivery.json').read_bytes() == before
+    sender = Mock()
+    result = tick(config, [item('done'), item('pending')], sender)
+    assert result['status'] == ('unknown' if attempted else 'delivered')
+    assert sender.call_count == (0 if attempted else 1)
+    assert n.read_state(folder, config).version == 2
