@@ -160,7 +160,7 @@ class LauncherTests(unittest.TestCase):
             with self.assertRaises(ValueError): cli.remember_created(self.c, {})
 
     def test_codex_startup_has_no_launcher_prompt(self):
-        with patch.object(cli, 'run'), patch.object(cli, 'start_codex', return_value=0) as start, patch('builtins.input', side_effect=AssertionError('unexpected prompt')), patch.dict(cli.os.environ, {}, clear=False):
+        with patch.object(cli, 'run'), patch.object(cli, 'validate_context'), patch.object(cli.Path, 'cwd', return_value=self.path), patch.object(cli, 'start_codex', return_value=0) as start, patch('builtins.input', side_effect=AssertionError('unexpected prompt')), patch.dict(cli.os.environ, {}, clear=False):
             cli.menu(self.c)
             start.assert_called_once_with(self.c)
 
@@ -179,10 +179,40 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(calls[1][-2:], ['resume', identity])
 
     def test_up_restarts_only_an_exited_pane(self):
-        with patch.object(cli, 'STATE', self.path), patch.object(cli, 'external_session', return_value=None), patch.object(cli, 'validate_context'), patch.object(cli, 'target', return_value='$1'), patch.object(cli, 'live', side_effect=[{'dead':True,'attached':0}, {'dead':False,'attached':0}]), patch.object(cli, 'tmux') as tmux, patch.object(cli, 'wait_provider'):
+        with patch.object(cli, 'STATE', self.path), patch.object(cli, 'external_session', return_value=None), patch.object(cli, 'validate_context'), patch.object(cli, 'target', return_value='$1'), patch.object(cli, 'live', side_effect=[{'dead':True,'attached':0}, {'dead':False,'attached':0}]), patch.object(cli, 'tmux') as tmux, patch.object(cli, 'verify_pane_start') as verify, patch.object(cli, 'wait_provider'):
             cli.up(self.c, ROOT/'config/workbench.example.yaml', headless=True)
             self.assertEqual(tmux.call_args.args[0], 'respawn-pane')
             self.assertNotIn('-k', tmux.call_args.args)
+            verify.assert_called_once_with(self.c, '$1')
+
+    def test_new_session_has_explicit_headless_birth_geometry_and_verified_cwd(self):
+        with patch.object(cli, 'STATE', self.path), patch.object(cli, 'external_session', return_value=None), patch.object(cli, 'validate_context'), patch.object(cli, 'required_target', return_value='$1'), patch.object(cli, 'live', side_effect=[None, {'dead':False,'attached':0}]), patch.object(cli, 'tmux') as tmux, patch.object(cli, 'verify_pane_start') as verify, patch.object(cli, 'wait_provider'):
+            cli.up(self.c, ROOT/'config/workbench.example.yaml', headless=True)
+        creation = tmux.call_args_list[0].args
+        self.assertEqual(creation[:4], ('new-session', '-d', '-s', cli.session(self.c)))
+        self.assertEqual(creation[creation.index('-x')+1], str(cli.DEFAULT_COLUMNS))
+        self.assertEqual(creation[creation.index('-y')+1], str(cli.DEFAULT_ROWS))
+        self.assertEqual(creation[creation.index('-c')+1], str(cli.cwd(self.c)))
+        verify.assert_called_once_with(self.c, '$1', (cli.DEFAULT_COLUMNS, cli.DEFAULT_ROWS))
+
+    def test_available_terminal_size_is_used_for_non_headless_birth(self):
+        with patch.object(cli.shutil, 'get_terminal_size', return_value=os.terminal_size((132, 41))):
+            self.assertEqual(cli.startup_size(False), (132, 41))
+        with patch.object(cli.shutil, 'get_terminal_size', return_value=os.terminal_size((40, 10))):
+            self.assertEqual(cli.startup_size(False), (80, 24))
+        self.assertEqual(cli.startup_size(True), (cli.DEFAULT_COLUMNS, cli.DEFAULT_ROWS))
+
+    def test_menu_refuses_fallback_directory_before_provider_start(self):
+        with patch.object(cli, 'validate_context'), patch.object(cli.Path, 'cwd', return_value=self.path.parent), patch.object(cli, 'start_codex') as start:
+            with self.assertRaisesRegex(ValueError, 'unexpected pane directory'):
+                cli.menu(self.c)
+        start.assert_not_called()
+
+    def test_context_removed_after_validation_never_reports_provider_start(self):
+        with patch.object(cli, 'STATE', self.path), patch.object(cli, 'external_session', return_value=None), patch.object(cli, 'validate_context', side_effect=[None, ValueError('Missing directory')]), patch.object(cli, 'required_target', return_value='$1'), patch.object(cli, 'live', return_value=None), patch.object(cli, 'tmux'), patch.object(cli, 'wait_provider') as wait:
+            with self.assertRaisesRegex(ValueError, 'Missing directory'):
+                cli.up(self.c, ROOT/'config/workbench.example.yaml', headless=True)
+        wait.assert_not_called()
 
     def test_detached_managed_provider_reattaches_without_desktop_discovery(self):
         with patch.object(cli, 'STATE', self.path), patch.object(cli, 'validate_context'), patch.object(cli, 'live', return_value={'attached':0,'dead':False}), patch.object(cli, 'external_session', side_effect=AssertionError('managed provider misclassified')), patch.object(cli, 'open_tab') as opened, patch.object(cli, 'wait_provider'):
@@ -215,7 +245,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(up.call_count, 2)
 
     def test_title_failure_does_not_prevent_codex_start(self):
-        with patch.object(cli, 'run', side_effect=FileNotFoundError), patch.object(cli, 'start_codex', return_value=0) as start:
+        with patch.object(cli, 'run', side_effect=FileNotFoundError), patch.object(cli, 'validate_context'), patch.object(cli.Path, 'cwd', return_value=self.path), patch.object(cli, 'start_codex', return_value=0) as start:
             cli.menu(self.c)
             start.assert_called_once_with(self.c)
 

@@ -26,6 +26,9 @@ STATE = HOME / '.local/state/starforge-ai-workbench'
 SERVER = 'starforge-ai-workbench'
 TMUX_SOCKET = None  # Optional explicit socket, primarily for isolated integration tests.
 TMUX_TIMEOUT = 3
+TMUX_CLIENT_CWD = Path('/')
+DEFAULT_COLUMNS = 197
+DEFAULT_ROWS = 49
 PROVIDERS = {'opencode': str(HOME/'.opencode/bin/opencode'), 'codex': str(HOME/'bin/codex'), 'claude': str(HOME/'.local/share/npm-global/lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64/claude'),
              'antigravity': str(HOME/'.local/bin/agy'), 'ollama': str(HOME/'.local/bin/ollama')}
 # Prefer the user's installed command; retain fallbacks for existing setups.
@@ -119,7 +122,7 @@ def tmux_command(*args):
 
 def tmux(*args, check=True):
     try:
-        p = run(tmux_command(*args), capture_output=True, timeout=TMUX_TIMEOUT)
+        p = run(tmux_command(*args), cwd=TMUX_CLIENT_CWD, capture_output=True, timeout=TMUX_TIMEOUT)
     except subprocess.TimeoutExpired:
         raise TmuxUnknown('timeout') from None
     except (OSError, UnicodeError):
@@ -185,6 +188,36 @@ def required_target(c):
     if identity is None:
         raise TmuxUnknown('session_disappeared')
     return identity
+
+
+def startup_size(headless):
+    if headless:
+        return DEFAULT_COLUMNS, DEFAULT_ROWS
+    size = shutil.get_terminal_size(fallback=(DEFAULT_COLUMNS, DEFAULT_ROWS))
+    return max(80, size.columns), max(24, size.lines)
+
+
+def verify_pane_start(c, pane, size=None):
+    # Revalidate after creation so a removed context cannot become tmux's fallback cwd.
+    validate_context(c)
+    output = probe('display-message', '-p', '-t', pane, '#{pane_current_path}')
+    if not output.endswith('\n') or '\n' in output[:-1]:
+        raise TmuxUnknown('malformed_pane_cwd')
+    try:
+        actual = Path(output[:-1]).resolve(strict=True)
+    except OSError:
+        raise ValueError(c['id']+': pane started in an unavailable directory; the dedicated tmux server may have inherited a deleted cwd. Preserve its sessions for inspection and restart it manually only when safe') from None
+    expected = cwd(c)
+    if actual != expected:
+        raise ValueError(c['id']+': pane cwd mismatch (expected '+str(expected)+', found '+str(actual)+'); inspect the dedicated server for a deleted cwd and preserve its sessions')
+    if size is not None:
+        output = probe('display-message', '-p', '-t', pane, '#{pane_width}x#{pane_height}')
+        match = re.fullmatch(r'([1-9][0-9]*)x([1-9][0-9]*)\n', output)
+        if not match:
+            raise TmuxUnknown('malformed_pane_geometry')
+        actual_size = tuple(map(int, match.groups()))
+        if actual_size != size:
+            raise ValueError(c['id']+': pane birth geometry mismatch (expected '+str(size[0])+'x'+str(size[1])+', found '+str(actual_size[0])+'x'+str(actual_size[1])+'); preserve it for inspection')
 
 
 def live(c):
@@ -305,7 +338,7 @@ def open_tab(c, manifest):
         secure_dir(terminal_config)
         terminal_env = clean_env()
         prepared = bridge(0, 'prepare', config=str(terminal_config), command=shlex.join(command),
-                          columns=197, rows=49)
+                          columns=DEFAULT_COLUMNS, rows=DEFAULT_ROWS)
         terminal_env['XDG_CONFIG_HOME'] = str(terminal_config)
         terminal_env['GSETTINGS_BACKEND'] = 'keyfile'
         terminal_env.pop('TMUX', None)
@@ -410,16 +443,21 @@ def up(c, manifest, headless=False):
             saved_session(c)  # Fail before opening a tab when its binding needs repair.
         if not state:
             args = [str(SELF), '--manifest', str(manifest), '_menu', c['id']]
-            tmux('new-session', '-d', '-s', session(c), '-c', str(cwd(c)), *args)
+            size = startup_size(headless)
+            tmux('new-session', '-d', '-s', session(c), '-x', str(size[0]), '-y', str(size[1]),
+                 '-c', str(cwd(c)), *args)
             identity = required_target(c)
+            verify_pane_start(c, identity, size)
             tmux('set-option', '-t', identity, '@sfwb_binding', fingerprint(c))
             tmux('set-option', '-t', identity, 'remain-on-exit', 'on')
             tmux('set-option', '-t', identity, 'set-titles', 'on')
             tmux('set-option', '-t', identity, 'set-titles-string', c['title'].replace('#', '##'))
             state = live(c)
         elif state['dead']:
-            tmux('respawn-pane', '-t', state.get('identity') or required_target(c), '-c', str(cwd(c)),
-                 str(SELF), '--manifest', str(manifest), '_menu', c['id'])
+            identity = state.get('identity') or required_target(c)
+            tmux('respawn-pane', '-t', identity, '-c', str(cwd(c)),
+                  str(SELF), '--manifest', str(manifest), '_menu', c['id'])
+            verify_pane_start(c, identity)
             state = live(c)
         if not state:
             raise ValueError(c['id']+': tmux pane disappeared during startup; inspect launcher/provider errors before retrying')
@@ -449,7 +487,8 @@ def attach(c):
             return
         set_title(c)
         # Keep per-context flock held for the client lifetime; never detach another active client.
-        run(tmux_command('attach-session', '-t', state.get('identity') or required_target(c)), check=True)
+        run(tmux_command('attach-session', '-t', state.get('identity') or required_target(c)),
+            cwd=TMUX_CLIENT_CWD, check=True)
     live(c)  # Do not clear a pending receipt if the final observation is uncertain.
     pending = STATE/(c['id']+'-pending.json')
     if pending.exists():
@@ -634,6 +673,13 @@ def menu(c):
     sanitized = clean_env()
     os.environ.clear()
     os.environ.update(sanitized)
+    validate_context(c)
+    try:
+        actual = Path.cwd().resolve(strict=True)
+    except OSError:
+        raise ValueError(c['id']+': pane context directory became unavailable before provider launch') from None
+    if actual != cwd(c):
+        raise ValueError(c['id']+': refusing provider launch from unexpected pane directory '+str(actual))
     set_title(c)
     if c['provider'] in {'codex', 'opencode'}:
         retry_start(c, lambda: start_codex(c))

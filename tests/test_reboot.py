@@ -52,7 +52,7 @@ class RebootTests(unittest.TestCase):
             with self.subTest(identity=identity, binding=binding):
                 c = copy.deepcopy(next(c for c in self.contexts if c['id'] == identity))
                 c['cwd'] = str(self.state)
-                with patch.object(cli, 'STATE', self.state), patch.object(cli, 'checkout_keys', return_value=[]), patch.object(cli, 'reject_external_agents'), patch.object(cli, 'saved_session', return_value=binding), patch.object(cli, 'run', return_value=SimpleNamespace(returncode=0)) as run, patch('builtins.input', side_effect=AssertionError('launcher prompt')), patch.dict(cli.os.environ):
+                with patch.object(cli, 'STATE', self.state), patch.object(cli.Path, 'cwd', return_value=self.state), patch.object(cli, 'checkout_keys', return_value=[]), patch.object(cli, 'reject_external_agents'), patch.object(cli, 'saved_session', return_value=binding), patch.object(cli, 'run', return_value=SimpleNamespace(returncode=0)) as run, patch('builtins.input', side_effect=AssertionError('launcher prompt')), patch.dict(cli.os.environ):
                     cli.menu(c)
                 argv = run.call_args.args[0]
                 self.assertEqual(argv[-len(suffix):], suffix)
