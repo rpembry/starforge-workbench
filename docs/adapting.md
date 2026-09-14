@@ -21,17 +21,18 @@ Ask AIW to configure scrolling when a terminal app behaves differently:
 > Make the mouse wheel scroll output in my tabs. Check which apps manage their
 > own scrolling, preserve live sessions, and save the settings for future launches.
 
-The dedicated server loads [`config/tmux.conf`](../config/tmux.conf). Most tabs
-use tmux scrollback; the `opencode` context forwards wheel events to the app when
-it requests mouse input and tmux copy mode is inactive. This matters for
-full-screen apps whose output is not retained in tmux history. Copy mode keeps
+The dedicated server loads [`config/tmux.conf`](../config/tmux.conf). The wheel
+is forwarded to an application only when its pane uses the alternate screen,
+the application requests mouse input, and tmux copy mode is inactive. This lets
+full-screen Claude and OpenCode interfaces scroll their own output, including
+when their context IDs change. Other panes use tmux scrollback. Copy mode keeps
 its own scrolling, with vi keys (`q` returns to the app).
 
-The exception matches the session name `sfwb-opencode`, not the provider type.
-If you rename that context or add another app that manages its own scrolling,
-ask AIW to inspect the active mouse mode and adapt the binding to the exact
-context. Forwarding wheel events indiscriminately can make other prompts treat
-scrolling as input.
+The decision is evaluated for each wheel event, so entering or leaving a
+full-screen application changes routing immediately. Keep mouse reporting on.
+The saved bindings load when the dedicated server starts, including after a
+reboot; an existing server needs the installed configuration reloaded after an
+upgrade. A terminal that intercepts mouse events may need separate configuration.
 
 AIW should check the live bindings and the configuration used by the installed
 launcher, apply changes only to the dedicated Workbench server, and confirm the
