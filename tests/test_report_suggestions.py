@@ -106,6 +106,7 @@ def test_ollama_request_is_bounded_structured_and_has_no_tools(monkeypatch):
     monkeypatch.setattr(ai.httpx,'Client',lambda **kw:original(transport=httpx.MockTransport(reply),**kw))
     assert ai.generate(ai.Settings(model='already-installed'),{'evidence':{}})=={'items':[]}
     assert calls[0]['stream'] is False and calls[0]['keep_alive']==0
+    assert calls[0]['think'] is False
     assert calls[0]['options']['num_predict']==1800
     assert 'tools' not in calls[0] and calls[0]['format']['type']=='object'
 
@@ -136,3 +137,31 @@ def test_service_lifecycle_starts_and_stops_optional_worker(repo,monkeypatch):
         assert start.call_count==1
         assert not stop.is_set()
     assert stop.is_set()
+
+
+def test_force_refresh_is_operator_only_and_preserves_active_lease(repo,monkeypatch):
+    from workbench.main import create_app
+    from workbench.auth import Auth
+    from fastapi.testclient import TestClient
+    from test_api import OPERATOR, COLLECTOR
+    import threading, time
+    monkeypatch.setattr(ai,'load_settings',lambda:ai.Settings(model='fixture'))
+    monkeypatch.setattr(ai,'start',lambda *_:(threading.Event(),None))
+    with TestClient(create_app(repo,Auth({'operator':OPERATOR,'collector':COLLECTOR}))) as client:
+        path='/api/reports/standup/suggestions/refresh'
+        assert client.post(path).status_code==401
+        client.headers['Authorization']='Bearer '+COLLECTOR
+        assert client.post(path).status_code==403
+        client.headers['Authorization']='Bearer '+OPERATOR
+        assert client.post(path).json()['status']=='queued'
+        with repo.connection() as db:
+            db.execute("UPDATE report_suggestions SET lease_until=?, snapshot_hash='old',result='{}',next_attempt=? WHERE kind='standup'",(time.time()+300,time.time()+3600));db.commit()
+        assert client.post(path).json()['status']=='generating'
+        with repo.connection() as db:
+            row=db.execute("SELECT * FROM report_suggestions WHERE kind='standup'").fetchone()
+            assert row['snapshot_hash']=='old' and row['next_attempt']>time.time()
+            db.execute("UPDATE report_suggestions SET lease_until=0 WHERE kind='standup'");db.commit()
+        assert client.post(path).json()['status']=='queued'
+        with repo.connection() as db:
+            row=db.execute("SELECT * FROM report_suggestions WHERE kind='standup'").fetchone()
+            assert row['snapshot_hash'] is None and row['result']=='{}' and row['next_attempt']==0

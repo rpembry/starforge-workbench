@@ -71,3 +71,10 @@ Saved output occupies one row per report in migration 006, separate from actions
 and attention alerts. Reports continue to render if generation is unconfigured
 or Ollama is unavailable. Tests use synthetic evidence and mocked delivery;
 a real model quality check and deployment are separate steps.
+
+An operator can force a refresh with
+`POST /api/reports/{kind}/suggestions/refresh`, including `dashboard` as a kind.
+It queues work for the next worker sweep, retains prior output, and never breaks
+an active generation lease. Unconfigured generation returns 503. The bounded
+structured-output task disables model thinking so its token allowance is used
+for the requested JSON rather than hidden reasoning.
