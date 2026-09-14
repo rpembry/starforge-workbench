@@ -12,3 +12,5 @@
 <article><b>{{ e.display_title }}</b><p class="muted"><time datetime="{{ e.occurred_at }}" title="{{ e.occurred_at }}">{{ e.relative_time }}</time>{% if e.display_project %} · {{ e.display_project }}{% endif %}</p>
 <details><summary>Details and provenance</summary><p>Recorded by {{ e.recorded_by }} · {{ e.source }} · {{ e.kind }}</p><p>Recorded summary: {{ e.summary }}</p>{% if e.details %}<pre>{{ e.details }}</pre>{% endif %}<small>Occurred: {{ e.occurred_at }}<br>Recorded: {{ e.recorded_at }}<br>Source reference: {{ e.source_id }}{% if e.action_id %}<br>Action: {{ e.action_id }} · subject label uses its current title{% endif %}{% if e.run_id %}<br>Run: {{ e.run_id }}{% endif %}</small></details></article>
 {% else %}<p class="muted">No observations recorded yet.</p>{% endfor %}</section>
+{% with suggestions=dashboard.report_suggestions %}{% include 'report_suggestions.html' %}{% endwith %}
+</main>
