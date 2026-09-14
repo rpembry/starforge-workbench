@@ -1,5 +1,6 @@
 """FastAPI factory. Start explicitly on 127.0.0.1; no module-import side effects."""
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
@@ -42,7 +43,19 @@ def create_app(repository=None, auth=None, settings=None):
         if not Path(path).is_absolute():
             raise RuntimeError('WB_DATABASE must be absolute')
         repository = SQLiteRepository(Path(path))
-    app = FastAPI(title='AI Workbench', version='0.2.0', docs_url=None, redoc_url=None, openapi_url=None)
+    from .report_ai import load_settings as load_ai_settings, start as start_ai
+    ai_settings = load_ai_settings()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        worker = start_ai(repository, ai_settings, settings.zone) if ai_settings else None
+        try:
+            yield
+        finally:
+            if worker:
+                worker[0].set()
+
+    app = FastAPI(lifespan=lifespan, title='AI Workbench', version='0.2.0', docs_url=None, redoc_url=None, openapi_url=None)
     app.state.repository = repository
     app.state.settings = settings
 

@@ -56,11 +56,12 @@ class SQLiteRepository:
                 db.execute('INSERT INTO schema_migrations VALUES (?, ?)', (1, now()))
                 db.commit()
             versions = [r[0] for r in db.execute('SELECT version FROM schema_migrations ORDER BY version')]
-            if versions not in ([1], [1, 2], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5]):
+            if versions not in ([1], [1, 2], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6]):
                 raise RuntimeError('Unsupported database schema version')
             for version, filename in [(2, '002_collectors.sql'), (3, '003_imports.sql'),
                                       (4, '004_provider_attention.sql'),
-                                      (5, '005_provider_attention_incidents.sql')]:
+                                      (5, '005_provider_attention_incidents.sql'),
+                                      (6, '006_report_suggestions.sql')]:
                 if version not in versions:
                     migration = Path(__file__).with_name('migrations')/filename
                     db.executescript('BEGIN IMMEDIATE;\n'+migration.read_text())
@@ -383,7 +384,7 @@ class SQLiteRepository:
             analytics_events = [dict(r) for r in db.execute(
                 "SELECT * FROM events WHERE source=? ORDER BY occurred_at DESC", ("ga4-daily-collector",)
             )]
-            return dict(generated_at=stamp, collectors=collectors,
+            result = dict(generated_at=stamp, collectors=collectors,
                 attention=derive(actions, runs, collectors, stamp, provider_attention),
                 provider_attention=provider_attention,
                 quarantined_imports=db.execute("SELECT count(*) FROM import_records WHERE disposition='quarantined'").fetchone()[0],
@@ -395,3 +396,7 @@ class SQLiteRepository:
                 suggestions=[a for a in actions if a['status'] in {'observed', 'proposed'}],
                 recent=present([dict(r) for r in db.execute('SELECT * FROM events ORDER BY occurred_at DESC, id LIMIT 50')], actions, stamp),
                 analytics=traffic_summary(analytics_events))
+
+        from .report_suggestions import view
+        result['report_suggestions'] = view(self, 'dashboard', result)
+        return result

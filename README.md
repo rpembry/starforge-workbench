@@ -78,6 +78,12 @@ Exact-ID operator association of an existing process generation is documented in
 [action-to-run linking](docs/action-run-linking.md).
 [RECENT activity](docs/recent-activity.md) shows readable subject titles and relative times, with original audit details on expansion.
 
+### Report suggestions
+
+Optional [automatic Ollama suggestions](docs/report-suggestions.md) add saved,
+evidence-linked questions and improvement ideas to dashboard and report views.
+They remain separate from committed tasks and are also available through report JSON.
+
 ### Optional attention notifications
 
 The separate `wb-notify` worker can send Pushover summaries of new or meaningfully

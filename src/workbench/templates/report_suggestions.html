@@ -1,0 +1,15 @@
+<section aria-label="AI suggestions and questions">
+<h2>Suggestions and questions</h2>
+<p>{{ suggestions.note }}</p>
+{% if suggestions.status == 'unavailable' %}<p>AI suggestions are not available yet. Factual reporting remains available.</p>{% else %}
+{% if suggestions.basis == 'no_evidence' %}<p>No evidence available for generation in this snapshot.</p>{% else %}<p>Generated {{ suggestions.generated_at }} · {{ suggestions.model }}</p>{% endif %}
+{% if suggestions.status == 'stale' %}<p><strong>Based on an older snapshot.</strong> Evidence has changed or these suggestions are over a day old. Recheck before using them.</p>{% endif %}
+{% for idea in suggestions['items'] %}<article>
+<b>{{ idea.title }}</b> <span>{{ idea.kind|replace('_', ' ') }} · AI suggestion</span>
+<p>{{ idea.rationale }}</p><p><strong>Ask AIW:</strong> {{ idea.next_question }}</p>
+<details><summary>Supporting evidence</summary><p>Snapshot {{ suggestions.snapshot_at }}</p>
+{% for evidence in idea.evidence %}<p>{{ evidence.id }}</p><ul>{% for field, value in evidence.items() if field != 'id' and value is not none %}<li>{{ field|replace('_', ' ') }}: {{ value }}</li>{% endfor %}</ul>{% endfor %}</details>
+</article>{% else %}<p>No useful suggestions were identified in this snapshot.</p>{% endfor %}
+{% endif %}
+{% if suggestions.generation_status == 'failed' %}<p>Latest generation failed. The worker will retry; this says nothing about task progress.</p>{% elif suggestions.generation_status == 'generating' %}<p>Refreshing suggestions.</p>{% endif %}
+</section>

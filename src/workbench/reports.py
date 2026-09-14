@@ -41,9 +41,13 @@ def report(repo,kind,current=None,zone=DEFAULT_ZONE):
         events=[]
     else:
         events.reverse()
-    return dict(kind=kind,generated_at=current.isoformat(),timezone=zone.key,
+    result = dict(kind=kind,generated_at=current.isoformat(),timezone=zone.key,
                 window={'start':start.isoformat(),'end':end.isoformat()} if kind=='standup' else None,
                 accomplishments=events,
                 plan=[a for a in actions if a['status'] in {'accepted','in_progress'}][:12] if kind=='standup' else [a for a in actions if a['status'] in {'accepted','in_progress'}],
                 waiting=[a for a in actions if a['status'] in {'waiting','approval_needed'}],
                 note='Quarantined inferred tasks are excluded. Automated Codex observations are attributed reports, not independently verified completion.')
+
+    from .report_suggestions import view
+    result['report_suggestions'] = view(repo, kind, result)
+    return result
