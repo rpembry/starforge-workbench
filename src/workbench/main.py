@@ -116,6 +116,22 @@ def create_app(repository=None, auth=None, settings=None):
         from .reports import report
         return report(repository, kind, zone=settings.zone)
 
+    @app.post('/api/reports/{kind}/suggestions/refresh', dependencies=[Depends(operator)])
+    def refresh_report_suggestions(kind: Literal['dashboard', 'standup', 'accomplishments', 'todo']):
+        if not ai_settings:
+            raise Problem(503, 'generation_unconfigured', 'Report generation is not configured')
+        import time
+        with repository.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('INSERT OR IGNORE INTO report_suggestions(kind) VALUES (?)', (kind,))
+            row = db.execute('SELECT lease_until FROM report_suggestions WHERE kind=?', (kind,)).fetchone()
+            if row['lease_until'] > time.time():
+                db.commit()
+                return {'status': 'generating'}
+            db.execute('UPDATE report_suggestions SET next_attempt=0,snapshot_hash=NULL,failure=0 WHERE kind=?', (kind,))
+            db.commit()
+        return {'status': 'queued', 'note': 'The background worker will refresh this report; prior output is retained.'}
+
     @app.get('/api/dashboard', dependencies=[Depends(operator)])
     def dashboard():
         return repository.dashboard()

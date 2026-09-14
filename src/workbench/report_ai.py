@@ -52,7 +52,7 @@ def generate(settings, evidence):
     # No model pull, tools, provider sessions, or shell commands. Ollama must already have the model.
     body = dict(model=settings.model, system=SYSTEM,
                 prompt=json.dumps(evidence, sort_keys=True), format=Suggestions.model_json_schema(),
-                stream=False, keep_alive=0, options={'num_predict': 1800, 'num_ctx': 16384, 'temperature': 0.2})
+                stream=False, think=False, keep_alive=0, options={'num_predict': 1800, 'num_ctx': 16384, 'temperature': 0.2})
     started = time.monotonic()
     with httpx.Client(timeout=httpx.Timeout(120, connect=5), follow_redirects=False, trust_env=False) as api:
         with api.stream('POST', settings.url+'/api/generate', json=body) as response:
