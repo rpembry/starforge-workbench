@@ -378,7 +378,11 @@ class SQLiteRepository:
             committed = {'accepted', 'in_progress', 'waiting', 'approval_needed'}
             from .attention import derive
             from .recent import present
+            from .analytics import traffic_summary
             stamp = current.isoformat()
+            analytics_events = [dict(r) for r in db.execute(
+                "SELECT * FROM events WHERE source=? ORDER BY occurred_at DESC", ("ga4-daily-collector",)
+            )]
             return dict(generated_at=stamp, collectors=collectors,
                 attention=derive(actions, runs, collectors, stamp, provider_attention),
                 provider_attention=provider_attention,
@@ -389,4 +393,5 @@ class SQLiteRepository:
                 stale_runs=[r for r in runs if r['stale'] and r['status'] != 'stopped'],
                 next=[a for a in actions if a['status'] == 'accepted'],
                 suggestions=[a for a in actions if a['status'] in {'observed', 'proposed'}],
-                recent=present([dict(r) for r in db.execute('SELECT * FROM events ORDER BY occurred_at DESC, id LIMIT 50')], actions, stamp))
+                recent=present([dict(r) for r in db.execute('SELECT * FROM events ORDER BY occurred_at DESC, id LIMIT 50')], actions, stamp),
+                analytics=traffic_summary(analytics_events))
