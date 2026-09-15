@@ -1,0 +1,20 @@
+# Illustrative digest only: replace with a reviewed image's real digest.
+backend: docker
+repository_strategy: per-task-worktree
+image: example.invalid/workbench/python@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+toolchain: python-3.12
+user: 1000
+group: 1000
+cpus: 2
+memory_mb: 2048
+pids_limit: 128
+timeout_seconds: 300
+network: none
+mounts:
+  - source: worktree
+    target: /workspace
+    read_only: false
+  - source: scratch
+    target: /scratch
+    read_only: false
+secret_refs: []
