@@ -114,6 +114,15 @@ Collectors run locally and submit observations to the central API with a separat
 
 Collectors have provider-specific setup requirements and depend on local formats that can change. See the [adaptation notes](docs/adapting.md), [collector and observer modules](src/workbench/), and their tests for details.
 
+### Remote session control (design)
+
+The [remote session control ADR](docs/adr-remote-session-control.md) defines a
+proposed mobile flow for viewing registered agent sessions and sending bounded,
+audited plain-text instructions through a host-local provider adapter. It is not
+implemented or enabled. Delivery remains gated by a disposable OpenCode API
+spike; the design excludes arbitrary shell commands, public provider endpoints,
+raw transcript centralization, and tmux keystroke injection from its MVP.
+
 The optional [Google Keep collector](docs/google-keep-collector.md) reads one configured checklist through an existing browser connection.
 
 ## Trying or adapting it
