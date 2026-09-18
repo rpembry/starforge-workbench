@@ -23,7 +23,7 @@ class Repository(Protocol):
     def link_run(self, action_id: str, run_id: str, data: dict, principal: str) -> dict: ...
 
 
-TABLES = {'objectives', 'actions', 'runs', 'events', 'artifacts', 'collectors', 'import_batches', 'import_records'}
+TABLES = {'objectives', 'actions', 'runs', 'events', 'artifacts', 'collectors', 'registered_sessions', 'import_batches', 'import_records'}
 TRANSITIONS = {
     'observed': {'proposed', 'rejected'},
     'proposed': {'accepted', 'rejected', 'approval_needed'},
@@ -56,12 +56,12 @@ class SQLiteRepository:
                 db.execute('INSERT INTO schema_migrations VALUES (?, ?)', (1, now()))
                 db.commit()
             versions = [r[0] for r in db.execute('SELECT version FROM schema_migrations ORDER BY version')]
-            if versions not in ([1], [1, 2], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6]):
+            if versions not in ([1], [1, 2], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6, 7]):
                 raise RuntimeError('Unsupported database schema version')
             for version, filename in [(2, '002_collectors.sql'), (3, '003_imports.sql'),
                                       (4, '004_provider_attention.sql'),
                                       (5, '005_provider_attention_incidents.sql'),
-                                      (6, '006_report_suggestions.sql')]:
+                                      (6, '006_report_suggestions.sql'), (7, '007_registered_sessions.sql')]:
                 if version not in versions:
                     migration = Path(__file__).with_name('migrations')/filename
                     db.executescript('BEGIN IMMEDIATE;\n'+migration.read_text())
@@ -247,6 +247,82 @@ class SQLiteRepository:
                     source_id=str(uuid.uuid4()), occurred_at=stamp, recorded_at=stamp, recorded_by=principal))
             db.commit()
             return row
+
+    def register_session(self, data, principal):
+        """Create/update only the same collector-owned opaque registration."""
+        from datetime import datetime, timedelta, timezone
+        data = dict(data)
+        observed = datetime.fromisoformat(data['observed_at'])
+        if observed > datetime.now(timezone.utc) + timedelta(minutes=5):
+            raise Problem(422, 'future_observation', 'Observation time is too far in the future')
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT * FROM registered_sessions WHERE id=?', (data['id'],)).fetchone()
+            if old:
+                if old['owner'] != principal:
+                    raise Problem(403, 'registered_session_owner', 'Registration belongs to another collector principal')
+                if old['collector_source'] != data['collector_source']:
+                    raise Problem(409, 'registration_identity', 'Collector source cannot change')
+            collector = db.execute('SELECT recorded_by FROM collectors WHERE source=?',
+                                   (data['collector_source'],)).fetchone()
+            if not collector or collector['recorded_by'] != principal:
+                raise Problem(403, 'collector_owner', 'Registration requires an owned collector heartbeat')
+            if data['action_id']:
+                if not data['run_id']:
+                    raise Problem(409, 'unverified_action', 'Action association requires a linked run')
+                run = self._get(db, 'runs', data['run_id'])
+                if run['action_id'] != data['action_id']:
+                    raise Problem(409, 'unverified_action', 'Action is not linked to this run')
+            elif data['run_id']:
+                self._get(db, 'runs', data['run_id'])
+            if old:
+                if data['observation_sequence'] <= old['observation_sequence']:
+                    raise Problem(409, 'observation_sequence', 'Observation sequence must increase')
+                if data['observed_at'] <= old['observed_at']:
+                    raise Problem(409, 'observation_clock', 'Observation time must increase')
+                if any(old[k] != data[k] for k in ('host', 'display_name', 'provider')):
+                    raise Problem(409, 'registration_identity', 'Registered session identity cannot change')
+                update = dict(data, heartbeat_at=now(), version=old['version'] + 1)
+                self._update(db, 'registered_sessions', data['id'], update)
+            else:
+                data.update(owner=principal, heartbeat_at=now(), created_at=now(), version=1)
+                self.insert(db, 'registered_sessions', data)
+            row = self._registered_session_row(db, data['id'])
+            db.commit()
+            return self._session_visibility(row)
+
+    @staticmethod
+    def _registered_session_row(db, identity):
+        row = db.execute('''SELECT s.*, c.heartbeat_at AS host_heartbeat_at
+            FROM registered_sessions s JOIN collectors c ON c.source=s.collector_source
+            WHERE s.id=?''', (identity,)).fetchone()
+        if not row:
+            raise Problem(404, 'not_found', 'Resource does not exist')
+        return row
+
+    @staticmethod
+    def _session_visibility(row):
+        from datetime import datetime, timezone
+        row = dict(row)
+        row.pop('owner', None)  # Collector principal is authorization state, not public session metadata.
+        host_heartbeat_at = row.pop('host_heartbeat_at')
+        row.pop('collector_source', None)
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(row['heartbeat_at'])).total_seconds()
+        host_age = (datetime.now(timezone.utc) - datetime.fromisoformat(host_heartbeat_at)).total_seconds()
+        row['heartbeat_age_seconds'] = max(0, int(age))
+        row['visibility'] = 'offline' if host_age > 90 else ('stale' if age > 30 else 'fresh')
+        return row
+
+    def list_registered_sessions(self, limit=100, offset=0):
+        with self.connection() as db:
+            rows = db.execute('''SELECT s.*, c.heartbeat_at AS host_heartbeat_at
+                FROM registered_sessions s JOIN collectors c ON c.source=s.collector_source
+                ORDER BY s.heartbeat_at DESC, s.id LIMIT ? OFFSET ?''', (limit, offset)).fetchall()
+            return [self._session_visibility(row) for row in rows]
+
+    def get_registered_session(self, identity):
+        with self.connection() as db:
+            return self._session_visibility(self._registered_session_row(db, identity))
 
     def activate_provider_generation(self, data, principal):
         from datetime import datetime, timedelta, timezone

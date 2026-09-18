@@ -14,7 +14,7 @@ from starlette.exceptions import HTTPException
 from .auth import Auth, CloudflareAuth
 from .models import (ActionIn, ActionPatch, ArtifactIn, EventIn, ObjectiveIn,
                      RunIn, RunLink, RunPatch, Transition, CollectorIn, ImportBatch,
-                     ProviderAttentionIn, ProviderGenerationIn)
+                     ProviderAttentionIn, ProviderGenerationIn, RegisteredSessionIn)
 from .repository import Problem, SQLiteRepository
 from .settings import load_settings
 
@@ -154,6 +154,18 @@ def create_app(repository=None, auth=None, settings=None):
     for table in ['objectives', 'actions', 'events', 'runs', 'artifacts', 'collectors', 'import_batches', 'import_records']:
         app.add_api_route('/api/'+table, list_endpoint(table), methods=['GET'], name='list_'+table)
         app.add_api_route('/api/'+table+'/{identity}', get_endpoint(table), methods=['GET'], name='get_'+table)
+
+    @app.get('/api/registered-sessions')
+    def registered_sessions(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0), who=Depends(operator)):
+        return {'items': repository.list_registered_sessions(limit, offset), 'limit': limit, 'offset': offset}
+
+    @app.get('/api/registered-sessions/{identity}')
+    def registered_session(identity: str, who=Depends(operator)):
+        return repository.get_registered_session(identity)
+
+    @app.post('/api/registered-sessions', status_code=201)
+    def register_session(body: RegisteredSessionIn, who=Depends(collector)):
+        return repository.register_session(body.model_dump(mode='json'), who.name)
 
     @app.post('/api/objectives', status_code=201)
     def objective(body: ObjectiveIn, who=Depends(operator)):

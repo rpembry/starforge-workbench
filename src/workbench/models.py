@@ -163,6 +163,29 @@ class CollectorIn(Model):
 
 
 ProviderIdentity = Annotated[str, Field(pattern=r'^[A-Za-z0-9_.:-]{1,200}$')]
+RegisteredSessionIdentity = Annotated[str, Field(pattern=r'^[A-Za-z0-9_-]{16,128}$')]
+
+
+class RegisteredSessionIn(Model):
+    """Bounded collector evidence; never a provider or terminal control target."""
+    id: RegisteredSessionIdentity
+    collector_source: Text
+    host: Text
+    display_name: Text
+    provider: Annotated[str, Field(min_length=1, max_length=100)]
+    run_id: str | None = None
+    action_id: str | None = None
+    evidence_state: Literal['present', 'attention_needed', 'provider_error', 'stopped', 'unknown']
+    reason: Annotated[str, Field(min_length=1, max_length=100)]
+    summary: Annotated[str, Field(max_length=500)] = ''
+    observation_sequence: Annotated[int, Field(ge=1)]
+    observed_at: datetime
+    last_activity_at: datetime | None = None
+
+    @field_validator('observed_at', 'last_activity_at')
+    @classmethod
+    def aware_time(cls, value):
+        return EventIn.aware_time(value)
 
 
 class ProviderGenerationIn(Model):
