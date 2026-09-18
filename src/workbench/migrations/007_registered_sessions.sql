@@ -1,6 +1,7 @@
 CREATE TABLE registered_sessions(
  id TEXT PRIMARY KEY,
  owner TEXT NOT NULL,
+ collector_source TEXT NOT NULL REFERENCES collectors(source),
  host TEXT NOT NULL,
  display_name TEXT NOT NULL,
  provider TEXT NOT NULL,
@@ -17,4 +18,5 @@ CREATE TABLE registered_sessions(
  version INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX registered_sessions_owner ON registered_sessions(owner);
+CREATE INDEX registered_sessions_collector ON registered_sessions(collector_source);
 CREATE INDEX registered_sessions_heartbeat ON registered_sessions(heartbeat_at);
