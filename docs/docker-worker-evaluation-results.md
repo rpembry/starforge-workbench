@@ -1,5 +1,8 @@
 # Initial Docker worker evaluation (#54)
 
+Follow-up: [matched toolchain and disposition results](docker-worker-matched-evaluation.md).
+The observations below remain the original run.
+
 **Recommendation: iterate on the basic runner. Keep #51 and #53 gated.**
 
 The synthetic experiment supports the runner's basic safety and correctness. It

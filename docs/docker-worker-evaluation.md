@@ -96,3 +96,7 @@ runner and a favorable evaluation are separate milestones.
 The [initial #54 report](docker-worker-evaluation-results.md) records 48 trials
 and an iterate recommendation. Toolchain comparability, cold preparation and
 production operator friction remain open; conditional expansion is not approved.
+
+The [matched-toolchain follow-up](docker-worker-matched-evaluation.md) measures
+cold task preparation and edit disposition; the latter fails the operator-friction
+gate. The recommendation remains iterate, with a specific bounded next change.
