@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from workbench.auth import Auth
 from workbench.main import create_app
+from workbench.models import RegisteredSessionIn
 from workbench.repository import Problem, SQLiteRepository
 
 
@@ -65,6 +66,24 @@ def test_registered_session_rejects_takeover_bad_sequence_and_bad_clock(api, rep
     with pytest.raises(Problem) as raised:
         repo.register_session(body(observation_sequence=2, observed_at=stamp(1)), 'different-collector-principal')
     assert getattr(raised.value, 'code', None) == 'registered_session_owner'
+
+
+def test_observation_clock_compares_instants_not_iso_strings(api, repo):
+    register_host(api)
+    def observation(**extra):
+        return RegisteredSessionIn.model_validate(body(**extra)).model_dump(mode='json')
+
+    first = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=5)
+    repo.register_session(observation(observed_at=first.isoformat()), 'collector')
+    later = first + timedelta(seconds=1)
+    later_with_offset = later.astimezone(timezone(timedelta(hours=-4))).isoformat()
+    second = observation(observation_sequence=2, observed_at=later_with_offset)
+    assert repo.register_session(second, 'collector')['observation_sequence'] == 2
+    with pytest.raises(Problem) as raised:
+        equal_instant = observation(observation_sequence=3,
+                                    observed_at=later.isoformat(timespec='microseconds'))
+        repo.register_session(equal_instant, 'collector')
+    assert raised.value.code == 'observation_clock'
 
 
 def test_registered_session_visibility_is_server_derived(api, repo):

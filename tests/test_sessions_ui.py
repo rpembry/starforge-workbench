@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from workbench.auth import Auth
 from workbench.main import create_app
-from workbench.repository import SQLiteRepository
+from workbench.repository import Problem, SQLiteRepository
 
 
 OPERATOR = 'o' * 40
@@ -78,7 +78,7 @@ def test_sessions_page_escapes_labels_and_omits_summary(api, repo):
     assert 'Sending instructions is not available yet' in detail.text
 
 
-def test_sessions_view_distinguishes_stale_offline_unknown_and_work(api, repo):
+def test_sessions_view_distinguishes_stale_offline_unknown_and_work(api, repo, monkeypatch):
     objective = api.post('/api/objectives', json={'title': 'Synthetic objective'}).json()
     action = api.post('/api/actions', json={'title': 'Synthetic action', 'objective_id': objective['id'],
                                             'status': 'accepted', 'execution_mode': 'agent'}).json()
@@ -113,6 +113,18 @@ def test_sessions_view_distinguishes_stale_offline_unknown_and_work(api, repo):
     assert 'Less than a minute ago' in detail
     assert api.get('/sessions?limit=1').text.count('<article>') == 1
     assert 'Next' in api.get('/sessions?limit=1').text
+    original_get = repo.get
+    for missing_table in ('runs', 'actions', 'objectives'):
+        def missing_link(resource, identity):
+            if resource == missing_table:
+                raise Problem(404, 'not_found', 'Synthetic missing link')
+            return original_get(resource, identity)
+        monkeypatch.setattr(repo, 'get', missing_link)
+        for path in ('/sessions', '/sessions/registered_session_0001'):
+            response = api.get(path)
+            assert response.status_code == 200
+            if path != '/sessions':
+                assert 'Not associated' in response.text
 
 
 def test_sessions_android_viewport_browser(tmp_path):
