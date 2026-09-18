@@ -40,6 +40,10 @@ the evidence below remains the 2026-09-17 observation against version 1.18.31.
 
 ## Findings and decisions
 
+The local one-attempt adapter built from this evidence is documented in
+[OpenCode delivery adapter](opencode-delivery-adapter.md). It is not yet a
+polling worker or a deployed control path.
+
 - **Exact addressing** is available for sessions and stored messages. Both
   `ses_` and `msg_` identities are client-visible.
 - **No provider-enforced idempotency was observed.** A client-selected

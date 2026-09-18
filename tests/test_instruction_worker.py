@@ -1,0 +1,183 @@
+"""Synthetic worker checks: no live server, provider, or conversation input."""
+import json
+from datetime import datetime, timezone
+
+from fastapi.testclient import TestClient
+
+from starforge_workbench.instruction_worker import cycle, load_config
+from starforge_workbench.opencode_delivery import DeliveryResult
+from workbench.auth import Auth
+from workbench.main import create_app
+from workbench.repository import SQLiteRepository
+
+
+REGISTERED = 'registered_synthetic_0001'
+INSTRUCTION = 'instruction_synthetic_001'
+SESSION = 'ses_synthetic_session_001'
+
+
+class Response:
+    def __init__(self, status, value=None):
+        self.status_code = status
+        self.value = value
+
+    def json(self):
+        return self.value
+
+
+class FakeAPI:
+    def __init__(self):
+        self.calls = []
+        self.claim = {'id': INSTRUCTION, 'registered_session_id': REGISTERED,
+                      'state': 'claimed', 'text': 'SYNTHETIC INSTRUCTION',
+                      'lease_token': 'synthetic_lease_token'}
+        self.renew_status = 200
+
+    def post(self, path, json):
+        self.calls.append((path, json))
+        if path == '/api/instructions/claim':
+            return Response(200, self.claim)
+        if path.endswith('/renew'):
+            return Response(self.renew_status, {'state': 'claimed'})
+        if path.endswith('/results'):
+            return Response(200, {'state': json['outcome']})
+        raise AssertionError('Unexpected worker request')
+
+
+class FakeAdapter:
+    def __init__(self, state='received'):
+        self.state = state
+        self.calls = []
+
+    def deliver(self, instruction_id, session_id, text):
+        self.calls.append((instruction_id, session_id, text))
+        return DeliveryResult(self.state, 'synthetic', 'msg_synthetic')
+
+
+def config(tmp_path, enabled=True):
+    root = tmp_path / 'private-state'
+    root.mkdir(mode=0o700, exist_ok=True)
+    state = root / 'registration.json'
+    state.write_text(json.dumps({'version': 1, 'contexts': {'opencode': {
+        'id': REGISTERED, 'generation': 'a' * 64, 'sequence': 1,
+        'host': 'synthetic', 'display_name': 'Synthetic', 'provider': 'opencode',
+        'run_id': 'synthetic-run', 'action_id': None, 'last_activity_at': None,
+    }}}))
+    state.chmod(0o600)
+    return {'enabled': enabled, 'manifest': str(tmp_path / 'manifest.yaml'),
+            'registration_state': str(state), 'launcher_state': str(root),
+            'delivery_state': str(root), 'opencode_origin': 'http://127.0.0.1:4098',
+            'provider_id': 'openai', 'model_id': 'synthetic-model',
+            'contexts': ['opencode']}
+
+
+def test_claim_only_exact_registration_then_report_admission(tmp_path):
+    api, adapter = FakeAPI(), FakeAdapter()
+    resolver_calls = []
+
+    def resolver(registered_id, *args):
+        resolver_calls.append(registered_id)
+        return SESSION
+
+    result = cycle(api, config(tmp_path), adapter, resolver)
+    assert result == {'eligible': 1, 'claimed': 1, 'reported': 1, 'ambiguous': 0}
+    assert resolver_calls == [REGISTERED, REGISTERED]
+    assert adapter.calls == [(INSTRUCTION, SESSION, 'SYNTHETIC INSTRUCTION')]
+    assert [path for path, _ in api.calls] == [
+        '/api/instructions/claim', f'/api/instructions/{INSTRUCTION}/renew',
+        f'/api/instructions/{INSTRUCTION}/results']
+    assert api.calls[-1][1]['outcome'] == 'received'
+    assert api.calls[-1][1]['reason_code'] == 'provider_accepted'
+    assert 'SYNTHETIC INSTRUCTION' not in json.dumps(api.calls[-1][1])
+
+
+def test_kill_switch_and_missing_local_evidence_prevent_claim(tmp_path):
+    api, adapter = FakeAPI(), FakeAdapter()
+    disabled = config(tmp_path, enabled=False)
+    assert cycle(api, disabled, adapter, lambda *args: SESSION)['claimed'] == 0
+    assert not api.calls
+    assert cycle(api, dict(disabled, enabled=True), adapter, lambda *args: None)['claimed'] == 0
+    assert not api.calls and not adapter.calls
+
+
+def test_generation_change_after_claim_never_sends(tmp_path):
+    api, adapter = FakeAPI(), FakeAdapter()
+    calls = 0
+
+    def changed(*args):
+        nonlocal calls
+        calls += 1
+        return SESSION if calls == 1 else None
+
+    result = cycle(api, config(tmp_path), adapter, changed)
+    assert result['claimed'] == result['reported'] == 1
+    assert not adapter.calls
+    assert api.calls[-1][1]['outcome'] == 'failed'
+    assert api.calls[-1][1]['reason_code'] == 'session_missing'
+
+
+def test_renew_failure_and_ambiguous_delivery_never_retry_provider(tmp_path):
+    api, adapter = FakeAPI(), FakeAdapter('uncertain')
+    api.renew_status = 503
+    result = cycle(api, config(tmp_path), adapter, lambda *args: SESSION)
+    assert result['ambiguous'] == 1 and not adapter.calls
+    api.renew_status = 200
+    result = cycle(api, config(tmp_path), adapter, lambda *args: SESSION)
+    assert result['reported'] == 1
+    assert len(adapter.calls) == 1
+    assert api.calls[-1][1]['outcome'] == 'uncertain'
+    assert api.calls[-1][1]['reason_code'] == 'delivery_ambiguous'
+
+
+def test_changed_claim_target_fails_closed(tmp_path):
+    api, adapter = FakeAPI(), FakeAdapter()
+    api.claim = dict(api.claim, registered_session_id='registered_other_synthetic')
+    result = cycle(api, config(tmp_path), adapter, lambda *args: SESSION)
+    assert result['ambiguous'] == 1 and result['reported'] == 0
+    assert not adapter.calls
+
+
+def test_private_disabled_configuration_is_accepted(tmp_path):
+    content = config(tmp_path, enabled=False)
+    path = tmp_path / 'worker.json'
+    path.write_text(json.dumps(content))
+    path.chmod(0o600)
+    assert load_config(path)['enabled'] is False
+
+
+def test_worker_claim_and_receipt_against_synthetic_server(tmp_path):
+    operator = 'operator-synthetic-' + 'o' * 32
+    collector = 'collector-synthetic-' + 'c' * 32
+    repo = SQLiteRepository(tmp_path / 'database' / 'workbench.sqlite')
+    app = create_app(repo, Auth({'operator': operator, 'collector': collector}),
+                     instruction_claims_enabled=True)
+    with TestClient(app) as api:
+        api.headers['Authorization'] = 'Bearer ' + collector
+        heartbeat = api.post('/api/collectors/heartbeat', json={
+            'source': 'synthetic-collector', 'instance_id': 'synthetic-instance',
+            'scope': 'synthetic', 'status': 'ok', 'reason': 'scan_complete'})
+        assert heartbeat.status_code == 200
+        registration = api.post('/api/registered-sessions', json={
+            'id': REGISTERED, 'collector_source': 'synthetic-collector',
+            'host': 'synthetic-host', 'display_name': 'Synthetic OpenCode',
+            'provider': 'opencode', 'evidence_state': 'present',
+            'reason': 'process_observed', 'summary': '', 'observation_sequence': 1,
+            'observed_at': datetime.now(timezone.utc).isoformat()})
+        assert registration.status_code == 201, registration.text
+        api.headers['Authorization'] = 'Bearer ' + operator
+        created = api.post('/api/instructions', json={
+            'idempotency_key': 'synthetic-key-0001',
+            'registered_session_id': REGISTERED, 'text': 'SYNTHETIC INSTRUCTION',
+            'expiry_minutes': 15})
+        assert created.status_code == 201, created.text
+        api.headers['Authorization'] = 'Bearer ' + collector
+        adapter = FakeAdapter()
+        result = cycle(api, config(tmp_path), adapter, lambda *args: SESSION)
+        assert result['claimed'] == result['reported'] == 1
+        assert adapter.calls == [(created.json()['id'], SESSION, 'SYNTHETIC INSTRUCTION')]
+        api.headers['Authorization'] = 'Bearer ' + operator
+        stored = api.get('/api/instructions/' + created.json()['id'])
+        assert stored.status_code == 200
+        assert stored.json()['state'] == 'received'
+        assert all('SYNTHETIC INSTRUCTION' not in json.dumps(entry)
+                   for entry in stored.json()['history'])
