@@ -34,8 +34,11 @@ commit or print its `client_secret`.
    disabled. Its single `--context opencode` and protected
    `instruction-registrations.json` must match the worker's exact manifest,
    `registration_state`, `launcher_state`, and context allowlist. The publisher
-   owns the registration; the worker only reads it. Both use the dedicated
-   client configuration. Never copy an old registration state to the new
+   must also use a stable `--source` distinct from the ordinary collector's
+   source: the server binds each source to its original principal, and reusing
+   one returns `collector_owner`. The publisher owns the registration; the
+   worker only reads it. Both use the dedicated client configuration. Never
+   copy an old registration state to the new
    publisher: it needs a new opaque ID under the new principal.
 4. Review the currently installed ordinary collector's context list. Apply
    [`workbench-collector-without-opencode.conf.example`](../deploy/workbench-collector-without-opencode.conf.example)

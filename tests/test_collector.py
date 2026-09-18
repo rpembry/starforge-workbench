@@ -1,4 +1,5 @@
 import os
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -6,7 +7,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from workbench.collector import collect
+from workbench.collector import collect, main
 from workbench.client import client
 
 
@@ -65,3 +66,20 @@ def test_remote_plaintext_and_credential_urls_are_refused():
     for url in ['http://server.example.com:8027', 'https://user:password@example.com', 'https://example.com?token=secret']:
         with pytest.raises(ValueError):
             client(url, '/not-read')
+
+
+def test_cli_passes_distinct_source_to_publisher_cycle(monkeypatch, capsys):
+    observed = []
+
+    def fake_cycle(api, manifest, selected, instance_id, **kwargs):
+        observed.append((selected, kwargs['source']))
+        return {'status': 'ok', 'reason': 'scan_complete', 'observed_runs': 0}
+
+    monkeypatch.setattr('sys.argv', ['wb-collect', '--manifest', '/synthetic/manifest.yaml',
+                                     '--context', 'opencode', '--source',
+                                     'synthetic:opencode-instruction'])
+    monkeypatch.setattr('workbench.collector.client', lambda *args: nullcontext(object()))
+    monkeypatch.setattr('workbench.collector.cycle', fake_cycle)
+    main()
+    assert observed == [(['opencode'], 'synthetic:opencode-instruction')]
+    assert '"status": "ok"' in capsys.readouterr().out

@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/share/starforge-ai-workbench/collector-current/.venv/bin/wb-collect --manifest %h/.config/starforge-ai-workbench/workbench.yaml --credentials-file %h/.config/starforge-ai-workbench/instruction-collector.json --registration-state %h/.local/state/starforge-ai-workbench/instruction-registrations.json --context opencode --interval 30
+ExecStart=%h/.local/share/starforge-ai-workbench/collector-current/.venv/bin/wb-collect --manifest %h/.config/starforge-ai-workbench/workbench.yaml --credentials-file %h/.config/starforge-ai-workbench/instruction-collector.json --source starforge:opencode-instruction --registration-state %h/.local/state/starforge-ai-workbench/instruction-registrations.json --context opencode --interval 30
 UnsetEnvironment=WB_API_URL WB_CLIENT_CONFIG WB_CREDENTIALS_FILE WB_REGISTERED_SESSION_STATE
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
