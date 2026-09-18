@@ -232,6 +232,31 @@ def test_offline_queue_survives_until_owned_worker_recovers(api, repo):
     assert recovered.json()['id'] == item['id']
 
 
+def test_queue_survives_server_restart_and_expires_while_worker_offline(tmp_path):
+    database = tmp_path / 'restart-state' / 'workbench.sqlite'
+    original = SQLiteRepository(database)
+    auth = Auth({'operator': OPERATOR, 'collector': COLLECTOR})
+    with TestClient(create_app(original, auth, instruction_claims_enabled=True)) as api:
+        api.headers['Authorization'] = 'Bearer ' + OPERATOR
+        register_session(api)
+        item = create_instruction(api)
+
+    restarted = SQLiteRepository(database)
+    with restarted.connection() as db:
+        db.execute('UPDATE collectors SET heartbeat_at=?', (stamp(-91),))
+        db.execute('UPDATE instructions SET expires_at=? WHERE id=?', (stamp(-1), item['id']))
+        db.commit()
+    with TestClient(create_app(restarted, auth, instruction_claims_enabled=True)) as api:
+        api.headers['Authorization'] = 'Bearer ' + COLLECTOR
+        unavailable = claim(api)
+        assert unavailable.status_code == 409
+        assert unavailable.json()['error']['code'] == 'target_unavailable'
+        api.headers['Authorization'] = 'Bearer ' + OPERATOR
+        stored = api.get('/api/instructions/' + item['id']).json()
+        assert stored['state'] == 'expired'
+        assert [entry['state'] for entry in stored['history']] == ['queued', 'expired']
+
+
 def test_foreign_worker_cannot_read_claim_or_report(repo):
     principal = 'owner-collector'
     repo.collector_heartbeat({'source': 'owned-source', 'instance_id': 'instance', 'scope': 'host',

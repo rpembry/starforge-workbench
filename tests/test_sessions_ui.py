@@ -239,6 +239,8 @@ def test_sessions_android_viewport_browser(tmp_path):
             'status': 'ok', 'reason': 'scan_complete'}).status_code == 200
         assert api.post('/api/registered-sessions', json=registration(
             display_name='Synthetic agent with a long but ordinary readable display name')).status_code == 201
+        assert api.post('/api/registered-sessions', json=registration(
+            identity='registered_session_0002', display_name='Other disposable agent')).status_code == 201
     app = create_app(repo, Auth({'operator': OPERATOR, 'collector': COLLECTOR}))
     listener = socket.socket()
     listener.bind(('127.0.0.1', 0))
@@ -253,7 +255,12 @@ def test_sessions_android_viewport_browser(tmp_path):
             time.sleep(.05)
         assert server.started
         subprocess.run(['node', str(Path(__file__).with_name('sessions_browser.cjs'))], check=True,
-                       env={**os.environ, 'WB_CHROME': chrome, 'WB_TEST_URL': f'http://127.0.0.1:{port}'}, timeout=60)
+                        env={**os.environ, 'WB_CHROME': chrome, 'WB_TEST_URL': f'http://127.0.0.1:{port}'}, timeout=60)
+        selected = repo.list_instructions(session_id='registered_session_0001')
+        other = repo.list_instructions(session_id='registered_session_0002')
+        assert len(selected) == 1
+        assert selected[0]['text'] == 'Synthetic dictation with Unicode \u2713 and $HOME; no merge.'
+        assert other == []
     finally:
         server.should_exit = True
         thread.join(timeout=5)

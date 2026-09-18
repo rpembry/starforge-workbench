@@ -2,9 +2,10 @@
 
 `starforge_workbench.opencode_delivery` is a local, one-attempt provider
 boundary. The opt-in [local worker](instruction-worker.md) adds collector-owned
-target resolution, claim validation, and result reporting. The #64 queue is
-still under review, and a disposable live smoke remains necessary before #63
-can be closed or any send control can be enabled.
+target resolution, claim validation, and result reporting. The durable queue
+and mobile send flow do not enable delivery; deployment remains gated by the
+[operations runbook](mobile-control-operations.md) and a target-host disposable
+smoke.
 
 The adapter accepts an exact `ses_` session ID, an opaque instruction ID, and
 bounded text from a trusted local caller. Its OpenCode origin and model identity
@@ -47,6 +48,7 @@ remain unknown.
 cover exact-session routing, busy admission, restart/replay, ambiguous timeout,
 crash after the attempt marker, missing/unavailable sessions, loopback-only
 configuration, and receipt privacy. No existing OpenCode conversation was
-opened or sent input for this slice. Integration with #64 must add protected
-claim state, kill-switch behavior, lease reconciliation, and separate
-disposable live smoke before the worker is deployable.
+opened or sent input for this slice. The integrated synthetic suite covers
+protected claim state, kill-switch behavior, lease reconciliation, and
+exact-target routing. It does not replace the separate disposable target-host
+smoke required before deployment.
