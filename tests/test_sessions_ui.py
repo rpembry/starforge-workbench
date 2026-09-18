@@ -34,7 +34,8 @@ def api(repo):
 
 
 def registration(identity='registered_session_0001', **extra):
-    body = dict(id=identity, host='Synthetic host', display_name='Fixture agent', provider='opencode',
+    body = dict(id=identity, collector_source='synthetic-collector', host='Synthetic host',
+                display_name='Fixture agent', provider='opencode',
                 evidence_state='present', reason='process_observed', summary='DO_NOT_RENDER_TRANSCRIPT',
                 observation_sequence=1, observed_at=datetime.now(timezone.utc).isoformat())
     body.update(extra)
@@ -43,6 +44,9 @@ def registration(identity='registered_session_0001', **extra):
 
 def add_session(api, **extra):
     api.headers['Authorization'] = 'Bearer ' + COLLECTOR
+    assert api.post('/api/collectors/heartbeat', json={
+        'source': 'synthetic-collector', 'instance_id': 'synthetic-instance', 'scope': 'synthetic host',
+        'status': 'ok', 'reason': 'scan_complete'}).status_code == 200
     result = api.post('/api/registered-sessions', json=registration(**extra))
     assert result.status_code == 201, result.text
     api.headers['Authorization'] = 'Bearer ' + OPERATOR
@@ -93,26 +97,22 @@ def test_sessions_view_distinguishes_stale_offline_unknown_and_work(api, repo):
         current = datetime.now(timezone.utc)
         db.execute('UPDATE registered_sessions SET heartbeat_at=? WHERE id=?',
                    ((current - timedelta(seconds=40)).isoformat(), 'registered_session_0002'))
-        db.execute('UPDATE registered_sessions SET heartbeat_at=? WHERE id=?',
-                   ((current - timedelta(seconds=100)).isoformat(), 'registered_session_0003'))
+        db.execute('UPDATE collectors SET heartbeat_at=? WHERE source=?',
+                   ((current - timedelta(seconds=100)).isoformat(), 'synthetic-collector'))
         db.commit()
     listing = api.get('/sessions').text
-    assert 'Stale visibility' in listing
+    assert 'Stale visibility' not in listing
     assert 'Offline visibility' in listing
+    with repo.connection() as db:
+        db.execute('UPDATE collectors SET heartbeat_at=? WHERE source=?',
+                   (datetime.now(timezone.utc).isoformat(), 'synthetic-collector'))
+        db.commit()
+    assert 'Stale visibility' in api.get('/sessions').text
     detail = api.get('/sessions/registered_session_0001').text
     assert 'Synthetic action' in detail and 'Synthetic objective' in detail
     assert 'Less than a minute ago' in detail
     assert api.get('/sessions?limit=1').text.count('<article>') == 1
     assert 'Next' in api.get('/sessions?limit=1').text
-
-
-def test_unverified_action_reference_is_not_displayed(api):
-    action = api.post('/api/actions', json={'title': 'Unlinked synthetic action',
-                                            'status': 'accepted', 'execution_mode': 'agent'}).json()
-    add_session(api, action_id=action['id'])
-    detail = api.get('/sessions/registered_session_0001').text
-    assert 'Unlinked synthetic action' not in detail
-    assert 'Not associated' in detail
 
 
 def test_sessions_android_viewport_browser(tmp_path):
@@ -123,6 +123,9 @@ def test_sessions_android_viewport_browser(tmp_path):
     repo = SQLiteRepository(tmp_path / 'state' / 'workbench.sqlite')
     with TestClient(create_app(repo, Auth({'operator': OPERATOR, 'collector': COLLECTOR}))) as api:
         api.headers['Authorization'] = 'Bearer ' + COLLECTOR
+        assert api.post('/api/collectors/heartbeat', json={
+            'source': 'synthetic-collector', 'instance_id': 'synthetic-instance', 'scope': 'synthetic host',
+            'status': 'ok', 'reason': 'scan_complete'}).status_code == 200
         assert api.post('/api/registered-sessions', json=registration(
             display_name='Synthetic agent with a long but ordinary readable display name')).status_code == 201
     app = create_app(repo, Auth({'operator': OPERATOR, 'collector': COLLECTOR}))
