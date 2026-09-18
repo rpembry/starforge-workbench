@@ -42,6 +42,8 @@ def test_rollout_units_keep_one_context_and_loopback_boundary():
     assert 'ExecStart=' in ordinary
     assert 'serve --hostname 127.0.0.1 --port 4098 --pure' in api
     assert '--hostname 0.0.0.0' not in api
+
+
 INSTRUCTION = 'instruction_synthetic_001'
 SESSION = 'ses_synthetic_session_001'
 

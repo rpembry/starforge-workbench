@@ -24,7 +24,9 @@ commit or print its `client_secret`.
    Map its verified `client_id` (`common_name` in the signed Access JWT) to
    `collector` in the protected server Access configuration. Back up that
    configuration first. Do not put token material in the server file.
-2. Test authenticated *read-only* collector access using the new local client.
+2. Test the new local client without a write: an authenticated collector GET
+   of the operator-only `/api/collectors` endpoint must return Workbench's
+   `operator_required` error, not a Cloudflare denial or authentication error.
    A role or Access mismatch blocks rollout. Do not infer authorization from a
    successful Cloudflare token creation alone.
 3. Install the reviewed
