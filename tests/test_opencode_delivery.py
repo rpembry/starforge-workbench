@@ -145,5 +145,9 @@ def test_rejects_unsafe_local_state_and_control_characters(tmp_path):
     with pytest.raises(DeliveryError):
         delivery.deliver(INSTRUCTION, SESSION, 'bad\x00text')
     with pytest.raises(DeliveryError):
+        delivery.deliver(INSTRUCTION, SESSION, 'bad\x7ftext')
+    with pytest.raises(DeliveryError):
+        delivery.deliver(INSTRUCTION, SESSION, 'bad\x85text')
+    with pytest.raises(DeliveryError):
         delivery.deliver(INSTRUCTION, SESSION, '   ')
     assert not list(Path(delivery.root).glob('*.json'))

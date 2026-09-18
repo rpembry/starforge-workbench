@@ -11,7 +11,9 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import tempfile
+import unicodedata
 from urllib.parse import urlsplit
 
 
@@ -82,7 +84,8 @@ def _load(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
         info = os.fstat(fd)
-        if info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > 4096:
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+            info.st_mode & 0o077 or info.st_size > 4096):
             raise DeliveryError('Unsafe local delivery receipt')
         with os.fdopen(fd, 'rb', closefd=False) as stream:
             receipt = json.loads(stream.read(4097))
@@ -142,7 +145,9 @@ class OpenCodeDelivery:
         if not isinstance(text, str):
             raise DeliveryError('Instruction must be text')
         text = text.strip()
-        if not 1 <= len(text) <= 2000 or any(ord(char) < 32 and char not in '\n\t' for char in text):
+        if not 1 <= len(text) <= 2000 or any(
+            unicodedata.category(char) == 'Cc' and char not in '\n\t' for char in text
+        ):
             raise DeliveryError('Instruction is empty, oversized, or contains control characters')
         content_hash = hashlib.sha256(text.encode()).hexdigest()
         message_id = 'msg_' + hashlib.sha256(instruction_id.encode()).hexdigest()[:32]
