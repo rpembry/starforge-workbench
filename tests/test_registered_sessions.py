@@ -28,15 +28,24 @@ def stamp(seconds=0):
 
 
 def body(**extra):
-    value = dict(id='registered_session_0001', host='synthetic-host', display_name='Synthetic OpenCode',
+    value = dict(id='registered_session_0001', collector_source='synthetic-collector',
+                 host='synthetic-host', display_name='Synthetic OpenCode',
                  provider='opencode', evidence_state='present', reason='process_observed', summary='synthetic',
                  observation_sequence=1, observed_at=stamp())
     value.update(extra)
     return value
 
 
-def test_registered_sessions_are_collector_owned_and_operator_read_only(api):
+def register_host(api):
     api.headers['Authorization'] = 'Bearer ' + COLLECTOR
+    result = api.post('/api/collectors/heartbeat', json={
+        'source': 'synthetic-collector', 'instance_id': 'synthetic-instance', 'scope': 'synthetic host',
+        'status': 'ok', 'reason': 'scan_complete'})
+    assert result.status_code == 200, result.text
+
+
+def test_registered_sessions_are_collector_owned_and_operator_read_only(api):
+    register_host(api)
     created = api.post('/api/registered-sessions', json=body())
     assert created.status_code == 201
     assert created.json()['visibility'] == 'fresh'
@@ -48,7 +57,7 @@ def test_registered_sessions_are_collector_owned_and_operator_read_only(api):
 
 
 def test_registered_session_rejects_takeover_bad_sequence_and_bad_clock(api, repo):
-    api.headers['Authorization'] = 'Bearer ' + COLLECTOR
+    register_host(api)
     assert api.post('/api/registered-sessions', json=body()).status_code == 201
     assert api.post('/api/registered-sessions', json=body()).status_code == 409
     assert api.post('/api/registered-sessions', json=body(observation_sequence=2, observed_at=stamp(-1))).status_code == 409
@@ -59,10 +68,22 @@ def test_registered_session_rejects_takeover_bad_sequence_and_bad_clock(api, rep
 
 
 def test_registered_session_visibility_is_server_derived(api, repo):
-    api.headers['Authorization'] = 'Bearer ' + COLLECTOR
+    register_host(api)
     assert api.post('/api/registered-sessions', json=body()).status_code == 201
     with repo.connection() as db:
-        db.execute('UPDATE registered_sessions SET heartbeat_at=?', (stamp(-91),))
+        db.execute('UPDATE registered_sessions SET heartbeat_at=?', (stamp(-40),))
         db.commit()
     api.headers['Authorization'] = 'Bearer ' + OPERATOR
+    assert api.get('/api/registered-sessions/registered_session_0001').json()['visibility'] == 'stale'
+    with repo.connection() as db:
+        db.execute('UPDATE collectors SET heartbeat_at=? WHERE source=?', (stamp(-91), 'synthetic-collector'))
+        db.commit()
     assert api.get('/api/registered-sessions/registered_session_0001').json()['visibility'] == 'offline'
+
+
+def test_registration_requires_owned_host_and_verified_action_link(api):
+    api.headers['Authorization'] = 'Bearer ' + COLLECTOR
+    assert api.post('/api/registered-sessions', json=body()).status_code == 403
+    register_host(api)
+    assert api.post('/api/registered-sessions', json=body(action_id='unlinked')).status_code == 409
+    assert api.post('/api/registered-sessions', json=body(collector_source='other')).status_code == 403

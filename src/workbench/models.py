@@ -169,6 +169,7 @@ RegisteredSessionIdentity = Annotated[str, Field(pattern=r'^[A-Za-z0-9_-]{16,128
 class RegisteredSessionIn(Model):
     """Bounded collector evidence; never a provider or terminal control target."""
     id: RegisteredSessionIdentity
+    collector_source: Text
     host: Text
     display_name: Text
     provider: Annotated[str, Field(min_length=1, max_length=100)]

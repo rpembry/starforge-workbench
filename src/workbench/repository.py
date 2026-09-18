@@ -261,45 +261,68 @@ class SQLiteRepository:
             if old:
                 if old['owner'] != principal:
                     raise Problem(403, 'registered_session_owner', 'Registration belongs to another collector principal')
+                if old['collector_source'] != data['collector_source']:
+                    raise Problem(409, 'registration_identity', 'Collector source cannot change')
+            collector = db.execute('SELECT recorded_by FROM collectors WHERE source=?',
+                                   (data['collector_source'],)).fetchone()
+            if not collector or collector['recorded_by'] != principal:
+                raise Problem(403, 'collector_owner', 'Registration requires an owned collector heartbeat')
+            if data['action_id']:
+                if not data['run_id']:
+                    raise Problem(409, 'unverified_action', 'Action association requires a linked run')
+                run = self._get(db, 'runs', data['run_id'])
+                if run['action_id'] != data['action_id']:
+                    raise Problem(409, 'unverified_action', 'Action is not linked to this run')
+            elif data['run_id']:
+                self._get(db, 'runs', data['run_id'])
+            if old:
                 if data['observation_sequence'] <= old['observation_sequence']:
                     raise Problem(409, 'observation_sequence', 'Observation sequence must increase')
                 if data['observed_at'] <= old['observed_at']:
                     raise Problem(409, 'observation_clock', 'Observation time must increase')
                 if any(old[k] != data[k] for k in ('host', 'display_name', 'provider')):
                     raise Problem(409, 'registration_identity', 'Registered session identity cannot change')
-                for ref in ('run_id', 'action_id'):
-                    if data[ref] is not None:
-                        self._get(db, 'runs' if ref == 'run_id' else 'actions', data[ref])
                 update = dict(data, heartbeat_at=now(), version=old['version'] + 1)
                 self._update(db, 'registered_sessions', data['id'], update)
             else:
-                for ref in ('run_id', 'action_id'):
-                    if data[ref] is not None:
-                        self._get(db, 'runs' if ref == 'run_id' else 'actions', data[ref])
                 data.update(owner=principal, heartbeat_at=now(), created_at=now(), version=1)
                 self.insert(db, 'registered_sessions', data)
-            row = self._get(db, 'registered_sessions', data['id'])
+            row = self._registered_session_row(db, data['id'])
             db.commit()
             return self._session_visibility(row)
+
+    @staticmethod
+    def _registered_session_row(db, identity):
+        row = db.execute('''SELECT s.*, c.heartbeat_at AS host_heartbeat_at
+            FROM registered_sessions s JOIN collectors c ON c.source=s.collector_source
+            WHERE s.id=?''', (identity,)).fetchone()
+        if not row:
+            raise Problem(404, 'not_found', 'Resource does not exist')
+        return row
 
     @staticmethod
     def _session_visibility(row):
         from datetime import datetime, timezone
         row = dict(row)
         row.pop('owner', None)  # Collector principal is authorization state, not public session metadata.
+        host_heartbeat_at = row.pop('host_heartbeat_at')
+        row.pop('collector_source', None)
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(row['heartbeat_at'])).total_seconds()
+        host_age = (datetime.now(timezone.utc) - datetime.fromisoformat(host_heartbeat_at)).total_seconds()
         row['heartbeat_age_seconds'] = max(0, int(age))
-        row['visibility'] = 'offline' if age > 90 else ('stale' if age > 30 else 'fresh')
+        row['visibility'] = 'offline' if host_age > 90 else ('stale' if age > 30 else 'fresh')
         return row
 
     def list_registered_sessions(self, limit=100, offset=0):
         with self.connection() as db:
-            rows = db.execute('SELECT * FROM registered_sessions ORDER BY heartbeat_at DESC, id LIMIT ? OFFSET ?', (limit, offset)).fetchall()
+            rows = db.execute('''SELECT s.*, c.heartbeat_at AS host_heartbeat_at
+                FROM registered_sessions s JOIN collectors c ON c.source=s.collector_source
+                ORDER BY s.heartbeat_at DESC, s.id LIMIT ? OFFSET ?''', (limit, offset)).fetchall()
             return [self._session_visibility(row) for row in rows]
 
     def get_registered_session(self, identity):
         with self.connection() as db:
-            return self._session_visibility(self._get(db, 'registered_sessions', identity))
+            return self._session_visibility(self._registered_session_row(db, identity))
 
     def activate_provider_generation(self, data, principal):
         from datetime import datetime, timedelta, timezone
