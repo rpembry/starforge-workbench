@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sessions · Starforge Workbench</title><link rel="icon" type="image/png" href="/assets/workbench-logo.png">
+<style>
+:root{font:16px system-ui;color:#e5ebf3;background:#101722}*{box-sizing:border-box}body{max-width:760px;margin:auto;padding:20px;overflow-wrap:anywhere}a{color:#91b9ee}a:focus-visible{outline:3px solid #f5b971;outline-offset:3px}nav{margin-bottom:24px}h1{font-size:clamp(1.7rem,6vw,2.2rem)}h2{font-size:1.1rem;margin:.2rem 0}p{line-height:1.45}main{display:grid;gap:12px}article{min-width:0;background:#192331;border:1px solid #334155;border-radius:12px;padding:18px}.badge{display:inline-block;background:#334155;border-radius:5px;padding:4px 8px;font-size:.85rem;font-weight:600}.muted,small{color:#a4b2c5}.meta{margin:.4rem 0}.pager{display:flex;gap:20px;margin:24px 0}footer{border-top:1px solid #334155;margin-top:24px;padding-top:12px;color:#a4b2c5}@media(max-width:480px){body{padding:14px}article{padding:14px}}
+</style></head><body>
+<nav aria-label="Main navigation"><a href="/">Dashboard</a> · <a href="/sessions" aria-current="page">Sessions</a></nav>
+<header><h1>Sessions</h1><p class="muted">Registered sessions reported by collectors. Presence and activity do not show task progress or completion.</p></header>
+<main id="sessions-list">
+{% for session in sessions %}<article><h2><a href="/sessions/{{ session.id }}">{{ session.display_name }}</a></h2><p class="meta">{{ session.host }} · {{ session.provider }}</p><p><span class="badge">{{ session.status_label }}</span></p><p>{{ session.reason_label }}</p><small>Last activity: {{ session.activity_label }} · Last contact: {{ session.heartbeat_label }}</small></article>
+{% else %}<article><p>No sessions are registered yet. This does not mean no agents are running.</p></article>{% endfor %}
+</main>
+<nav class="pager" aria-label="Session pages">{% if offset > 0 %}<a href="/sessions?limit={{ limit }}&amp;offset={{ [0, offset - limit]|max }}">Previous</a>{% endif %}{% if has_next %}<a href="/sessions?limit={{ limit }}&amp;offset={{ offset + limit }}">Next</a>{% endif %}</nav>
+<footer>Read only. Instruction delivery is not available in this view.</footer></body></html>

@@ -242,6 +242,20 @@ def create_app(repository=None, auth=None, settings=None):
 
     templates = Jinja2Templates(directory=str(Path(__file__).with_name('templates')))
 
+    @app.get('/sessions', response_class=HTMLResponse, dependencies=[Depends(operator)])
+    def sessions_view(request: Request, limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0)):
+        from .session_views import display_session
+        rows = repository.list_registered_sessions(limit + 1, offset)
+        items = [display_session(row, repository) for row in rows[:limit]]
+        return templates.TemplateResponse(request=request, name='sessions.html', context={
+            'sessions': items, 'limit': limit, 'offset': offset, 'has_next': len(rows) > limit})
+
+    @app.get('/sessions/{identity}', response_class=HTMLResponse, dependencies=[Depends(operator)])
+    def session_view(request: Request, identity: str):
+        from .session_views import display_session
+        item = display_session(repository.get_registered_session(identity), repository)
+        return templates.TemplateResponse(request=request, name='session.html', context={'session': item})
+
     @app.get('/reports/{kind}', response_class=HTMLResponse, dependencies=[Depends(operator)])
     def report_view(request: Request, kind: Literal['accomplishments', 'standup', 'todo']):
         from .reports import report
