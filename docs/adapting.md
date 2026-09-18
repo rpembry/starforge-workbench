@@ -82,6 +82,20 @@ In Cloudflare mode, set `WB_AUTH_MODE=cloudflare`, `WB_ACCESS_CONFIG` to a file 
 
 Read each observer's CLI help and tests before enabling it. The process collector can be tried with `wb-collect --manifest PATH --context CONTEXT --dry-run`; it requires the host's process namespace and existing Workbench tmux sessions. Service units select contexts explicitly; adapt those selections to your manifest.
 
+Registered-session publishing by the launcher collector is opt-in. Pass
+`--registration-state` (or `WB_REGISTERED_SESSION_STATE`) with an absolute path
+outside Git in an owned `0700` directory; the collector creates a `0600` file
+containing random opaque registration IDs, process/binding fingerprints, and
+observation sequences. `--launcher-state` defaults to the launcher's protected
+runtime root and is read only. Only enabled, selected contexts with a verified
+live provider process are published. A live context without an exact protected
+launcher binding is published as `unknown` with `exact_binding_missing`, which
+is explicitly not a controllable target. The collector reads no terminal
+contents, prompts, responses, or provider transcripts and performs no provider
+or tmux mutation. When the exact process or binding generation changes, the old
+opaque registration is marked `stopped` before a new identity is published.
+Existing service recipes do not enable this option.
+
 Claude collection starts with a persisted cutoff covering the preceding day. OpenCode collection starts at installation. The Codex observer's `--bootstrap-file` refers to a protected JSON file with a `snapshot` path to the legacy Worklog database; its bootstrap reads the old cursor and source identities. That historical schema is specific to the migration this grew from. Adapt or replace this bootstrap when starting without Worklog. The public importer only treats `user:` and GitHub source records as explicit; add your own trusted source rules deliberately. Never fabricate production records just to satisfy an installer.
 
 `deploy/install-collector.py` expects a versioned release layout and protected client configuration. Options enable additional observer services. `deploy/install-release.sh` installs the server under `/opt/workbench` with state under `/var/lib/workbench`. Inspect paths, dependencies, service actions, and access configuration before running either helper. These recipes are not a universal installation workflow.

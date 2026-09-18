@@ -90,3 +90,9 @@ Choose one outcome explicitly:
 is demonstrated. Threshold changes require an explicit recorded decision and a
 new comparable run; retain the original results. An accepted design, a merged
 runner and a favorable evaluation are separate milestones.
+
+## Initial evidence
+
+The [initial #54 report](docker-worker-evaluation-results.md) records 48 trials
+and an iterate recommendation. Toolchain comparability, cold preparation and
+production operator friction remain open; conditional expansion is not approved.

@@ -65,3 +65,7 @@ __pycache__/
 .venv/
 node_modules/
 config/workbench.yaml
+
+# Sanitized, explicitly reviewed Docker evaluation evidence only.
+!/docs/evaluations/
+!/docs/evaluations/docker-workers-54.json

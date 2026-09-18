@@ -17,6 +17,8 @@ REASON_LABELS = {
     'user_question': 'Question observed',
     'provider_error': 'Provider error observed',
     'process_stopped': 'Registered process stopped',
+    'registration_replaced': 'Exact registered process or binding was replaced',
+    'exact_binding_missing': 'Exact provider binding unavailable; session is not controllable',
     'no_evidence': 'No stronger evidence available',
 }
 
