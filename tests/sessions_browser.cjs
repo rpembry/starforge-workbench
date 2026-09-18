@@ -21,5 +21,17 @@ const {chromium} = require(process.env.WB_PLAYWRIGHT_MODULE);
     await page.keyboard.press('Enter');
     await page.waitForURL('**/sessions/registered_session_0001');
     assert.equal(await page.getByRole('heading', {name: 'Observed status'}).count(), 1);
+    const instruction = 'Synthetic dictation with Unicode ✓ and $HOME; no merge.';
+    await page.getByLabel('Instruction text').fill(instruction);
+    assert.equal(await page.locator('#instruction-count').textContent(), String(Array.from(instruction).length));
+    await page.getByLabel(/Confirm this exact session/).check();
+    await page.getByRole('button', {name: 'Queue instruction'}).click();
+    await page.waitForTimeout(500);
+    assert.equal(page.url(), process.env.WB_TEST_URL + '/sessions/registered_session_0001?notice=queued',
+      await page.locator('body').textContent());
+    assert.equal(await page.getByRole('status').filter({hasText: 'Instruction queued'}).count(), 1);
+    assert.equal(await page.getByText(instruction, {exact: true}).count(), 1);
+    assert.equal(await page.locator('.instruction h3 .badge').filter({hasText: 'Queued'}).count(), 1);
+    assert.equal(await page.getByRole('button', {name: /Pause|Continue|Stop/}).count(), 0);
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

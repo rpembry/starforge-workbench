@@ -1,15 +1,18 @@
 """FastAPI factory. Start explicitly on 127.0.0.1; no module-import side effects."""
 import os
+import re
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, Form, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.security import HTTPBearer, APIKeyHeader
 from starlette.exceptions import HTTPException
+from pydantic import ValidationError
 
 from .auth import Auth, CloudflareAuth
 from .models import (ActionIn, ActionPatch, ArtifactIn, EventIn, ObjectiveIn,
@@ -277,6 +280,22 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
 
     templates = Jinja2Templates(directory=str(Path(__file__).with_name('templates')))
 
+    def session_page(identity, notice=None, error=None, retry_key=None):
+        from .session_views import display_instruction, display_session
+        item = display_session(repository.get_registered_session(identity), repository)
+        history = [display_instruction(repository.get_instruction(row['id']))
+                   for row in repository.list_instructions(20, 0, identity)]
+        key = retry_key if retry_key and re.fullmatch(r'[A-Za-z0-9._~-]{16,128}', retry_key) else secrets.token_urlsafe(24)
+        errors = {
+            'target_unavailable': 'The session became stale or offline. Refresh its collector evidence before retrying.',
+            'target_uncontrollable': 'This exact registration is not currently controllable.',
+            'principal_rate_limited': 'Instruction creation is temporarily rate limited. Wait before retrying.',
+            'session_rate_limited': 'This session is temporarily rate limited. Wait before retrying.',
+            'idempotency_conflict': 'This send attempt no longer matches its original instruction. Start a new attempt.',
+            'invalid_instruction': 'Enter 1 to 2,000 supported text characters and confirm the exact session.',
+        }
+        return item, history, key, errors.get(error), notice == 'queued'
+
     @app.get('/sessions', response_class=HTMLResponse, dependencies=[Depends(operator)])
     def sessions_view(request: Request, limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0)):
         from .session_views import display_session
@@ -286,10 +305,47 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
             'sessions': items, 'limit': limit, 'offset': offset, 'has_next': len(rows) > limit})
 
     @app.get('/sessions/{identity}', response_class=HTMLResponse, dependencies=[Depends(operator)])
-    def session_view(request: Request, identity: str):
-        from .session_views import display_session
-        item = display_session(repository.get_registered_session(identity), repository)
-        return templates.TemplateResponse(request=request, name='session.html', context={'session': item})
+    def session_view(request: Request, identity: str, notice: str | None = None,
+                     error: str | None = None, retry: str | None = None):
+        item, history, key, error_message, sent = session_page(identity, notice, error, retry)
+        return templates.TemplateResponse(request=request, name='session.html', context={
+            'session': item, 'instructions': history, 'idempotency_key': key,
+            'error_message': error_message, 'sent': sent})
+
+    @app.get('/ui/sessions/{identity}/instructions', response_class=HTMLResponse)
+    def instruction_timeline(request: Request, identity: str, who=Depends(operator)):
+        from .session_views import display_instruction
+        repository.get_registered_session(identity)
+        history = [display_instruction(repository.get_instruction(row['id']))
+                   for row in repository.list_instructions(20, 0, identity)]
+        return templates.TemplateResponse(request=request, name='instruction_timeline.html', context={
+            'session_id': identity, 'instructions': history})
+
+    @app.post('/ui/sessions/{identity}/instructions')
+    def send_session_instruction(request: Request, identity: str, text: str = Form(''), expiry_minutes: str = Form('15'),
+                                 idempotency_key: str = Form(''), confirmed: str = Form(''),
+                                 who=Depends(operator)):
+        def redirect(url):
+            if request.headers.get('HX-Request') == 'true':
+                return HTMLResponse('', headers={'HX-Redirect': url})
+            return RedirectResponse(url, status_code=303)
+
+        key = idempotency_key if re.fullmatch(r'[A-Za-z0-9._~-]{16,128}', idempotency_key) else secrets.token_urlsafe(24)
+        try:
+            if confirmed != 'yes':
+                raise ValueError('confirmation required')
+            body = InstructionIn(idempotency_key=key, registered_session_id=identity,
+                                 text=text, expiry_minutes=expiry_minutes)
+            repository.create_instruction(body.model_dump(mode='json'), who.name)
+        except (ValidationError, ValueError):
+            return redirect(f'/sessions/{identity}?error=invalid_instruction&retry={key}')
+        except Problem as exc:
+            safe = exc.code if exc.code in {'target_unavailable', 'target_uncontrollable',
+                                             'principal_rate_limited', 'session_rate_limited',
+                                             'idempotency_conflict'} else 'invalid_instruction'
+            retry = '' if safe == 'idempotency_conflict' else f'&retry={key}'
+            return redirect(f'/sessions/{identity}?error={safe}{retry}')
+        return redirect(f'/sessions/{identity}?notice=queued')
 
     @app.get('/reports/{kind}', response_class=HTMLResponse, dependencies=[Depends(operator)])
     def report_view(request: Request, kind: Literal['accomplishments', 'standup', 'todo']):
@@ -311,6 +367,10 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     @app.get('/assets/task-form.js')
     def task_form_script():
         return FileResponse(Path(__file__).with_name('static')/'task-form.js', media_type='application/javascript')
+
+    @app.get('/assets/session-form.js')
+    def session_form_script():
+        return FileResponse(Path(__file__).with_name('static')/'session-form.js', media_type='application/javascript')
 
     @app.get('/assets/htmx.min.js')
     def htmx():

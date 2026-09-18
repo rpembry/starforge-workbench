@@ -10,4 +10,4 @@
 {% else %}<article><p>No sessions are registered yet. This does not mean no agents are running.</p></article>{% endfor %}
 </main>
 <nav class="pager" aria-label="Session pages">{% if offset > 0 %}<a href="/sessions?limit={{ limit }}&amp;offset={{ [0, offset - limit]|max }}">Previous</a>{% endif %}{% if has_next %}<a href="/sessions?limit={{ limit }}&amp;offset={{ offset + limit }}">Next</a>{% endif %}</nav>
-<footer>Read only. Instruction delivery is not available in this view.</footer></body></html>
+<footer>Select a fresh, controllable OpenCode session to queue an instruction. Delivery remains separately controlled by the host worker.</footer></body></html>

@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from workbench.auth import Auth
 from workbench.main import create_app
 from workbench.repository import Problem, SQLiteRepository
+from workbench.session_views import display_instruction
 
 
 OPERATOR = 'o' * 40
@@ -75,7 +76,9 @@ def test_sessions_page_escapes_labels_and_omits_summary(api, repo):
         assert 'Present' in page
         assert 'Registered process observed' in page
         assert 'working' not in page.lower()
-    assert 'Sending instructions is not available yet' in detail.text
+    assert 'Queue instruction' in detail.text
+    assert '15 minutes (default)' in detail.text
+    assert 'Pause, Continue, and Stop are not provided' in detail.text
 
 
 def test_sessions_view_distinguishes_stale_offline_unknown_and_work(api, repo, monkeypatch):
@@ -125,6 +128,102 @@ def test_sessions_view_distinguishes_stale_offline_unknown_and_work(api, repo, m
             assert response.status_code == 200
             if path != '/sessions':
                 assert 'Not associated' in response.text
+
+
+def test_mobile_send_is_idempotent_origin_checked_and_text_safe(api):
+    add_session(api)
+    detail = api.get('/sessions/' + registration()['id'])
+    assert detail.status_code == 200
+    key = detail.text.split('name="idempotency_key" value="', 1)[1].split('"', 1)[0]
+    form = {'idempotency_key': key, 'text': 'Review <script>DO_NOT_EXECUTE</script> $HOME; then say “ready”.\nDo not merge.',
+            'expiry_minutes': '15', 'confirmed': 'yes'}
+    path = '/ui/sessions/registered_session_0001/instructions'
+    assert api.post(path, data=form, follow_redirects=False).status_code == 403
+    assert api.post(path, data=form, headers={'Origin': 'https://evil.example'},
+                    follow_redirects=False).status_code == 403
+    first = api.post(path, data=form, headers={'Origin': 'http://testserver'}, follow_redirects=False)
+    again = api.post(path, data=form, headers={'Origin': 'http://testserver'}, follow_redirects=False)
+    assert first.status_code == again.status_code == 303
+    assert first.headers['location'] == again.headers['location'] == '/sessions/registered_session_0001?notice=queued'
+    listed = api.get('/api/instructions?registered_session_id=registered_session_0001').json()['items']
+    assert len(listed) == 1 and listed[0]['idempotency_key'] == key
+    page = api.get(first.headers['location']).text
+    assert 'Instruction queued' in page
+    assert '&lt;script&gt;DO_NOT_EXECUTE&lt;/script&gt;' in page
+    assert '<script>DO_NOT_EXECUTE</script>' not in page
+    assert 'Provider receipt and requested-work completion have not been established' in page
+
+    changed = 'CHANGED_TEXT_MUST_NOT_BE_ECHOED'
+    conflict = api.post(path, data={**form, 'text': changed}, headers={'Origin': 'http://testserver'},
+                        follow_redirects=False)
+    assert conflict.status_code == 303
+    assert conflict.headers['location'].endswith('error=idempotency_conflict')
+    assert changed not in conflict.text and changed not in conflict.headers['location']
+
+
+def test_mobile_send_requires_operator_confirmation_and_controllable_target(api, repo):
+    add_session(api, evidence_state='unknown', reason='no_evidence')
+    detail = api.get('/sessions/registered_session_0001').text
+    assert '<form' not in detail
+    assert 'not currently a controllable OpenCode target' in detail
+    path = '/ui/sessions/registered_session_0001/instructions'
+    body = {'idempotency_key': 'synthetic-ui-key-0001', 'text': 'DO_NOT_ECHO_REJECTED_TEXT',
+            'expiry_minutes': '15', 'confirmed': 'yes'}
+    rejected = api.post(path, data=body, headers={'Origin': 'http://testserver'}, follow_redirects=False)
+    assert rejected.status_code == 303
+    assert 'target_uncontrollable' in rejected.headers['location']
+    assert body['text'] not in rejected.text and body['text'] not in rejected.headers['location']
+    with repo.connection() as db:
+        db.execute('UPDATE registered_sessions SET evidence_state=?,reason=?,heartbeat_at=?',
+                   ('present', 'process_observed', datetime.now(timezone.utc).isoformat()))
+        db.commit()
+    unconfirmed = api.post(path, data={**body, 'confirmed': ''}, headers={'Origin': 'http://testserver'},
+                           follow_redirects=False)
+    assert unconfirmed.status_code == 303
+    assert 'invalid_instruction' in unconfirmed.headers['location']
+    api.headers['Authorization'] = 'Bearer ' + COLLECTOR
+    assert api.post(path, data=body, headers={'Origin': 'http://testserver'}).status_code == 403
+    api.headers.clear()
+    assert api.post(path, data=body, headers={'Origin': 'http://testserver'}).status_code == 401
+
+
+@pytest.mark.parametrize('state,label', [
+    ('queued', 'Queued'), ('claimed', 'Claimed'), ('received', 'Received by provider'),
+    ('responded', 'Response observed'), ('failed', 'Delivery failed'),
+    ('expired', 'Expired'), ('uncertain', 'Delivery uncertain'),
+])
+def test_delivery_timeline_has_unambiguous_state_language(state, label):
+    stamp = datetime.now(timezone.utc).isoformat()
+    item = display_instruction({'state': state, 'created_at': stamp, 'expires_at': stamp, 'history': [{
+        'state': state, 'reason_code': 'provider_accepted', 'occurred_at': stamp, 'actor': 'synthetic'}]})
+    assert item['state_label'] == label
+    if state in {'received', 'responded'}:
+        assert 'not evidence' in item['state_explanation'].lower()
+
+
+def test_detail_renders_every_delivery_state_without_completion_claim(api, repo):
+    add_session(api)
+    states = ('queued', 'claimed', 'received', 'responded', 'failed', 'expired', 'uncertain')
+    for index, state in enumerate(states):
+        created = api.post('/api/instructions', json={
+            'idempotency_key': f'timeline-key-{index:04d}',
+            'registered_session_id': 'registered_session_0001',
+            'text': f'Synthetic timeline item {index}', 'expiry_minutes': 60})
+        assert created.status_code == 201
+        with repo.connection() as db:
+            db.execute('UPDATE instructions SET state=?,created_at=? WHERE id=?',
+                       (state, (datetime.now(timezone.utc) - timedelta(minutes=2 + index)).isoformat(),
+                        created.json()['id']))
+            db.commit()
+    page = api.get('/sessions/registered_session_0001').text
+    for label in ('Queued', 'Claimed', 'Received by provider', 'Response observed',
+                  'Delivery failed', 'Expired', 'Delivery uncertain'):
+        assert label in page
+    assert 'This is not evidence that the requested work completed' in page
+    assert 'This is not evidence that the requested work succeeded or completed' in page
+    timeline = api.get('/ui/sessions/registered_session_0001/instructions')
+    assert timeline.status_code == 200
+    assert 'Synthetic timeline item 0' in timeline.text
 
 
 def test_sessions_android_viewport_browser(tmp_path):

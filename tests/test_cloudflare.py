@@ -43,6 +43,31 @@ def test_signed_browser_and_machine_roles(access):
     assert api.get('/api/dashboard').status_code == 200
 
 
+def test_signed_browser_can_queue_but_collector_cannot_use_send_ui(access):
+    api, key = access
+    api.headers['Cf-Access-Jwt-Assertion'] = signed(key, common_name='collector.access')
+    assert api.post('/api/collectors/heartbeat', json={
+        'source': 'synthetic-collector', 'instance_id': 'synthetic-instance', 'scope': 'synthetic host',
+        'status': 'ok', 'reason': 'scan_complete'}).status_code == 200
+    session_id = 'cloudflare_session_0001'
+    assert api.post('/api/registered-sessions', json={
+        'id': session_id, 'collector_source': 'synthetic-collector', 'host': 'Synthetic host',
+        'display_name': 'Synthetic OpenCode', 'provider': 'opencode', 'evidence_state': 'present',
+        'reason': 'process_observed', 'observation_sequence': 1,
+        'observed_at': '2026-09-18T00:00:00+00:00'}).status_code == 201
+    path = f'/ui/sessions/{session_id}/instructions'
+    payload = {'idempotency_key': 'cloudflare-ui-key-0001', 'text': 'Synthetic browser instruction',
+               'expiry_minutes': '15', 'confirmed': 'yes'}
+    assert api.post(path, data=payload, headers={'Origin': 'http://testserver'}).status_code == 403
+    api.headers['Cf-Access-Jwt-Assertion'] = signed(key)
+    assert api.get('/sessions/' + session_id).status_code == 200
+    sent = api.post(path, data=payload, headers={
+        'Origin': 'http://testserver', 'HX-Request': 'true'})
+    assert sent.status_code == 200
+    assert sent.headers['HX-Redirect'] == f'/sessions/{session_id}?notice=queued'
+    assert len(api.get('/api/instructions?registered_session_id=' + session_id).json()['items']) == 1
+
+
 @pytest.mark.parametrize('claims', [{'aud': ['wrong']}, {'iss': 'https://evil.cloudflareaccess.com'}, {'exp': 1}, {'iat': int(time.time())+3600}])
 def test_jwt_claim_checks(access, claims):
     api, key = access
