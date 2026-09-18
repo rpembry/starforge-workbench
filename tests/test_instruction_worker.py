@@ -31,6 +31,7 @@ def test_rollout_units_keep_one_context_and_loopback_boundary():
     config = json.loads((deploy / 'instruction-worker.example.json').read_text())
 
     assert '--context opencode --interval 30' in publisher
+    assert '--source starforge:opencode-instruction' in publisher
     assert '--credentials-file %h/.config/starforge-ai-workbench/instruction-collector.json' in publisher
     assert '--registration-state %h/.local/state/starforge-ai-workbench/instruction-registrations.json' in publisher
     assert '--credentials-file %h/.config/starforge-ai-workbench/instruction-collector.json' in worker

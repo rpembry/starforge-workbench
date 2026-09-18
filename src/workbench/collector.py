@@ -294,6 +294,7 @@ def main():
     p.add_argument('--context', action='append', default=[])
     p.add_argument('--url', default=os.environ.get('WB_API_URL'))
     p.add_argument('--credentials-file', default=os.environ.get('WB_CREDENTIALS_FILE'))
+    p.add_argument('--source', help='stable collector source; use a distinct value for each credential owner')
     p.add_argument('--registration-state', type=Path, default=os.environ.get('WB_REGISTERED_SESSION_STATE'),
                    help='protected local opaque-ID state; omitted disables registered-session publishing')
     p.add_argument('--launcher-state', type=Path,
@@ -304,6 +305,8 @@ def main():
     args = p.parse_args()
     if args.interval and args.interval < 10:
         p.error('Minimum interval is 10 seconds')
+    if args.source is not None and not args.source.strip():
+        p.error('Collector source must not be empty')
     instance_id = str(uuid.uuid4())
     while True:
         if args.dry_run:
@@ -312,6 +315,7 @@ def main():
         try:
             with client(args.url, args.credentials_file, 'collector') as api:
                 result = cycle(api, args.manifest, args.context, instance_id,
+                               source=args.source,
                                registration_state=args.registration_state,
                                launcher_state=args.launcher_state)
                 print(json.dumps({'status': result['status'], 'reason': result['reason'], 'observed_runs': result['observed_runs']}), flush=True)
