@@ -42,6 +42,7 @@
 !/deploy/*.service
 !/deploy/runtime-downloads.json
 !/deploy/service.env.example
+!/deploy/instruction-worker.example.json
 
 # Sensitive and generated exclusions remain last.
 .env

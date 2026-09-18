@@ -1,6 +1,7 @@
 """Synthetic worker checks: no live server, provider, or conversation input."""
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -12,6 +13,12 @@ from workbench.repository import SQLiteRepository
 
 
 REGISTERED = 'registered_synthetic_0001'
+
+
+def test_worker_unit_preserves_host_tmux_socket_view():
+    unit = (Path(__file__).resolve().parents[1] / 'deploy/workbench-instruction-worker.service').read_text()
+    assert 'PrivateTmp=false' in unit
+    assert 'PrivateTmp=true' not in unit
 INSTRUCTION = 'instruction_synthetic_001'
 SESSION = 'ses_synthetic_session_001'
 
@@ -164,6 +171,13 @@ def test_worker_claim_and_receipt_against_synthetic_server(tmp_path):
             'reason': 'process_observed', 'summary': '', 'observation_sequence': 1,
             'observed_at': datetime.now(timezone.utc).isoformat()})
         assert registration.status_code == 201, registration.text
+        other = api.post('/api/registered-sessions', json={
+            'id': 'registered_synthetic_0002', 'collector_source': 'synthetic-collector',
+            'host': 'synthetic-host', 'display_name': 'Other Synthetic OpenCode',
+            'provider': 'opencode', 'evidence_state': 'present',
+            'reason': 'process_observed', 'summary': '', 'observation_sequence': 1,
+            'observed_at': datetime.now(timezone.utc).isoformat()})
+        assert other.status_code == 201, other.text
         api.headers['Authorization'] = 'Bearer ' + operator
         created = api.post('/api/instructions', json={
             'idempotency_key': 'synthetic-key-0001',
@@ -176,6 +190,8 @@ def test_worker_claim_and_receipt_against_synthetic_server(tmp_path):
         assert result['claimed'] == result['reported'] == 1
         assert adapter.calls == [(created.json()['id'], SESSION, 'SYNTHETIC INSTRUCTION')]
         api.headers['Authorization'] = 'Bearer ' + operator
+        untouched = api.get('/api/instructions?registered_session_id=registered_synthetic_0002')
+        assert untouched.status_code == 200 and untouched.json()['items'] == []
         stored = api.get('/api/instructions/' + created.json()['id'])
         assert stored.status_code == 200
         assert stored.json()['state'] == 'received'

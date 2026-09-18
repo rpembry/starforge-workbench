@@ -127,6 +127,8 @@ excludes arbitrary shell commands, public provider endpoints, raw transcript
 centralization, and tmux keystroke injection from its MVP.
 Server operators must explicitly set `WB_INSTRUCTION_CLAIMS_ENABLED=1` to permit
 claims and renewals; disabling it preserves queued and in-flight records.
+Review the [mobile-control operations runbook](docs/mobile-control-operations.md)
+before changing either the server or host-local kill switch.
 
 The optional [Google Keep collector](docs/google-keep-collector.md) reads one configured checklist through an existing browser connection.
 

@@ -61,6 +61,21 @@ def test_exact_session_and_typed_text_only(tmp_path):
     assert len([call for call in fake.calls if call[0] == 'POST']) == 1
 
 
+@pytest.mark.parametrize('text', [
+    'first line\nsecond line',
+    'Unicode: cafe\u0301, \u4f60\u597d, \U0001f680',
+    'shell-looking data: $(touch /tmp/never) `id` ; | && $HOME',
+    'tabs\tare\tplain text',
+])
+def test_newlines_unicode_and_shell_metacharacters_remain_typed_text(tmp_path, text):
+    fake = FakeOpenCode()
+    result = adapter(tmp_path, fake).deliver(INSTRUCTION, SESSION, text)
+    post = [call for call in fake.calls if call[0] == 'POST']
+    assert result.state == 'received'
+    assert len(post) == 1
+    assert post[0][2]['parts'] == [{'type': 'text', 'text': text}]
+
+
 def test_timeout_and_restart_do_not_resubmit_even_after_404(tmp_path):
     fake = FakeOpenCode(post_result=TimeoutError('synthetic timeout'))
     first = adapter(tmp_path, fake).deliver(INSTRUCTION, SESSION, 'synthetic text')
@@ -136,18 +151,17 @@ def test_refuses_nonloopback_or_credentialed_origin(tmp_path, origin):
         OpenCodeDelivery(origin, root, 'openai', 'synthetic-model', transport=FakeOpenCode())
 
 
-def test_rejects_unsafe_local_state_and_control_characters(tmp_path):
+@pytest.mark.parametrize('character', ['\x00', '\x01', '\x0b', '\x1f', '\x7f', '\x80', '\x85', '\x9f'])
+def test_rejects_unsafe_local_state_and_control_characters(tmp_path, character):
     root = tmp_path / 'public-state'
     root.mkdir(mode=0o755)
     with pytest.raises(DeliveryError):
         OpenCodeDelivery('http://127.0.0.1:4098', root, 'openai', 'synthetic-model')
     delivery = adapter(tmp_path, FakeOpenCode())
     with pytest.raises(DeliveryError):
-        delivery.deliver(INSTRUCTION, SESSION, 'bad\x00text')
-    with pytest.raises(DeliveryError):
-        delivery.deliver(INSTRUCTION, SESSION, 'bad\x7ftext')
-    with pytest.raises(DeliveryError):
-        delivery.deliver(INSTRUCTION, SESSION, 'bad\x85text')
+        delivery.deliver(INSTRUCTION, SESSION, 'bad' + character + 'text')
     with pytest.raises(DeliveryError):
         delivery.deliver(INSTRUCTION, SESSION, '   ')
+    with pytest.raises(DeliveryError):
+        delivery.deliver(INSTRUCTION, SESSION, 'x' * 2001)
     assert not list(Path(delivery.root).glob('*.json'))

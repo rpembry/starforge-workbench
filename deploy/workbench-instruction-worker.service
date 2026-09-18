@@ -2,6 +2,8 @@
 Description=AI Workbench local OpenCode instruction worker (opt-in)
 StartLimitIntervalSec=0
 ConditionPathExists=%h/.config/starforge-ai-workbench/instruction-worker.json
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -11,8 +13,24 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 Restart=always
 RestartSec=10
+TimeoutStopSec=20
 UMask=0077
 NoNewPrivileges=true
+# Exact-session registration checks need the existing host tmux socket in /tmp.
+PrivateTmp=false
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/starforge-ai-workbench/instruction-delivery
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+CapabilityBoundingSet=
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=default.target

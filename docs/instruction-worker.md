@@ -67,12 +67,17 @@ private paths; only aggregate counters or a generic unavailable marker.
 
 The local unit recipe is
 [`deploy/workbench-instruction-worker.service`](../deploy/workbench-instruction-worker.service).
+Its matching disabled configuration shape is
+[`deploy/instruction-worker.example.json`](../deploy/instruction-worker.example.json).
 It is not installed or enabled by source checkout. The private configuration,
 collector credentials, local runtime path, and server setting must be reviewed
 on the actual host before any service action. After a worker crash, preserve
 delivery receipts and reconcile server state before touching the queue; never
 delete receipts merely to force a retry. Recovery is inspection and explicit
 operator action, not tmux injection.
+
+Follow the [operations runbook](mobile-control-operations.md) for activation,
+kill-switch, restart, stuck-claim, uncertain-delivery, and rollback procedures.
 
 ## Validation boundary
 
