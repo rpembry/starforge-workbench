@@ -80,11 +80,13 @@ Ordinary tests use synthetic registration state, a synthetic #64 server queue,
 and a fake provider. They prove claim, exact-session routing, one-attempt
 decisions, and result reporting but cannot prove a live collector registration
 or live server/worker deployment. On installed OpenCode 1.18.31, a separate
-loopback-only, disposable `opencode serve` session admitted one adapter
+loopback-only, disposable `opencode serve` session admitted an adapter
 `prompt_async` request with HTTP 204; lookup of the exact synthetic
-`messageID` returned its user record. That verifies provider admission, not
-normal completion: the selected synthetic model was not in OpenCode's model
-list and the provider run errored. No existing session was used. Before
+`messageID` returned its user record. With OpenCode's recognized
+`openai/gpt-6-astra` model routed to a local mock provider, a second new
+disposable session also produced a correlated assistant record marked
+completed without error. This proves a synthetic normal response, not that
+the requested work was done. No existing session was used. Before
 enabling this worker, repeat an end-to-end disposable smoke with the exact
 host-local model and registration to verify admission and result reporting.
 A real-provider normal finish and durable output replay are still unverified,
