@@ -91,18 +91,20 @@ retargeted to a replacement process generation.
 | --- | --- |
 | `queued` | Created by an authenticated operator after target validation. |
 | `claimed` | The owning worker leases a queued instruction until a bounded UTC time. |
-| `received` | The worker has evidence that the provider accepted this logical instruction. This is not evidence of response or task completion. |
-| `responded` | Optional later evidence links subsequent provider output to this instruction. It is not evidence that requested work succeeded. |
+| `received` | The worker has evidence that the provider accepted this logical instruction. This is not evidence of response or task completion. A later correlated output may advance this state to `responded`; provider delivery itself is not retried after `received`. |
+| `responded` | Optional later evidence links subsequent provider output to this instruction after `received`. It is not evidence that requested work succeeded. |
 | `failed` | A definite pre-acceptance failure makes automatic delivery retry unsafe or impossible under policy. |
 | `expired` | Server time passed expiry before provider acceptance. |
 | `uncertain` | Delivery may have crossed the provider boundary, but acceptance cannot be proved after an ambiguous failure. No automatic retry occurs. |
 
-`received`, `responded`, `failed`, `expired`, and `uncertain` are terminal for
-delivery. A worker may renew its own unexpired claim. After a lease expires, the
-same owning worker or its replacement may reclaim only when the provider
-contract proves the prior attempt did not reach the provider, or when provider
-idempotency makes replay safe. Otherwise the server moves the command to
-`uncertain`.
+`responded`, `failed`, `expired`, and `uncertain` are terminal states. `received`
+is terminal for provider delivery, but it may advance once to `responded` when
+the provider contract supplies a later-output correlation; that transition does
+not imply requested work succeeded. A worker may renew its own unexpired claim.
+After a lease expires, the same owning worker or its replacement may reclaim
+only when the provider contract proves the prior attempt did not reach the
+provider, or when provider idempotency makes replay safe. Otherwise the server
+moves the command to `uncertain`.
 
 The #61 spike must determine whether OpenCode accepts a stable client message ID
 and deduplicates it across reconnects. Until that is proven, the contract offers
