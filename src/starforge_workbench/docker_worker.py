@@ -123,6 +123,45 @@ def inspect_container(docker, receipt):
     return item
 
 
+# No host environment is forwarded into the container. Image defaults are input,
+# too: accept only these non-secret, bounded runtime/toolchain settings.
+RUNTIME_ENV = {
+    'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    'HOME': '/tmp',
+    'LANG': 'C.UTF-8',
+}
+IMAGE_ENV_PATTERNS = {
+    'PATH': r'(?:/usr/local/bin:)?/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    'HOME': r'/(?:tmp|root)',
+    'LANG': r'(?:C|C\.UTF-8|en_US\.UTF-8)',
+    'PYTHON_VERSION': r'[0-9]{1,2}\.[0-9]{1,2}\.[0-9]{1,3}(?:(?:a|b|rc)[0-9]{1,2})?',
+    'PYTHON_SHA256': r'[a-fA-F0-9]{64}',
+    'GPG_KEY': r'[a-fA-F0-9]{40}',
+}
+
+
+def environment_digest(entries, *, image=False):
+    """Validate without echoing/storing values; fingerprint the effective env."""
+    if entries is None and image:
+        entries = []
+    if not isinstance(entries, list) or len(entries) > len(IMAGE_ENV_PATTERNS):
+        raise WorkerError('Environment policy refused; use an image with approved runtime defaults only')
+    values = {}
+    for entry in entries:
+        if not isinstance(entry, str) or len(entry) > 256 or '=' not in entry:
+            raise WorkerError('Malformed environment entry; use NAME=value runtime defaults')
+        key, value = entry.split('=', 1)
+        pattern = IMAGE_ENV_PATTERNS.get(key)
+        if key in values or pattern is None or re.fullmatch(pattern, value) is None:
+            raise WorkerError('Environment policy refused; remove unapproved or duplicate image defaults')
+        values[key] = value
+    if image:
+        values.update(RUNTIME_ENV)
+    elif any(values.get(key) != value for key, value in RUNTIME_ENV.items()):
+        raise WorkerError('Container environment does not match fixed runtime defaults')
+    return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
+
+
 def create_argv(docker, receipt, profile):
     attempt = Path(receipt['attempt_path'])
     args = docker + ['create', '--pull', 'never', '--name', receipt['container_name'],
@@ -132,7 +171,8 @@ def create_argv(docker, receipt, profile):
         '--cpus', str(profile.cpus), '--memory', str(profile.memory_mb)+'m',
         '--memory-swap', str(profile.memory_mb)+'m', '--pids-limit', str(profile.pids_limit),
         '--init', '--no-healthcheck', '--stop-timeout', '5', '--workdir', '/workspace',
-        '--env', 'HOME=/tmp', '--tmpfs', '/tmp:rw,nosuid,nodev,noexec,size=64m',
+        '--env', 'HOME='+RUNTIME_ENV['HOME'], '--env', 'PATH='+RUNTIME_ENV['PATH'],
+        '--env', 'LANG='+RUNTIME_ENV['LANG'], '--tmpfs', '/tmp:rw,nosuid,nodev,noexec,size=64m',
         '--log-driver', 'local', '--log-opt', 'max-size=1m', '--log-opt', 'max-file=1', '--log-opt', 'compress=false',
         '--volume', str(attempt/'worktree')+':/workspace:Z',
         '--volume', str(attempt/'git-mask')+':/workspace/.git:ro,Z']
@@ -143,6 +183,8 @@ def create_argv(docker, receipt, profile):
 
 def verify_container(item, receipt, profile):
     host, config = item['HostConfig'], item['Config']
+    if environment_digest(config.get('Env')) != receipt.get('environment_sha256'):
+        raise WorkerError('Container environment differs from the approved image policy')
     expected = {'/workspace': (receipt['worktree'], True),
                 '/workspace/.git': (str(Path(receipt['attempt_path'])/'git-mask'), False)}
     if any(m.source == 'scratch' for m in profile.mounts):
@@ -342,6 +384,7 @@ def run_worker(raw, repository, revision, state_root, task, argv, artifact_paths
     image = json.loads(command(docker + ['image', 'inspect', profile.image]))[0]
     if image['Config'].get('Volumes'):
         raise WorkerError('Image-declared anonymous volumes are unsupported')
+    env_digest = environment_digest(image['Config'].get('Env'), image=True)
     identity = attempt_id or uuid.uuid4().hex
     if not re.fullmatch('[0-9a-f]{32}', identity): raise WorkerError('Invalid attempt ID')
     path = root/identity
@@ -350,7 +393,7 @@ def run_worker(raw, repository, revision, state_root, task, argv, artifact_paths
     receipt = {'attempt_id': identity, 'attempt_path': str(path), 'task': task,
         'repository': str(repo), 'revision': commit, 'worktree': str(path/'worktree'),
         'container_name': 'swb-'+identity, 'token': uuid.uuid4().hex, 'container_id': None,
-        'image_id': image['Id'], 'profile': profile.metadata(), 'argv': list(argv),
+        'image_id': image['Id'], 'environment_sha256': env_digest, 'profile': profile.metadata(), 'argv': list(argv),
         'artifact_paths': list(artifact_paths), 'cleanup': 'pending'}
     with attempt_lock(path):
         write_receipt(path, receipt, 'planned')

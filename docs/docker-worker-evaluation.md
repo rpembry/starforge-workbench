@@ -104,3 +104,14 @@ gate. The recommendation remains iterate, with a specific bounded next change.
 Review correction: older cleanup/disk pass labels lacked complete measurements.
 Use the [corrected gate evidence](docker-worker-matched-evaluation.md#review-correction-and-replacement-evidence);
 original observations remain preserved.
+
+## Owner direction after the workload comparison
+
+On 2026-09-18, the owner explicitly requested merging #80 and continuing Docker
+subsystem development. [The recorded decision](https://github.com/rpembry/starforge-workbench/issues/54#issuecomment-5728395369)
+authorizes incremental #51 development despite the limited Python comparison's
+recommendation to defer expansion for that workload. It does not change the
+measurements or establish a runtime/setup benefit that was not demonstrated.
+#80 is merged. The first increment enforces image/container environment policy;
+credentials remain disabled. Native remains the default, and lifecycle integration
+under #53 remains separate work after #51.

@@ -204,3 +204,84 @@ def test_live_symlink_artifact_retained(repo, state):
     result = w.recover(result['attempt_path'], sudo=os.environ.get('WB_TEST_DOCKER_SUDO') == '1')
     assert result['artifacts'] == 'complete', result
     w.git(repo, 'worktree', 'remove', '--force', result['worktree'])
+
+
+@pytest.mark.parametrize('entries', [
+    ['TOKEN=synthetic-private-value'], ['LD_PRELOAD=/tmp/inject.so'],
+    ['PATH=/scratch/bin:/usr/bin'], ['HOME=/home/private'],
+    ['LANG=C', 'LANG=C'], ['PYTHON_VERSION=synthetic-private-value'],
+    ['GPG_KEY=synthetic-private-value'], ['LANG=C\n'], ['broken'], [None],
+    {'TOKEN': 'synthetic-private-value'}, ['LANG='+'x'*257],
+])
+def test_image_environment_refused_before_allocation(entries, repo, state, monkeypatch):
+    original = w.command
+    calls = []
+    def fake(argv, **kwargs):
+        calls.append(argv)
+        if 'docker' not in argv:
+            return original(argv, **kwargs)
+        if 'info' in argv:
+            return json.dumps({'NCPU': 2, 'MemTotal': 1024**3}).encode()
+        if 'image' in argv:
+            return json.dumps([{'Id': 'synthetic', 'Config': {'Env': entries}}]).encode()
+        pytest.fail('Unexpected Docker mutation')
+    monkeypatch.setattr(w, 'command', fake)
+    with pytest.raises(w.WorkerError) as error:
+        w.run_worker(profile(), repo, 'HEAD', state, 'synthetic', ['true'])
+    assert 'synthetic-private-value' not in str(error.value)
+    assert not list(state.iterdir())
+    assert not any('create' in call or 'start' in call for call in calls)
+
+
+def test_environment_fingerprint_and_fixed_overrides():
+    runtime = [key+'='+value for key, value in w.RUNTIME_ENV.items()]
+    assert w.environment_digest(None, image=True) == w.environment_digest(runtime)
+    assert w.environment_digest(['HOME=/root', 'LANG=C'], image=True) == w.environment_digest(runtime)
+    assert w.environment_digest(['PATH=/usr/local/bin:'+w.RUNTIME_ENV['PATH']], image=True) == w.environment_digest(runtime)
+    toolchain = ['PYTHON_VERSION=3.14.7', 'PYTHON_SHA256='+'a'*64, 'GPG_KEY='+'B'*40]
+    digest = w.environment_digest(toolchain, image=True)
+    assert digest == w.environment_digest(list(reversed(runtime+toolchain)))
+    assert digest != w.environment_digest(runtime+['PYTHON_VERSION=3.11.16'])
+    for entries in (None, [], ['HOME=/root'], runtime+['TOKEN=synthetic-private-value']):
+        with pytest.raises(w.WorkerError):
+            w.environment_digest(entries)
+
+
+@live
+def test_live_fixed_environment_and_no_host_credential_inheritance(repo, state, monkeypatch):
+    monkeypatch.setenv('SYNTHETIC_HOST_CREDENTIAL', 'synthetic-private-value')
+    result = run(repo, state, 'test -z "$SYNTHETIC_HOST_CREDENTIAL" && '
+                 'test "$HOME" = /tmp && test "$LANG" = C.UTF-8 && '
+                 'test "$PATH" = /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')
+    assert result['exit_code'] == 0 and result['cleanup'] == 'complete', result
+    assert 'synthetic-private-value' not in json.dumps(result)
+    for path in Path(result['attempt_path']).rglob('*'):
+        if path.is_file():
+            assert b'synthetic-private-value' not in path.read_bytes()
+
+
+@live
+@pytest.mark.parametrize('mutation', ['unapproved', 'missing', 'changed'])
+def test_live_environment_mismatch_never_starts(repo, state, monkeypatch, mutation):
+    inspect = w.inspect_container
+    original = w.command
+    calls = []
+    def altered(docker, receipt):
+        item = inspect(docker, receipt)
+        if item and receipt['phase'] == 'starting':
+            if mutation == 'unapproved':
+                item['Config']['Env'].append('TOKEN=synthetic-private-value')
+            elif mutation == 'missing':
+                item['Config']['Env'] = []
+            else:
+                item['Config']['Env'].append('PYTHON_VERSION=3.14.7')
+        return item
+    def capture(argv, **kwargs):
+        calls.append(argv)
+        return original(argv, **kwargs)
+    monkeypatch.setattr(w, 'inspect_container', altered)
+    monkeypatch.setattr(w, 'command', capture)
+    result = run(repo, state, 'echo SHOULD_NOT_RUN')
+    assert result['phase'] == 'start_failed' and result['cleanup'] == 'complete', result
+    assert not any('docker' in call and 'start' in call for call in calls)
+    assert 'synthetic-private-value' not in json.dumps(result)
