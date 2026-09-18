@@ -134,14 +134,16 @@ def test_auth_boundaries_validation_and_schema_upgrade(api, repo):
     assert api.post('/api/provider-attention/observations', json=body).status_code == 422
     assert unsupported.status_code == 422
     with repo.connection() as db:
-        assert [row[0] for row in db.execute('SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3, 4, 5, 6]
+        assert [row[0] for row in db.execute('SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3, 4, 5, 6, 7]
+        db.execute('DROP TABLE registered_sessions')
         db.execute('DROP TABLE report_suggestions')
         db.execute('DROP TABLE provider_attention_incidents')
         db.execute('DROP TABLE provider_attention')
-        db.execute('DELETE FROM schema_migrations WHERE version IN (4,5,6)')
+        db.execute('DELETE FROM schema_migrations WHERE version IN (4,5,6,7)')
         db.commit()
     upgraded = SQLiteRepository(repo.path)
     with upgraded.connection() as db:
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='provider_attention'").fetchone()
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='provider_attention_incidents'").fetchone()
-        assert [row[0] for row in db.execute('SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3, 4, 5, 6]
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE name='registered_sessions'").fetchone()
+        assert [row[0] for row in db.execute('SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3, 4, 5, 6, 7]
