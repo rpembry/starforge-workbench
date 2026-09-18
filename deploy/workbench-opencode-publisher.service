@@ -1,0 +1,22 @@
+[Unit]
+Description=AI Workbench dedicated OpenCode registration publisher
+StartLimitIntervalSec=0
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/starforge-ai-workbench/collector-current/.venv/bin/wb-collect --manifest %h/.config/starforge-ai-workbench/workbench.yaml --credentials-file %h/.config/starforge-ai-workbench/instruction-collector.json --registration-state %h/.local/state/starforge-ai-workbench/instruction-registrations.json --context opencode --interval 30
+UnsetEnvironment=WB_API_URL WB_CLIENT_CONFIG WB_CREDENTIALS_FILE WB_REGISTERED_SESSION_STATE
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+# Keep the host /proc and /tmp view for the existing exact tmux binding.
+PrivateTmp=false
+
+[Install]
+WantedBy=default.target

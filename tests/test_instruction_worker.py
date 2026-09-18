@@ -19,6 +19,27 @@ def test_worker_unit_preserves_host_tmux_socket_view():
     unit = (Path(__file__).resolve().parents[1] / 'deploy/workbench-instruction-worker.service').read_text()
     assert 'PrivateTmp=false' in unit
     assert 'PrivateTmp=true' not in unit
+    assert '--credentials-file %h/.config/starforge-ai-workbench/instruction-collector.json' in unit
+
+
+def test_rollout_units_keep_one_context_and_loopback_boundary():
+    deploy = Path(__file__).resolve().parents[1] / 'deploy'
+    publisher = (deploy / 'workbench-opencode-publisher.service').read_text()
+    api = (deploy / 'workbench-opencode-api.service').read_text()
+    ordinary = (deploy / 'workbench-collector-without-opencode.conf.example').read_text()
+    worker = (deploy / 'workbench-instruction-worker.service').read_text()
+    config = json.loads((deploy / 'instruction-worker.example.json').read_text())
+
+    assert '--context opencode --interval 30' in publisher
+    assert '--credentials-file %h/.config/starforge-ai-workbench/instruction-collector.json' in publisher
+    assert '--registration-state %h/.local/state/starforge-ai-workbench/instruction-registrations.json' in publisher
+    assert '--credentials-file %h/.config/starforge-ai-workbench/instruction-collector.json' in worker
+    assert 'instruction-registrations.json' in config['registration_state']
+    assert config['enabled'] is False
+    assert '--context opencode' not in ordinary
+    assert 'ExecStart=' in ordinary
+    assert 'serve --hostname 127.0.0.1 --port 4098 --pure' in api
+    assert '--hostname 0.0.0.0' not in api
 INSTRUCTION = 'instruction_synthetic_001'
 SESSION = 'ses_synthetic_session_001'
 

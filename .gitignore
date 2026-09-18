@@ -40,6 +40,7 @@
 !/deploy/*.py
 !/deploy/*.sh
 !/deploy/*.service
+!/deploy/workbench-collector-without-opencode.conf.example
 !/deploy/runtime-downloads.json
 !/deploy/service.env.example
 !/deploy/instruction-worker.example.json

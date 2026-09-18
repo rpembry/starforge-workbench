@@ -31,9 +31,13 @@ retry after provider contact, and remote selection of provider origin or model.
 
 ## Private configuration and credentials
 
-1. Use a dedicated collector-role machine credential for the worker. Do not use
-   an operator token or a browser identity. Keep its JSON file and the worker
-   configuration caller-owned and mode `0600` in a mode `0700` directory.
+1. Use a dedicated collector-role machine credential shared only by the
+   OpenCode registration publisher and its worker. The claim API requires the
+   same principal that owns the registration; the ordinary collector's token
+   cannot be substituted. Do not use an operator token or a browser identity.
+   Keep both private JSON files caller-owned and mode `0600` in a mode `0700`
+   directory. Follow the [one-context rollout](mobile-control-rollout.md) for
+   the registration cutover and persistent loopback API.
 2. Copy the shape in `deploy/instruction-worker.example.json` to
    `~/.config/starforge-ai-workbench/instruction-worker.json`, replace every
    `EXAMPLE` or `replace-...` value, and leave `enabled` set to `false`.
@@ -69,7 +73,7 @@ session, isolated provider state, synthetic text, and no production credential.
    ```sh
    python -m starforge_workbench.instruction_worker \
      --config "$HOME/.config/starforge-ai-workbench/instruction-worker.json" \
-     --credentials-file "$HOME/.config/starforge-ai-workbench/collector.json" \
+     --credentials-file "$HOME/.config/starforge-ai-workbench/instruction-collector.json" \
      --once
    ```
 

@@ -37,7 +37,11 @@ configuration to copy unchanged:
 ```
 
 The worker uses a separate protected collector client file with
-`--credentials-file`. It reloads the worker configuration every five seconds.
+`--credentials-file`. The OpenCode-only registration publisher uses the same
+collector principal so the worker can claim its registration; the ordinary
+multi-context collector keeps its existing identity. See the
+[one-context rollout](mobile-control-rollout.md) for the cutover. The worker
+reloads its configuration every five seconds.
 Setting `enabled` to false stops future claims without deleting server pending
 records or private attempt receipts. The server kill switch independently
 rejects new claims. Neither switch cancels an already transmitted instruction.
