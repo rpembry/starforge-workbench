@@ -1,6 +1,9 @@
 """SQLite repository boundary. Only the service opens the database."""
 import json
+import hashlib
+import hmac
 import os
+import secrets
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -37,6 +40,11 @@ TRANSITIONS = {
 SESSION_STALE_AFTER_SECONDS = 30
 SESSION_HOST_OFFLINE_AFTER_SECONDS = 90
 SESSION_MAX_FUTURE_SKEW_SECONDS = 300
+INSTRUCTION_LEASE_SECONDS = 30
+INSTRUCTION_PRINCIPAL_RATE_LIMIT = 10
+INSTRUCTION_SESSION_RATE_LIMIT = 5
+INSTRUCTION_RATE_WINDOW_SECONDS = 60
+CONTROLLABLE_SESSION_PROVIDERS = {'opencode'}
 
 
 class SQLiteRepository:
@@ -60,12 +68,14 @@ class SQLiteRepository:
                 db.execute('INSERT INTO schema_migrations VALUES (?, ?)', (1, now()))
                 db.commit()
             versions = [r[0] for r in db.execute('SELECT version FROM schema_migrations ORDER BY version')]
-            if versions not in ([1], [1, 2], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6, 7]):
+            supported = [list(range(1, version + 1)) for version in range(1, 9)]
+            if versions not in supported:
                 raise RuntimeError('Unsupported database schema version')
             for version, filename in [(2, '002_collectors.sql'), (3, '003_imports.sql'),
                                       (4, '004_provider_attention.sql'),
                                       (5, '005_provider_attention_incidents.sql'),
-                                      (6, '006_report_suggestions.sql'), (7, '007_registered_sessions.sql')]:
+                                       (6, '006_report_suggestions.sql'), (7, '007_registered_sessions.sql'),
+                                       (8, '008_instructions.sql')]:
                 if version not in versions:
                     migration = Path(__file__).with_name('migrations')/filename
                     db.executescript('BEGIN IMMEDIATE;\n'+migration.read_text())
@@ -267,6 +277,8 @@ class SQLiteRepository:
                     raise Problem(403, 'registered_session_owner', 'Registration belongs to another collector principal')
                 if old['collector_source'] != data['collector_source']:
                     raise Problem(409, 'registration_identity', 'Collector source cannot change')
+                if old['evidence_state'] == 'stopped' and data['evidence_state'] != 'stopped':
+                    raise Problem(409, 'stopped_registration', 'A stopped registration cannot become controllable again')
             collector = db.execute('SELECT recorded_by FROM collectors WHERE source=?',
                                    (data['collector_source'],)).fetchone()
             if not collector or collector['recorded_by'] != principal:
@@ -328,6 +340,216 @@ class SQLiteRepository:
     def get_registered_session(self, identity):
         with self.connection() as db:
             return self._session_visibility(self._registered_session_row(db, identity))
+
+    @staticmethod
+    def _instruction_public(row, include_text=True):
+        row = dict(row)
+        for key in ('operator_principal', 'lease_token_hash', 'claim_owner'):
+            row.pop(key, None)
+        if not include_text:
+            row.pop('instruction_text', None)
+        elif 'instruction_text' in row:
+            row['text'] = row.pop('instruction_text')
+        return row
+
+    @staticmethod
+    def _instruction_audit(db, instruction_id, actor, session_id, state, reason_code, stamp):
+        SQLiteRepository.insert(db, 'instruction_audit', dict(
+            id=str(uuid.uuid4()), instruction_id=instruction_id, actor=actor,
+            registered_session_id=session_id, state=state, reason_code=reason_code,
+            occurred_at=stamp))
+
+    @staticmethod
+    def _expire_instruction_leases(db, stamp):
+        queued = db.execute("SELECT id,registered_session_id FROM instructions WHERE state='queued' AND expires_at<=?",
+                            (stamp,)).fetchall()
+        for row in queued:
+            db.execute("UPDATE instructions SET state='expired',updated_at=?,terminal_at=?,reason_code='instruction_expired' WHERE id=?",
+                       (stamp, stamp, row['id']))
+            SQLiteRepository._instruction_audit(db, row['id'], 'workbench-server',
+                                                row['registered_session_id'], 'expired',
+                                                'instruction_expired', stamp)
+        abandoned = db.execute("SELECT id,registered_session_id FROM instructions WHERE state='claimed' AND lease_until<=?",
+                               (stamp,)).fetchall()
+        for row in abandoned:
+            db.execute("UPDATE instructions SET state='uncertain',updated_at=?,terminal_at=?,reason_code='lease_expired',lease_until=NULL WHERE id=?",
+                       (stamp, stamp, row['id']))
+            SQLiteRepository._instruction_audit(db, row['id'], 'workbench-server',
+                                                row['registered_session_id'], 'uncertain',
+                                                'lease_expired', stamp)
+
+    @staticmethod
+    def _controllable_session(db, identity, owner=None):
+        row = SQLiteRepository._registered_session_row(db, identity)
+        if owner is not None and row['owner'] != owner:
+            raise Problem(404, 'not_found', 'Registered session does not exist')
+        visible = SQLiteRepository._session_visibility(row)
+        if visible['visibility'] != 'fresh':
+            raise Problem(409, 'target_unavailable', 'Registered session is not fresh')
+        if row['evidence_state'] in {'unknown', 'stopped'} or row['provider'] not in CONTROLLABLE_SESSION_PROVIDERS:
+            raise Problem(409, 'target_uncontrollable', 'Registered session is not controllable')
+        return row
+
+    def create_instruction(self, data, principal):
+        from datetime import datetime, timedelta, timezone
+        data = dict(data)
+        text = data.pop('text')
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            existing = db.execute('SELECT * FROM instructions WHERE operator_principal=? AND idempotency_key=?',
+                                  (principal, data['idempotency_key'])).fetchone()
+            if existing:
+                matches = (existing['registered_session_id'] == data['registered_session_id']
+                           and existing['instruction_text'] == text
+                           and existing['expiry_minutes'] == data['expiry_minutes'])
+                if not matches:
+                    raise Problem(409, 'idempotency_conflict', 'Idempotency key already has different instruction metadata')
+                db.commit()
+                return self._instruction_public(existing)
+            self._controllable_session(db, data['registered_session_id'])
+            current = datetime.now(timezone.utc)
+            stamp = current.isoformat()
+            cutoff = (current - timedelta(seconds=INSTRUCTION_RATE_WINDOW_SECONDS)).isoformat()
+            principal_count = db.execute('SELECT count(*) FROM instructions WHERE operator_principal=? AND created_at>?',
+                                         (principal, cutoff)).fetchone()[0]
+            session_count = db.execute('SELECT count(*) FROM instructions WHERE registered_session_id=? AND created_at>?',
+                                       (data['registered_session_id'], cutoff)).fetchone()[0]
+            if principal_count >= INSTRUCTION_PRINCIPAL_RATE_LIMIT:
+                raise Problem(429, 'principal_rate_limited', 'Instruction creation rate exceeded')
+            if session_count >= INSTRUCTION_SESSION_RATE_LIMIT:
+                raise Problem(429, 'session_rate_limited', 'Instruction creation rate exceeded')
+            row = dict(id=str(uuid.uuid4()), operator_principal=principal,
+                       idempotency_key=data['idempotency_key'],
+                       registered_session_id=data['registered_session_id'], instruction_text=text,
+                       expiry_minutes=data['expiry_minutes'], state='queued',
+                       expires_at=(current + timedelta(minutes=data['expiry_minutes'])).isoformat(),
+                       created_at=stamp, updated_at=stamp, claimed_at=None, lease_until=None,
+                       lease_token_hash=None, claim_owner=None, attempt_count=0, received_at=None,
+                       responded_at=None, terminal_at=None, reason_code=None)
+            self.insert(db, 'instructions', row)
+            self._instruction_audit(db, row['id'], principal, row['registered_session_id'],
+                                    'queued', 'operator_created', stamp)
+            db.commit()
+            return self._instruction_public(row)
+
+    def list_instructions(self, limit=100, offset=0, session_id=None):
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            stamp = now()
+            self._expire_instruction_leases(db, stamp)
+            if session_id:
+                rows = db.execute('''SELECT * FROM instructions WHERE registered_session_id=?
+                    ORDER BY created_at DESC,id LIMIT ? OFFSET ?''', (session_id, limit, offset)).fetchall()
+            else:
+                rows = db.execute('SELECT * FROM instructions ORDER BY created_at DESC,id LIMIT ? OFFSET ?',
+                                  (limit, offset)).fetchall()
+            db.commit()
+            return [self._instruction_public(row) for row in rows]
+
+    def get_instruction(self, identity):
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._expire_instruction_leases(db, now())
+            row = db.execute('SELECT * FROM instructions WHERE id=?', (identity,)).fetchone()
+            if not row:
+                raise Problem(404, 'not_found', 'Instruction does not exist')
+            history = [dict(item) for item in db.execute('''SELECT id,actor,registered_session_id,state,reason_code,occurred_at
+                FROM instruction_audit WHERE instruction_id=? ORDER BY occurred_at,id''', (identity,))]
+            db.commit()
+            return dict(self._instruction_public(row), history=history)
+
+    def claim_instruction(self, session_id, principal, claims_enabled=False):
+        from datetime import datetime, timedelta, timezone
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not claims_enabled:
+                raise Problem(503, 'instruction_claims_disabled', 'Instruction claims are disabled')
+            self._controllable_session(db, session_id, principal)
+            current = datetime.now(timezone.utc)
+            stamp = current.isoformat()
+            self._expire_instruction_leases(db, stamp)
+            row = db.execute('''SELECT * FROM instructions
+                WHERE registered_session_id=? AND state='queued' AND expires_at>?
+                ORDER BY created_at,id LIMIT 1''', (session_id, stamp)).fetchone()
+            if not row:
+                raise Problem(404, 'no_instruction', 'No queued instruction is available')
+            token = secrets.token_urlsafe(32)
+            lease_until = min(current + timedelta(seconds=INSTRUCTION_LEASE_SECONDS),
+                              datetime.fromisoformat(row['expires_at'])).isoformat()
+            changed = db.execute('''UPDATE instructions SET state='claimed',claimed_at=?,lease_until=?,
+                lease_token_hash=?,claim_owner=?,attempt_count=attempt_count+1,updated_at=?,reason_code='worker_claimed'
+                WHERE id=? AND state='queued' ''',
+                (stamp, lease_until, hashlib.sha256(token.encode()).hexdigest(), principal, stamp, row['id']))
+            if changed.rowcount != 1:
+                raise Problem(409, 'claim_conflict', 'Instruction was claimed concurrently')
+            self._instruction_audit(db, row['id'], principal, session_id, 'claimed', 'worker_claimed', stamp)
+            claimed = db.execute('SELECT * FROM instructions WHERE id=?', (row['id'],)).fetchone()
+            db.commit()
+            return dict(self._instruction_public(claimed), lease_token=token)
+
+    @staticmethod
+    def _verify_instruction_lease(db, identity, token, principal):
+        row = db.execute('SELECT * FROM instructions WHERE id=?', (identity,)).fetchone()
+        if not row or row['claim_owner'] != principal:
+            raise Problem(404, 'not_found', 'Instruction does not exist')
+        supplied = hashlib.sha256(token.encode()).hexdigest()
+        if not row['lease_token_hash'] or not hmac.compare_digest(row['lease_token_hash'], supplied):
+            raise Problem(409, 'lease_mismatch', 'Instruction lease does not match')
+        return row
+
+    def renew_instruction_claim(self, identity, token, principal, claims_enabled=False):
+        from datetime import datetime, timedelta, timezone
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not claims_enabled:
+                raise Problem(503, 'instruction_claims_disabled', 'Instruction claims are disabled')
+            current = datetime.now(timezone.utc)
+            stamp = current.isoformat()
+            self._expire_instruction_leases(db, stamp)
+            row = self._verify_instruction_lease(db, identity, token, principal)
+            if row['state'] != 'claimed' or row['lease_until'] <= stamp:
+                raise Problem(409, 'invalid_transition', 'Only an active claim can be renewed')
+            lease_until = min(current + timedelta(seconds=INSTRUCTION_LEASE_SECONDS),
+                              datetime.fromisoformat(row['expires_at'])).isoformat()
+            db.execute('UPDATE instructions SET lease_until=?,updated_at=? WHERE id=?',
+                       (lease_until, stamp, identity))
+            renewed = db.execute('SELECT * FROM instructions WHERE id=?', (identity,)).fetchone()
+            db.commit()
+            return self._instruction_public(renewed, include_text=False)
+
+    def report_instruction_result(self, identity, data, principal):
+        data = dict(data)
+        token = data.pop('lease_token')
+        outcome = data['outcome']
+        reason = data['reason_code']
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            stamp = now()
+            self._expire_instruction_leases(db, stamp)
+            row = self._verify_instruction_lease(db, identity, token, principal)
+            if outcome == 'responded':
+                if row['state'] != 'received':
+                    raise Problem(409, 'invalid_transition', 'Responded requires received delivery evidence')
+                update = dict(state='responded', responded_at=stamp, terminal_at=stamp,
+                              updated_at=stamp, reason_code=reason)
+            else:
+                if row['state'] != 'claimed' or row['lease_until'] <= stamp:
+                    raise Problem(409, 'invalid_transition', 'Result requires an active claim')
+                if outcome == 'retryable':
+                    update = dict(state='queued', claimed_at=None, lease_until=None, lease_token_hash=None,
+                                  claim_owner=None, updated_at=stamp, reason_code=reason)
+                elif outcome == 'received':
+                    update = dict(state='received', received_at=stamp, lease_until=None,
+                                  updated_at=stamp, reason_code=reason)
+                else:
+                    update = dict(state=outcome, lease_until=None, terminal_at=stamp,
+                                  updated_at=stamp, reason_code=reason)
+            self._update(db, 'instructions', identity, update)
+            state = update['state']
+            self._instruction_audit(db, identity, principal, row['registered_session_id'], state, reason, stamp)
+            result = db.execute('SELECT * FROM instructions WHERE id=?', (identity,)).fetchone()
+            db.commit()
+            return self._instruction_public(result, include_text=False)
 
     def activate_provider_generation(self, data, principal):
         from datetime import datetime, timedelta, timezone

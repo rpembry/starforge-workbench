@@ -14,14 +14,21 @@ from starlette.exceptions import HTTPException
 from .auth import Auth, CloudflareAuth
 from .models import (ActionIn, ActionPatch, ArtifactIn, EventIn, ObjectiveIn,
                      RunIn, RunLink, RunPatch, Transition, CollectorIn, ImportBatch,
-                     ProviderAttentionIn, ProviderGenerationIn, RegisteredSessionIn)
+                     ProviderAttentionIn, ProviderGenerationIn, RegisteredSessionIn,
+                     InstructionClaimIn, InstructionIn, InstructionLeaseIn,
+                     InstructionResultIn)
 from .repository import Problem, SQLiteRepository
 from .settings import load_settings
 
 
-def create_app(repository=None, auth=None, settings=None):
+def create_app(repository=None, auth=None, settings=None, instruction_claims_enabled=None):
     if settings is None:
         settings = load_settings()
+    if instruction_claims_enabled is None:
+        configured = os.environ.get('WB_INSTRUCTION_CLAIMS_ENABLED', '0')
+        if configured not in {'0', '1'}:
+            raise RuntimeError('WB_INSTRUCTION_CLAIMS_ENABLED must be 0 or 1')
+        instruction_claims_enabled = configured == '1'
     if auth is None:
         mode = os.environ.get('WB_AUTH_MODE', 'local')
         if mode == 'cloudflare':
@@ -166,6 +173,34 @@ def create_app(repository=None, auth=None, settings=None):
     @app.post('/api/registered-sessions', status_code=201)
     def register_session(body: RegisteredSessionIn, who=Depends(collector)):
         return repository.register_session(body.model_dump(mode='json'), who.name)
+
+    @app.post('/api/instructions/claim')
+    def claim_instruction(body: InstructionClaimIn, who=Depends(collector)):
+        return repository.claim_instruction(body.registered_session_id, who.name,
+                                            instruction_claims_enabled)
+
+    @app.post('/api/instructions/{identity}/renew')
+    def renew_instruction(identity: str, body: InstructionLeaseIn, who=Depends(collector)):
+        return repository.renew_instruction_claim(identity, body.lease_token, who.name,
+                                                   instruction_claims_enabled)
+
+    @app.post('/api/instructions/{identity}/results')
+    def instruction_result(identity: str, body: InstructionResultIn, who=Depends(collector)):
+        return repository.report_instruction_result(identity, body.model_dump(mode='json'), who.name)
+
+    @app.get('/api/instructions')
+    def instructions(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+                     registered_session_id: str | None = None, who=Depends(operator)):
+        return {'items': repository.list_instructions(limit, offset, registered_session_id),
+                'limit': limit, 'offset': offset}
+
+    @app.get('/api/instructions/{identity}')
+    def instruction(identity: str, who=Depends(operator)):
+        return repository.get_instruction(identity)
+
+    @app.post('/api/instructions', status_code=201)
+    def create_instruction(body: InstructionIn, who=Depends(operator)):
+        return repository.create_instruction(body.model_dump(mode='json'), who.name)
 
     @app.post('/api/objectives', status_code=201)
     def objective(body: ObjectiveIn, who=Depends(operator)):
