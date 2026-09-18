@@ -35,6 +35,8 @@ def test_rollout_units_keep_one_context_and_loopback_boundary():
     assert '--registration-state %h/.local/state/starforge-ai-workbench/instruction-registrations.json' in publisher
     assert '--credentials-file %h/.config/starforge-ai-workbench/instruction-collector.json' in worker
     assert 'instruction-registrations.json' in config['registration_state']
+    assert config['manifest'].endswith('/.config/starforge-ai-workbench/workbench.yaml')
+    assert config['launcher_state'].endswith('/.local/state/starforge-ai-workbench')
     assert config['enabled'] is False
     assert '--context opencode' not in ordinary
     assert 'ExecStart=' in ordinary

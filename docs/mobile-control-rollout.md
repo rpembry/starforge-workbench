@@ -45,8 +45,8 @@ commit or print its `client_secret`.
 5. Start the dedicated publisher and check that exactly one *new* OpenCode
    registration is fresh, names the intended host/context, and is owned by the
    dedicated principal. Verify the exact local launcher binding without
-   changing it. The wrong collector identity must fail to claim that
-   registration. Leave claims off during this entire cutover.
+   changing it. Leave claims off during this entire cutover; a disabled-gate
+   503 does not prove registration ownership.
 
 ## Provider API and worker preflight
 
@@ -69,13 +69,17 @@ still `enabled:false`. It must select only `opencode`, use the dedicated
 publisher's registration state, and specify the reviewed local model. Never
 delete or share delivery receipts. Run a disabled `--once` cycle and require
 zero claims. Verify an authenticated claim returns
-`instruction_claims_disabled`, the pending queue contains no unexpected work,
-and the wrong principal cannot claim the new registration.
+`instruction_claims_disabled`, and the pending queue contains no unexpected
+work. Ownership is covered by synthetic tests; on the live host, check a
+wrong-principal claim only after the claim gate opens and before starting the
+worker, and require an ownership denial without any queued instruction.
 
 ## Activation and rollback
 
 After the preflight and rollout decision, set the server claim gate first,
-restart the server, and verify health. Atomically change only the worker JSON's
+restart the server, verify health, and require an ownership denial for a claim
+using the ordinary collector identity against the new registration. Atomically
+change only the worker JSON's
 `enabled` field to `true`; start the worker without enabling it at boot for an
 initial bounded observation window. Require one eligible exact registration,
 zero ambiguous claims, and no provider POST in the absence of a newly queued

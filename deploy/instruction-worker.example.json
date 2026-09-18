@@ -1,8 +1,8 @@
 {
   "enabled": false,
-  "manifest": "/home/EXAMPLE/starforge-workbench/config/workbench.yaml",
+  "manifest": "/home/EXAMPLE/.config/starforge-ai-workbench/workbench.yaml",
   "registration_state": "/home/EXAMPLE/.local/state/starforge-ai-workbench/instruction-registrations.json",
-  "launcher_state": "/home/EXAMPLE/.local/state/ai-workbench",
+  "launcher_state": "/home/EXAMPLE/.local/state/starforge-ai-workbench",
   "delivery_state": "/home/EXAMPLE/.local/state/starforge-ai-workbench/instruction-delivery",
   "opencode_origin": "http://127.0.0.1:4098",
   "provider_id": "openai",
