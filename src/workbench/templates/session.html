@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ session.display_name }} · Sessions · Starforge Workbench</title><link rel="icon" type="image/png" href="/assets/workbench-logo.png">
+<style>
+:root{font:16px system-ui;color:#e5ebf3;background:#101722}*{box-sizing:border-box}body{max-width:760px;margin:auto;padding:20px;overflow-wrap:anywhere}a{color:#91b9ee}a:focus-visible{outline:3px solid #f5b971;outline-offset:3px}nav{margin-bottom:24px}h1{font-size:clamp(1.7rem,6vw,2.2rem)}h2{font-size:1rem;color:#91b9ee;text-transform:uppercase;letter-spacing:.08em}p{line-height:1.5}section{min-width:0;background:#192331;border:1px solid #334155;border-radius:12px;padding:18px;margin:12px 0}.badge{display:inline-block;background:#334155;border-radius:5px;padding:4px 8px;font-size:.9rem;font-weight:600}.muted,small{color:#a4b2c5}dl{display:grid;grid-template-columns:minmax(7rem,1fr) minmax(0,2fr);gap:10px;margin:0}dt{color:#a4b2c5}dd{margin:0;overflow-wrap:anywhere}@media(max-width:480px){body{padding:14px}section{padding:14px}dl{grid-template-columns:1fr;gap:2px}dd{margin-bottom:12px}}
+</style></head><body>
+<nav aria-label="Main navigation"><a href="/">Dashboard</a> · <a href="/sessions">Sessions</a></nav>
+<main><h1>{{ session.display_name }}</h1><p class="muted">{{ session.host }} · {{ session.provider }}</p>
+<section aria-labelledby="status-heading"><h2 id="status-heading">Observed status</h2><p><span class="badge">{{ session.status_label }}</span></p><p>{{ session.reason_label }}</p><p class="muted">This is observation, not evidence of task progress, readiness, or completion.</p></section>
+<section aria-labelledby="context-heading"><h2 id="context-heading">Context</h2><dl><dt>Action</dt><dd>{{ session.action_title or 'Not associated' }}</dd><dt>Objective</dt><dd>{{ session.objective_title or 'Not associated' }}</dd><dt>Last activity</dt><dd>{{ session.activity_label }}</dd><dt>Last collector contact</dt><dd>{{ session.heartbeat_label }}</dd></dl></section>
+<section aria-labelledby="controls-heading"><h2 id="controls-heading">Instructions</h2><p>Sending instructions is not available yet.</p></section>
+</main></body></html>
