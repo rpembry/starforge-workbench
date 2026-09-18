@@ -445,7 +445,10 @@ def main():
     parser.add_argument('--image', required=True, help='Already cached shell image pinned by digest')
     parser.add_argument('--sudo', action='store_true')
     parser.add_argument('--matched-toolchain', action='store_true', help='Fresh registry download and private native BusyBox/musl preparation (x86_64)')
+    parser.add_argument('--reviewed-disposition',action='store_true',help='Exercise review/dispose CLI rather than manual synthetic archival')
     args = parser.parse_args()
+    if args.reviewed_disposition and not args.matched_toolchain:
+        parser.error('--reviewed-disposition requires --matched-toolchain')
     raw = profile(args.image); parse_profile(raw)
     args.root.mkdir(mode=0o700)
     root = w.private_directory(args.root)
@@ -494,10 +497,13 @@ def main():
     result['disk_usage'] = disk_usage(image['Size'], result.get('preparation'))
     result['decision']['image_disk_budget'] = result['disk_usage']['decision']
     if args.matched_toolchain:
-        from .evaluation_disposition import exercise
-        result['disposition'] = exercise(root/'disposition',raw,args.sudo)
+        from .evaluation_disposition import exercise, exercise_integrated
+        operation = exercise_integrated if args.reviewed_disposition else exercise
+        result['disposition'] = operation(root/'disposition',raw,args.sudo)
         result['decision']['operator_friction'] = 'fail' if result['disposition']['extra_cleanup_count'] else 'pass'
         result['decision']['remaining_evidence'] = ['Add a safe reviewed-work archival/disposition operation and rerun the no-manual-cleanup gate.', 'Demonstrate a concrete workload benefit beyond equally isolated native worktrees.']
+    if args.reviewed_disposition and result['decision']['operator_friction'] == 'pass':
+        result['decision']['remaining_evidence'] = ['Demonstrate a concrete workload benefit beyond equally isolated native worktrees.']
     result['finished_at'] = w.stamp(); result['host_load_end'] = list(os.getloadavg())
     w.atomic(root/'results.json',result)
     report = '# Docker worker evaluation\n\nRecommendation: **'+result['decision']['recommendation']+'**.\n\n'
