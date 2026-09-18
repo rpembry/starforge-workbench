@@ -8,8 +8,8 @@ origin, model, or environment. SSH and tmux remain the administrative fallback,
 not a delivery adapter.
 
 The worker is **off by default** in two places: its private local configuration
-must set `enabled: true`, and the server-side #64 setting
-`instruction_claims_enabled` must be explicitly enabled. Installing code or a
+must set `enabled: true`, and the server-side #64 environment switch
+`WB_INSTRUCTION_CLAIMS_ENABLED=1` must be explicitly enabled. Installing code or a
 unit does not enable either gate. Do not enable the worker before the #64 API,
 the #59 publisher, the #61-version disposable smoke, and this worker are
 reviewed together. No existing OpenCode conversation should be used for that
@@ -76,10 +76,16 @@ operator action, not tmux injection.
 
 ## Validation boundary
 
-Ordinary tests use synthetic registration state, fake server claims and a fake
-provider. They prove local routing and one-attempt decisions but cannot prove
-live OpenCode compatibility. The #61 evidence covers OpenCode 1.18.31 with a
-disposable synthetic session; a #63 disposable smoke must confirm this worker's
-actual admission and result reporting on the installed version. A real-provider
-normal finish and durable output replay are still unverified, so `responded`
-is not automatically inferred.
+Ordinary tests use synthetic registration state, a synthetic #64 server queue,
+and a fake provider. They prove claim, exact-session routing, one-attempt
+decisions, and result reporting but cannot prove a live collector registration
+or live server/worker deployment. On installed OpenCode 1.18.31, a separate
+loopback-only, disposable `opencode serve` session admitted one adapter
+`prompt_async` request with HTTP 204; lookup of the exact synthetic
+`messageID` returned its user record. That verifies provider admission, not
+normal completion: the selected synthetic model was not in OpenCode's model
+list and the provider run errored. No existing session was used. Before
+enabling this worker, repeat an end-to-end disposable smoke with the exact
+host-local model and registration to verify admission and result reporting.
+A real-provider normal finish and durable output replay are still unverified,
+so `responded` is not automatically inferred.

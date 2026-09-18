@@ -1,8 +1,14 @@
 """Synthetic worker checks: no live server, provider, or conversation input."""
 import json
+from datetime import datetime, timezone
+
+from fastapi.testclient import TestClient
 
 from starforge_workbench.instruction_worker import cycle, load_config
 from starforge_workbench.opencode_delivery import DeliveryResult
+from workbench.auth import Auth
+from workbench.main import create_app
+from workbench.repository import SQLiteRepository
 
 
 REGISTERED = 'registered_synthetic_0001'
@@ -137,3 +143,41 @@ def test_private_disabled_configuration_is_accepted(tmp_path):
     path.write_text(json.dumps(content))
     path.chmod(0o600)
     assert load_config(path)['enabled'] is False
+
+
+def test_worker_claim_and_receipt_against_synthetic_server(tmp_path):
+    operator = 'operator-synthetic-' + 'o' * 32
+    collector = 'collector-synthetic-' + 'c' * 32
+    repo = SQLiteRepository(tmp_path / 'database' / 'workbench.sqlite')
+    app = create_app(repo, Auth({'operator': operator, 'collector': collector}),
+                     instruction_claims_enabled=True)
+    with TestClient(app) as api:
+        api.headers['Authorization'] = 'Bearer ' + collector
+        heartbeat = api.post('/api/collectors/heartbeat', json={
+            'source': 'synthetic-collector', 'instance_id': 'synthetic-instance',
+            'scope': 'synthetic', 'status': 'ok', 'reason': 'scan_complete'})
+        assert heartbeat.status_code == 200
+        registration = api.post('/api/registered-sessions', json={
+            'id': REGISTERED, 'collector_source': 'synthetic-collector',
+            'host': 'synthetic-host', 'display_name': 'Synthetic OpenCode',
+            'provider': 'opencode', 'evidence_state': 'present',
+            'reason': 'process_observed', 'summary': '', 'observation_sequence': 1,
+            'observed_at': datetime.now(timezone.utc).isoformat()})
+        assert registration.status_code == 201, registration.text
+        api.headers['Authorization'] = 'Bearer ' + operator
+        created = api.post('/api/instructions', json={
+            'idempotency_key': 'synthetic-key-0001',
+            'registered_session_id': REGISTERED, 'text': 'SYNTHETIC INSTRUCTION',
+            'expiry_minutes': 15})
+        assert created.status_code == 201, created.text
+        api.headers['Authorization'] = 'Bearer ' + collector
+        adapter = FakeAdapter()
+        result = cycle(api, config(tmp_path), adapter, lambda *args: SESSION)
+        assert result['claimed'] == result['reported'] == 1
+        assert adapter.calls == [(created.json()['id'], SESSION, 'SYNTHETIC INSTRUCTION')]
+        api.headers['Authorization'] = 'Bearer ' + operator
+        stored = api.get('/api/instructions/' + created.json()['id'])
+        assert stored.status_code == 200
+        assert stored.json()['state'] == 'received'
+        assert all('SYNTHETIC INSTRUCTION' not in json.dumps(entry)
+                   for entry in stored.json()['history'])
