@@ -1,5 +1,8 @@
 # Initial Docker worker evaluation (#54)
 
+Follow-up: [matched toolchain and disposition results](docker-worker-matched-evaluation.md).
+The observations below remain the original run.
+
 **Recommendation: iterate on the basic runner. Keep #51 and #53 gated.**
 
 The synthetic experiment supports the runner's basic safety and correctness. It
@@ -84,3 +87,7 @@ work. Image size is Docker's reported cached size, not registry transfer size.
 Native controller interruption kills the private tmux server; Docker interruption
 kills its controller process, then invokes one explicit recovery operation.
 These mechanisms differ and are recorded, not equated to provider interruption.
+
+Review correction: older cleanup/disk pass labels lacked complete measurements.
+Use the [corrected gate evidence](docker-worker-matched-evaluation.md#review-correction-and-replacement-evidence);
+original observations remain preserved.
