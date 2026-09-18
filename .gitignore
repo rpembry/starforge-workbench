@@ -73,3 +73,5 @@ config/workbench.yaml
 !/docs/evaluations/docker-workers-54-matched.json
 !/docs/evaluations/docker-workers-54-matched-failed.json
 !/docs/evaluations/docker-workers-54-reviewed.json
+!/docs/evaluations/python-toolchain-benefit.json
+!/docs/evaluations/python-toolchain-benefit-first.json

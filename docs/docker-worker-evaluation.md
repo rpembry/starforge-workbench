@@ -104,3 +104,9 @@ gate. The recommendation remains iterate, with a specific bounded next change.
 Review correction: older cleanup/disk pass labels lacked complete measurements.
 Use the [corrected gate evidence](docker-worker-matched-evaluation.md#review-correction-and-replacement-evidence);
 original observations remain preserved.
+
+## Workload benefit decision
+
+The [Python capability comparison](docker-python-benefit.md) found both backends
+satisfy the tested incompatible standard-library workloads. It recommends stopping
+expansion for this workload, retaining native defaults and keeping #51/#53 gated.
