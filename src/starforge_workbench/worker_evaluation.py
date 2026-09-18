@@ -12,6 +12,8 @@ import statistics
 import subprocess
 import sys
 import time
+import threading
+from functools import wraps
 import uuid
 
 from . import docker_worker as w
@@ -50,6 +52,17 @@ cpu=$(sed -n 's/^usage_usec //p' "$cg/cpu.stat" 2>/dev/null || true)
 [ -n "$cpu" ] || cpu=null
 printf '{"assertions":true,"dependency_version":%s,"ready":%s,"done":%s,"memory_peak_bytes":%s,"cpu_usage_usec":%s}\\n' "$version" "$ready" "$done" "$peak" "$cpu" > result.json
 '''
+
+
+# Serialize host-only artifact verification/teardown, not the concurrent workers.
+_REVIEW_LOCK = threading.RLock()
+
+def host_review_serialized(function):
+    @wraps(function)
+    def call(*args, **kwargs):
+        with _REVIEW_LOCK:
+            return function(*args, **kwargs)
+    return call
 
 
 def digest(data):
@@ -99,6 +112,7 @@ def wait_until(predicate, timeout=20):
     raise w.WorkerError('Evaluation wait timed out')
 
 
+@host_review_serialized
 def synthetic_cleanup(repo, receipt, sudo):
     """Discard only allocations in this generated fixture after evidence is recorded."""
     path = Path(receipt['worktree'])
@@ -114,6 +128,7 @@ def synthetic_cleanup(repo, receipt, sudo):
         w.git(repo, 'worktree', 'remove', '--force', str(path))
 
 
+@host_review_serialized
 def verify_patch(repo, root, receipt, patch, version):
     path = root/('patch-check-'+uuid.uuid4().hex)
     w.git(repo, 'worktree', 'add', '--detach', str(path), receipt['revision'])
@@ -125,7 +140,8 @@ def verify_patch(repo, root, receipt, patch, version):
         (path/'.cache').mkdir()
         source = Path(receipt['worktree'])/'.cache/dependency.sh'
         (path/'.cache/dependency.sh').write_bytes(source.read_bytes())
-        w.command(['sh', '-c', 'cd '+shlex.quote(str(path))+' && . ./library.sh && test "$(answer 2 3)" = 5 && test "$(answer 4 7)" = 11 && test "$(answer -2 2)" = 0'])
+        shell = str(root/'toolchain/bin/sh') if (root/'toolchain/bin/sh').exists() else 'sh'
+        w.command([shell, '-c', 'cd '+shlex.quote(str(path))+' && . ./library.sh && test "$(answer 2 3)" = 5 && test "$(answer 4 7)" = 11 && test "$(answer -2 2)" = 0'])
         return True
     finally:
         w.git(repo, 'worktree', 'remove', '--force', str(path))
@@ -185,14 +201,15 @@ def native_trial(root, repo, raw, scenario, version, index, sudo):
     w.atomic(path/'worker.json', receipt)
     start = time.monotonic(); start_up = uptime()
     w.git(repo, 'worktree', 'add', '--detach', str(tree), receipt['revision'])
-    worker = 'sh fixture.sh '+str(version)
+    native_shell = str(root/'toolchain/bin/sh') if (root/'toolchain/bin/sh').exists() else 'sh'
+    worker = shlex.quote(native_shell)+' fixture.sh '+str(version)
     if scenario == 'invalid_startup': worker = '/missing-evaluation-command'
     if scenario in ('cancellation', 'controller_interruption'): worker = 'sleep 60'
     if scenario == 'failed_export': worker = 'ln -s /etc/passwd result.json'
     # tmux is private to this attempt; the task runs in a bounded transient user scope.
     command = ['systemd-run', '--user', '--scope', '--quiet', '--unit='+unit,
                '-p', 'CPUQuota=100%', '-p', 'MemoryMax=64M', '-p', 'MemorySwapMax=0', '-p', 'TasksMax=32',
-               'sh', '-c', 'cd '+shlex.quote(str(tree))+' && '+worker]
+               native_shell, '-c', ('export PATH='+shlex.quote(str(root/'toolchain/bin'))+'; ' if (root/'toolchain/bin').exists() else '')+'cd '+shlex.quote(str(tree))+' && '+worker]
     controller = path/'controller.sh'
     controller.write_text('#!/bin/sh\n'+shlex.join(command)+' > '+shlex.quote(str(path/'output.txt'))+
                           ' 2>&1\nrc=$?\nprintf "%s\\n" "$rc" > '+shlex.quote(str(path/'exit.code'))+'\n')
@@ -208,7 +225,7 @@ def native_trial(root, repo, raw, scenario, version, index, sudo):
             native_stop(unit, socket)
             receipt.update(phase='cancelled', exit_code=None)
         else:
-            wait_until(lambda: (path/'exit.code').exists())
+            wait_until(lambda: (path/'exit.code').exists(), timeout=raw['timeout_seconds'])
             receipt.update(phase='exited', exit_code=int((path/'exit.code').read_text()))
     except (w.WorkerError, OSError) as exc:
         receipt.update(phase='unknown', reason=str(exc))
@@ -373,6 +390,7 @@ def main():
     parser.add_argument('--root', type=Path, required=True, help='New private evaluation directory')
     parser.add_argument('--image', required=True, help='Already cached shell image pinned by digest')
     parser.add_argument('--sudo', action='store_true')
+    parser.add_argument('--matched-toolchain', action='store_true', help='Fresh registry download and private native BusyBox/musl preparation (x86_64)')
     args = parser.parse_args()
     raw = profile(args.image); parse_profile(raw)
     args.root.mkdir(mode=0o700)
@@ -386,6 +404,20 @@ def main():
                   toolchains={'docker':args.image, 'tmux':{'executable':Path(shutil.which('sh')).resolve().name, 'sha256':digest(Path(shutil.which('sh')).resolve().read_bytes())}},
                   host_load_start=list(os.getloadavg()), started_at=w.stamp(), trials=[])
     w.atomic(root/'results.json', result)  # Declare thresholds before observations.
+    if args.matched_toolchain:
+        from .evaluation_toolchain import prepare
+        result['preparation'] = prepare(root,args.image)
+        probe_state = root/'toolchain-probe'; probe_state.mkdir(mode=0o700)
+        probe = w.run_worker(raw,repo,'HEAD',probe_state,'toolchain-identity',
+                            ['sh','-c','sha256sum /bin/busybox /lib/ld-musl-x86_64.so.1'],sudo=args.sudo)
+        if probe.get('exit_code') != 0: raise w.WorkerError('Container toolchain probe failed')
+        lines = (Path(probe['artifact_manifest']).parent/'output.txt').read_text().splitlines()
+        observed = {line.split()[1].lstrip('/'):line.split()[0] for line in lines}
+        result['host_control_shell'] = result['toolchains']['tmux']
+        result['toolchains']['tmux'] = {'source_image':args.image, 'binary_hashes':result['preparation']['native_toolchain_hashes'], 'execution':'private musl loader and BusyBox applet wrappers'}
+        result['toolchain_hashes_match'] = observed == result['preparation']['native_toolchain_hashes']
+        if not result['toolchain_hashes_match']: raise w.WorkerError('Native/container toolchain bytes differ')
+        w.atomic(root/'results.json',result)
     result['boundaries'] = boundary_probe(root, repo, raw, args.sudo)
     if all(result['boundaries'][k] for k in ('runtime_boundary','invalid_profiles_before_allocation','configuration_verified_before_start')):
         for backend, runner in [('tmux',native_trial),('docker',docker_trial)]:
@@ -404,8 +436,17 @@ def main():
     result['base_checkout_unchanged'] = not w.git(repo,'status','--porcelain','--ignored')
     result['remaining_worktrees'] = w.git(repo,'worktree','list','--porcelain').decode().count('worktree ')-1
     result['decision'] = evaluate(result['trials'],result['boundaries'])
+    if args.matched_toolchain:
+        result['decision']['toolchain_comparability'] = 'pass' if result['toolchain_hashes_match'] else 'fail'
+        result['decision']['cold_preparation'] = 'pass' if result['preparation']['total_preparation_s'] <= THRESHOLDS['cold_prepare_s'] else 'fail'
+        result['decision']['remaining_evidence'] = ['Measure ordinary edit disposition and operator cleanup actions.', 'Demonstrate a concrete workload benefit beyond equally isolated native worktrees.']
     result['decision']['base_checkout_unchanged'] = result['base_checkout_unchanged']
     result['decision']['image_disk_budget'] = 'pass' if image['Size'] <= THRESHOLDS['image_budget_bytes'] else 'fail'
+    if args.matched_toolchain:
+        from .evaluation_disposition import exercise
+        result['disposition'] = exercise(root/'disposition',raw,args.sudo)
+        result['decision']['operator_friction'] = 'fail' if result['disposition']['extra_cleanup_count'] else 'pass'
+        result['decision']['remaining_evidence'] = ['Add a safe reviewed-work archival/disposition operation and rerun the no-manual-cleanup gate.', 'Demonstrate a concrete workload benefit beyond equally isolated native worktrees.']
     result['finished_at'] = w.stamp(); result['host_load_end'] = list(os.getloadavg())
     w.atomic(root/'results.json',result)
     report = '# Docker worker evaluation\n\nRecommendation: **'+result['decision']['recommendation']+'**.\n\n'
