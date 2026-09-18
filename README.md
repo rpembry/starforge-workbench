@@ -65,7 +65,8 @@ Native tmux remains the default. The [Docker worker ADR](docs/adr-docker-worker-
 defines an explicit opt-in backend and its boundaries; the
 [evaluation rubric](docs/docker-worker-evaluation.md) sets the go/no-go gate for
 a basic runner. The [internal execution profiles](docs/execution-profiles.md) validate configuration
-and record private planned-worker metadata. Docker worker launch is not yet implemented.
+and record private planned-worker metadata. The opt-in [Docker worker runner](docs/docker-workers.md)
+executes isolated task attempts without changing native sessions. Provider evaluation remains pending.
 
 ### Shared work state and attention
 

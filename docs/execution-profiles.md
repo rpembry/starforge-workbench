@@ -2,7 +2,7 @@
 
 Issue #49 implements profile validation and a private metadata handoff in
 `starforge_workbench.execution`. It does not launch Docker workers, add a public
-schema/API, or change persistent native sessions. The runner in #50 must consume
+schema/API, or change persistent native sessions. The separate [runner](docker-workers.md) consumes
 the resolved profile before launch. See the [backend ADR](adr-docker-worker-backend.md)
 and [evaluation gate](docker-worker-evaluation.md).
 
@@ -32,15 +32,15 @@ Docker requires explicit non-root user/group, CPU, memory, PID and duration
 limits, per-task worktree allocation, and network `none`. Numeric validation is
 strict: booleans, strings, nonfinite numbers and out-of-range values fail. The
 upper bounds are input sanity limits, not a claim the host has those resources;
-#50 must check feasibility and apply limits to the created container.
+the runner checks feasibility and applies limits to the created container.
 
 Mounts describe only allocation roles: `worktree` at `/workspace`, and optionally
 `scratch` at `/scratch`, both writable. They cannot name a host path, socket,
 home directory, arbitrary container destination, duplicate role or extra mount
 option. The runner must bind these roles to verified per-attempt allocations;
 profile validation alone cannot prove filesystem containment. In particular,
-#50 must mask the host worktree's `.git` pointer as described by the ADR and
-validate actual canonical paths, mount overlap and artifact containment.
+the runner masks the host worktree's `.git` pointer as described by the ADR and
+validates actual canonical paths, mount overlap and artifact containment.
 
 The first implementation accepts only an empty `secret_refs` list. Its reserved
 shape is a list of symbolic names, not paths, URLs, environment assignments or
@@ -90,9 +90,9 @@ The runner remains responsible for attempt/resource identity and the rest of its
 ownership record. This unversioned structure is not a compatibility promise to
 external consumers.
 
-#50 must validate the requested configuration before resource creation, consume
-the returned profile rather than reread mutable raw input, check host/image/path
-prerequisites, record ownership and enforce the ADR's fixed runtime restrictions.
+The runner validates the requested configuration before resource creation, consumes
+the returned profile rather than reread mutable raw input, checks host/image/path
+prerequisites, records ownership and enforces the ADR's fixed runtime restrictions.
 It must never launch natively after a Docker failure. More profile choices should
 be added only when supported by the runner; the initial parser intentionally
 rejects capabilities that cannot yet be enforced.
