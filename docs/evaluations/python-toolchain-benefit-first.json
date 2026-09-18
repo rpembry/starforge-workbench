@@ -1,0 +1,311 @@
+{
+  "base_checkout_unchanged": true,
+  "decision": {
+    "concrete_incremental_docker_benefit": false,
+    "concurrent_capabilities_pass": true,
+    "conditional_expansion_authorized": false,
+    "image_disk_budget": "pass",
+    "incompatible_stdlib_contracts_verified": true,
+    "native_already_satisfies_workload": true,
+    "rationale": "Both existing native runtimes already run these incompatible stdlib contracts concurrently with no install or default change; no observed native repair/setup step is avoided by Docker.",
+    "recommendation": "stop expansion for this workload",
+    "sample_complete": true
+  },
+  "finished_at": "2026-09-18T09:40:38.067217+00:00",
+  "fixture_revision": "2128d540ede55878d45fbab297bb602804449a11",
+  "images": {
+    "legacy": "python@sha256:0495f5559318affa673172ec7e35cd0a5213e4aaf4c76d0a66554c0af97b157e",
+    "modern": "python@sha256:016508ba505da24f7139765bc4bb669df4e88eb2f12eeadd571bf2f88d7533df"
+  },
+  "native_binary_hashes": {
+    "legacy": "572cfa2a8597e2f431c785613539b1d219fa99eecf5ffb5765731a2ebc3e692a",
+    "modern": "0d64bd6d66d68dac91cdadafc46e22d4f09f22bdc997aaae870f42865b024a3e"
+  },
+  "native_toolchain_unchanged": true,
+  "plan": {
+    "cross_checks_per_backend": 2,
+    "disk_budget_bytes": 134217728,
+    "limits": {
+      "cpus": 1,
+      "memory_mb": 64,
+      "pids_limit": 32,
+      "timeout_seconds": 10
+    },
+    "network": "Docker none; native host network but fixtures perform no network operations",
+    "no_dependency_installs": true,
+    "pairs_per_backend": 3,
+    "python_flags": [
+      "-I",
+      "-S"
+    ]
+  },
+  "preparation": {
+    "legacy": {
+      "cached_size_bytes": 20413167,
+      "pull_s": 6.6332723629893735
+    },
+    "modern": {
+      "cached_size_bytes": 17791733,
+      "pull_s": 5.146318694984075
+    }
+  },
+  "publication_note": "Synthetic source revision, capability outputs, image digests and selected executable hashes only; no private executable paths or logs.",
+  "remaining_worktrees": 0,
+  "runtime_storage_bytes": 38204900,
+  "started_at": "2026-09-18T09:40:20.022442+00:00",
+  "trial_note": "Initial run used -I -S. Final repeat explicitly adds -B to disable bytecode writes. These original measurements are retained.",
+  "trials": [
+    {
+      "assertions": {
+        "assertions": true,
+        "libc": "glibc",
+        "version": "3.11.15"
+      },
+      "attempt_id": "dc668558d48940068e86100d35100559",
+      "backend": "tmux",
+      "case": "legacy",
+      "cleanup": "complete",
+      "cross_check": false,
+      "elapsed_s": 0.0585110480315052,
+      "exit_code": 0,
+      "expected_api_absent": false,
+      "pair": 0
+    },
+    {
+      "assertions": {
+        "assertions": true,
+        "libc": "glibc",
+        "version": "3.14.7"
+      },
+      "attempt_id": "a1e8ed34e24842d4a020e305b234edb1",
+      "backend": "tmux",
+      "case": "modern",
+      "cleanup": "complete",
+      "cross_check": false,
+      "elapsed_s": 0.05823729996336624,
+      "exit_code": 0,
+      "expected_api_absent": false,
+      "pair": 0
+    },
+    {
+      "assertions": {
+        "assertions": true,
+        "libc": "glibc",
+        "version": "3.11.15"
+      },
+      "attempt_id": "b6d30c402dc54a0fbb7b4b15bb0a2426",
+      "backend": "tmux",
+      "case": "legacy",
+      "cleanup": "complete",
+      "cross_check": false,
+      "elapsed_s": 0.056233184004668146,
+      "exit_code": 0,
+      "expected_api_absent": false,
+      "pair": 1
+    },
+    {
+      "assertions": {
+        "assertions": true,
+        "libc": "glibc",
+        "version": "3.14.7"
+      },
+      "attempt_id": "7ba4aae7050b4dae933847067367c0b4",
+      "backend": "tmux",
+      "case": "modern",
+      "cleanup": "complete",
+      "cross_check": false,
+      "elapsed_s": 0.05725535494275391,
+      "exit_code": 0,
+      "expected_api_absent": false,
+      "pair": 1
+    },
+    {
+      "assertions": {
+        "assertions": true,
+        "libc": "glibc",
+        "version": "3.11.15"
+      },
+      "attempt_id": "afd7623f5b0e409cb7975ca53b572cea",
+      "backend": "tmux",
+      "case": "legacy",
+      "cleanup": "complete",
+      "cross_check": false,
+      "elapsed_s": 0.05601356801344082,
+      "exit_code": 0,
+      "expected_api_absent": false,
+      "pair": 2
+    },
+    {
+      "assertions": {
+        "assertions": true,
+        "libc": "glibc",
+        "version": "3.14.7"
+      },
+      "attempt_id": "9b3022230d07449aa0f941c901ec5c96",
+      "backend": "tmux",
+      "case": "modern",
+      "cleanup": "complete",
+      "cross_check": false,
+      "elapsed_s": 0.05651929398300126,
+      "exit_code": 0,
+      "expected_api_absent": false,
+      "pair": 2
+    },
+    {
+      "assertions": null,
+      "attempt_id": "8492157e78de4f4b9e2f2e68b40b0425",
+      "backend": "tmux",
+      "case": "legacy",
+      "cleanup": "complete",
+      "cross_check": true,
+      "elapsed_s": 0.10705621395027265,
+      "exit_code": 1,
+      "expected_api_absent": true
+    },
+    {
+      "assertions": null,
+      "attempt_id": "0776c37c136b42948770a1590bf7e912",
+      "backend": "tmux",
+      "case": "modern",
+      "cleanup": "complete",
+      "cross_check": true,
+      "elapsed_s": 0.056469560018740594,
+      "exit_code": 1,
+      "expected_api_absent": true
+    },
+    {
+      "artifacts_complete": true,
+      "assertions": {
+        "assertions": true,
+        "libc": "",
+        "version": "3.11.16"
+      },
+      "attempt_id": "41d81caecc4b42d2a191f690c14b1790",
+      "backend": "docker",
+      "case": "legacy",
+      "cleanup": "complete",
+      "cross_check": false,
+      "elapsed_s": 1.7367843060055748,
+      "exit_code": 0,
+      "expected_api_absent": false,
+      "image": "python@sha256:0495f5559318affa673172ec7e35cd0a5213e4aaf4c76d0a66554c0af97b157e",
+      "pair": 0
+    },
+    {
+      "artifacts_complete": true,
+      "assertions": {
+        "assertions": true,
+        "libc": "musl",
+        "version": "3.14.7"
+      },
+      "attempt_id": "dd59e809acd34b4e89bd12cd09aecf71",
+      "backend": "docker",
+      "case": "modern",
+      "cleanup": "complete",
+      "cross_check": false,
+      "elapsed_s": 1.7346503239823505,
+      "exit_code": 0,
+      "expected_api_absent": false,
+      "image": "python@sha256:016508ba505da24f7139765bc4bb669df4e88eb2f12eeadd571bf2f88d7533df",
+      "pair": 0
+    },
+    {
+      "artifacts_complete": true,
+      "assertions": {
+        "assertions": true,
+        "libc": "",
+        "version": "3.11.16"
+      },
+      "attempt_id": "fb0c70ce1afe43d0857af41869933284",
+      "backend": "docker",
+      "case": "legacy",
+      "cleanup": "complete",
+      "cross_check": false,
+      "elapsed_s": 0.8048870049533434,
+      "exit_code": 0,
+      "expected_api_absent": false,
+      "image": "python@sha256:0495f5559318affa673172ec7e35cd0a5213e4aaf4c76d0a66554c0af97b157e",
+      "pair": 1
+    },
+    {
+      "artifacts_complete": true,
+      "assertions": {
+        "assertions": true,
+        "libc": "musl",
+        "version": "3.14.7"
+      },
+      "attempt_id": "fe2b2596d2714addbe6228addd6b1cd9",
+      "backend": "docker",
+      "case": "modern",
+      "cleanup": "complete",
+      "cross_check": false,
+      "elapsed_s": 1.0954747540527023,
+      "exit_code": 0,
+      "expected_api_absent": false,
+      "image": "python@sha256:016508ba505da24f7139765bc4bb669df4e88eb2f12eeadd571bf2f88d7533df",
+      "pair": 1
+    },
+    {
+      "artifacts_complete": true,
+      "assertions": {
+        "assertions": true,
+        "libc": "",
+        "version": "3.11.16"
+      },
+      "attempt_id": "583790af83794273b8bf2e1532b95d80",
+      "backend": "docker",
+      "case": "legacy",
+      "cleanup": "complete",
+      "cross_check": false,
+      "elapsed_s": 0.8000676280353218,
+      "exit_code": 0,
+      "expected_api_absent": false,
+      "image": "python@sha256:0495f5559318affa673172ec7e35cd0a5213e4aaf4c76d0a66554c0af97b157e",
+      "pair": 2
+    },
+    {
+      "artifacts_complete": true,
+      "assertions": {
+        "assertions": true,
+        "libc": "musl",
+        "version": "3.14.7"
+      },
+      "attempt_id": "48925313c5604da4b44941d18b895e49",
+      "backend": "docker",
+      "case": "modern",
+      "cleanup": "complete",
+      "cross_check": false,
+      "elapsed_s": 1.0998128710198216,
+      "exit_code": 0,
+      "expected_api_absent": false,
+      "image": "python@sha256:016508ba505da24f7139765bc4bb669df4e88eb2f12eeadd571bf2f88d7533df",
+      "pair": 2
+    },
+    {
+      "artifacts_complete": true,
+      "assertions": null,
+      "attempt_id": "724c0a64d0994d4382c0ee75e51cd7b6",
+      "backend": "docker",
+      "case": "legacy",
+      "cleanup": "complete",
+      "cross_check": true,
+      "elapsed_s": 1.1019173369859345,
+      "exit_code": 1,
+      "expected_api_absent": true,
+      "image": "python@sha256:016508ba505da24f7139765bc4bb669df4e88eb2f12eeadd571bf2f88d7533df"
+    },
+    {
+      "artifacts_complete": true,
+      "assertions": null,
+      "attempt_id": "897ff23b3584437db440a83a70f88c08",
+      "backend": "docker",
+      "case": "modern",
+      "cleanup": "complete",
+      "cross_check": true,
+      "elapsed_s": 0.7619090559892356,
+      "exit_code": 1,
+      "expected_api_absent": true,
+      "image": "python@sha256:0495f5559318affa673172ec7e35cd0a5213e4aaf4c76d0a66554c0af97b157e"
+    }
+  ]
+}
