@@ -120,10 +120,11 @@ Collectors have provider-specific setup requirements and depend on local formats
 The [remote session control ADR](docs/adr-remote-session-control.md) defines a
 mobile flow for viewing registered agent sessions and sending bounded, audited
 plain-text instructions through a host-local provider adapter. The service has a
-durable authenticated instruction queue, but claims are disabled by default and
-no local worker, provider delivery, or send UI is implemented or enabled. The
-design excludes arbitrary shell commands, public provider endpoints, raw
-transcript centralization, and tmux keystroke injection from its MVP.
+durable authenticated instruction queue, a mobile send/timeline view, and an
+opt-in local OpenCode worker. Claims and delivery are disabled by default; no
+worker is installed or enabled merely by running the web application. The design
+excludes arbitrary shell commands, public provider endpoints, raw transcript
+centralization, and tmux keystroke injection from its MVP.
 Server operators must explicitly set `WB_INSTRUCTION_CLAIMS_ENABLED=1` to permit
 claims and renewals; disabling it preserves queued and in-flight records.
 
