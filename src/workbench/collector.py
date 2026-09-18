@@ -113,8 +113,8 @@ def _private_directory(path):
             and not item.st_mode & 0o077)
 
 
-def _binding_generation(context, launcher_state):
-    """Hash an exact protected binding without returning its provider identity."""
+def _binding_record(context, launcher_state):
+    """Read one exact protected binding for local use only."""
     sessions = launcher_state/'sessions'
     path = sessions/(context['id']+'.json')
     if not _private_directory(launcher_state) or not _private_directory(sessions) or not _private_file(path):
@@ -131,7 +131,13 @@ def _binding_generation(context, launcher_state):
         return None
     value = json.dumps({'id': binding['id'], 'provider': binding['provider'],
                         'cwd': binding['cwd']}, sort_keys=True, separators=(',', ':'))
-    return hashlib.sha256(value.encode()).hexdigest()
+    return {'id': binding['id'], 'generation': hashlib.sha256(value.encode()).hexdigest()}
+
+
+def _binding_generation(context, launcher_state):
+    """Hash an exact protected binding without publishing its provider identity."""
+    record = _binding_record(context, launcher_state)
+    return record['generation'] if record else None
 
 
 def _registration_state(path):

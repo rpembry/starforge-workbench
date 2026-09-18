@@ -1,10 +1,10 @@
 # OpenCode delivery adapter (partial #63)
 
 `starforge_workbench.opencode_delivery` is a local, one-attempt provider
-boundary. It is not a Workbench instruction worker and is not installed as a
-service. The durable server queue (#64), collector-owned target resolution,
-claim validation, result reporting, and disposable live smoke remain to be
-integrated before #63 can be closed or any send control can be enabled.
+boundary. The opt-in [local worker](instruction-worker.md) adds collector-owned
+target resolution, claim validation, and result reporting. The #64 queue is
+still under review, and a disposable live smoke remains necessary before #63
+can be closed or any send control can be enabled.
 
 The adapter accepts an exact `ses_` session ID, an opaque instruction ID, and
 bounded text from a trusted local caller. Its OpenCode origin and model identity
