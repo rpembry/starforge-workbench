@@ -65,6 +65,7 @@ def prepare(root, image):
                   native_extraction_s=native_ready-downloaded,
                   total_preparation_s=native_ready-began,
                   stored_bytes=sum(p.stat().st_size for p in store.iterdir() if p.is_file()),
+                  extracted_toolchain_bytes=sum(p.stat().st_size for p in (root/'toolchain').rglob('*') if p.is_file()),
                   native_toolchain_hashes=hashes,
                   conditions='Fresh registry download directory; shared Docker and OS caches retained',
                   native_setup='Extract identical BusyBox and musl; applet wrappers use private absolute paths',

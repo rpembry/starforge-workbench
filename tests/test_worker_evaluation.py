@@ -61,3 +61,78 @@ def test_failed_trial_is_kept_and_fails_reproducibility():
     assert decision['reproducibility'] == 'fail'
     assert decision['artifact_usefulness'] == 'fail'
     assert decision['conditional_expansion_authorized'] is False
+
+
+def test_cleanup_declared_budget_includes_slow_teardown():
+    assert e.cleanup_within_budget({'cleanup_upper_bound_s':30})
+    assert not e.cleanup_within_budget({'cleanup_upper_bound_s':31, 'controller_elapsed_s':1})
+    for value in (None, -1, float('inf'), float('nan'), True):
+        assert not e.cleanup_within_budget({'cleanup_upper_bound_s':value})
+    assert not e.cleanup_within_budget({'elapsed_s':1})  # historical measurements cannot pass
+
+
+def test_disk_budget_counts_download_and_native_extraction():
+    mb=1024*1024
+    assert e.disk_usage(100*mb,dict(stored_bytes=20*mb,extracted_toolchain_bytes=9*mb))['decision']=='fail'
+    assert e.disk_usage(100*mb,dict(stored_bytes=20*mb,extracted_toolchain_bytes=8*mb))['decision']=='pass'
+    assert e.disk_usage(1,dict(stored_bytes=1))['decision']=='unknown'
+
+
+def test_review_waits_for_peer_finalizer_even_on_failure(monkeypatch):
+    import threading
+    entered=threading.Event();finished=threading.Event()
+    def runner(root,repo,raw,scenario,version,index,sudo,defer):
+        assert defer
+        if version==1:
+            entered.set()
+            return ('fast',)
+        assert entered.wait(2)
+        finished.set()
+        raise RuntimeError('synthetic finalizer failure')
+    def collect(*args):
+        raise AssertionError('Review must be deferred after peer failure')
+    monkeypatch.setattr(e,'collect_trial',collect)
+    result=e.run_batch(runner,None,None,None,[('concurrent',1,0),('concurrent',2,0)],False)
+    assert 'Peer finalizer failed' in result[0]['error']
+    assert 'synthetic finalizer failure' in result[1]['error']
+
+
+def test_collection_timing_includes_recovery_and_discard(tmp_path,monkeypatch):
+    import json
+    path=tmp_path/'attempt';path.mkdir()
+    (path/'worker.json').write_text('{}')
+    receipt=dict(attempt_path=str(path),worktree=str(path/'gone'),attempt_id='fixture',
+                 phase='exited',cleanup='complete',revision='revision',unit='unit',socket='socket')
+    clock=[0.0]
+    monkeypatch.setattr(e,'uptime',lambda:clock[0])
+    def recover(*args):clock[0]+=5
+    def discard(*args):clock[0]+=26
+    monkeypatch.setattr(e,'native_stop',recover)
+    monkeypatch.setattr(e,'synthetic_cleanup',discard)
+    row=e.collect_trial(tmp_path,tmp_path,receipt,'tmux','invalid_startup',1,0,1,0,False)
+    assert row['controller_elapsed_s']==1
+    assert row['cleanup_upper_bound_s'] > 31
+    assert not e.cleanup_within_budget(row)
+
+
+def test_fast_peer_cannot_start_review_while_slow_peer_is_finalizing(monkeypatch):
+    import concurrent.futures
+    import threading
+    entered=threading.Event();release=threading.Event();reviewed=threading.Event()
+    def runner(root,repo,raw,scenario,version,index,sudo,defer):
+        if version==2:
+            entered.set()
+            assert release.wait(3)
+        return (version,)
+    def collect(version):
+        reviewed.set()
+        return {'version':version}
+    monkeypatch.setattr(e,'collect_trial',collect)
+    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+        future=pool.submit(e.run_batch,runner,None,None,None,[('concurrent',1,0),('concurrent',2,0)],False)
+        try:
+            assert entered.wait(2)
+            assert not reviewed.wait(.1)
+        finally:
+            release.set()
+        assert len(future.result(timeout=3))==2

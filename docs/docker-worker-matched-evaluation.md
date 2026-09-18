@@ -8,7 +8,36 @@ an exported patch does not retire the original dirty worktree, and preserving
 all untracked/ignored outputs requires an extra archival step. Safe retention is
 correct; the missing integrated review/archive/disposition workflow is the gap.
 
-## Evidence
+## Review correction and replacement evidence
+
+The review identified unsupported pass claims in the earlier results: cleanup
+used a controller-duration check of 40 seconds instead of the declared 30-second
+cleanup gate, disk accounting omitted downloaded and extracted toolchain data,
+and the local review lock did not cover peer subprocess finalization. The
+historical JSON below remains unchanged, but its cleanup and disk gate labels
+are superseded by [the corrected 48-trial run](evaluations/docker-workers-54-reviewed.json).
+
+The corrected run passed with a maximum cleanup upper bound of **1.06 seconds**
+and total retained runtime/cache storage of **9,173,400 bytes**: 3,855,272 cached
+image bytes + 3,846,087 fresh image-store bytes + 1,472,041 extracted binaries and
+wrappers. The unchanged limits are 30 seconds and 128 MiB. Median/max warm
+startup overhead was 0.44/0.47 seconds. Operator friction still failed.
+
+Every paired controller must finish before any host review or teardown starts.
+A failed peer finalizer defers review/teardown for the pair, preserving receipts.
+This barrier excludes host review overlapping a still-finalizing peer; it does
+not establish the cause of the old Git exit 128 or claim all possible Git races
+are fixed. Worker execution and worker-owned finalization remain concurrent.
+
+Cleanup measurement ends after review, recovery, synthetic teardown and final
+inventory. It starts at the fixture's pre-exit completion sample, or at trial
+launch for failure scenarios, adding one 10 ms clock tick for uptime truncation.
+This is a conservative **upper bound** on exit-to-cleanup duration; it includes
+barrier waiting and may reject long-running failure trials conservatively. A
+missing, negative, nonfinite or over-30-second bound cannot pass. The original
+controller-only duration is retained separately as `controller_elapsed_s`.
+
+## Historical evidence (before review corrections)
 
 | Check | Follow-up result |
 | --- | --- |
@@ -24,8 +53,8 @@ The [matched result](evaluations/docker-workers-54-matched.json) includes 48 tri
 records and the separate disposition experiment. The [previous failed matched
 run](evaluations/docker-workers-54-matched-failed.json) remains published: one
 concurrent host-side artifact-review/teardown operation returned Git exit 128,
-leaving two explicitly identified synthetic worktrees. Serializing host-only
-patch verification and teardown removed the observed failure in the rerun;
+leaving two explicitly identified synthetic worktrees. The original local review lock was incomplete, and one successful rerun
+did not establish a race fix. The barrier described above replaces that claim;
 worker execution remains concurrent. The original error did not include enough
 Git diagnostics to prove its precise cause. Those retained worktrees were then
 cleaned after recording the evidence. No acceptance threshold was changed.

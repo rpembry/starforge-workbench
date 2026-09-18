@@ -4,6 +4,7 @@ import concurrent.futures
 from collections import Counter
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shlex
@@ -147,7 +148,7 @@ def verify_patch(repo, root, receipt, patch, version):
         w.git(repo, 'worktree', 'remove', '--force', str(path))
 
 
-def docker_trial(root, repo, raw, scenario, version, index, sudo):
+def docker_trial(root, repo, raw, scenario, version, index, sudo, defer_collection=False):
     identity = uuid.uuid4().hex
     state = root/'docker'; state.mkdir(mode=0o700, exist_ok=True)
     config = root/'profile.json'
@@ -185,11 +186,11 @@ def docker_trial(root, repo, raw, scenario, version, index, sudo):
                 if 'path' in locals(): w.recover(path, sudo=sudo, cancel=True)
     receipt = read_json(path/'worker.json')
     elapsed = time.monotonic()-start
-    return collect_trial(root, repo, receipt, 'docker', scenario, version, index,
-                         elapsed, start_up, sudo)
+    pending = (root, repo, receipt, 'docker', scenario, version, index, elapsed, start_up, sudo)
+    return pending if defer_collection else collect_trial(*pending)
 
 
-def native_trial(root, repo, raw, scenario, version, index, sudo):
+def native_trial(root, repo, raw, scenario, version, index, sudo, defer_collection=False):
     identity = uuid.uuid4().hex
     path = root/('native-'+identity); path.mkdir(mode=0o700)
     tree = path/'worktree'; socket = str(path/'tmux.sock')
@@ -245,8 +246,8 @@ def native_trial(root, repo, raw, scenario, version, index, sudo):
     except (w.WorkerError, OSError) as exc:
         receipt.update(artifacts='incomplete', reason=str(exc))
     w.atomic(path/'worker.json', receipt)
-    return collect_trial(root, repo, receipt, 'tmux', scenario, version, index,
-                         time.monotonic()-start, start_up, sudo)
+    pending = (root, repo, receipt, 'tmux', scenario, version, index, time.monotonic()-start, start_up, sudo)
+    return pending if defer_collection else collect_trial(*pending)
 
 
 def native_stop(unit, socket):
@@ -265,7 +266,7 @@ def native_stop(unit, socket):
 def collect_trial(root, repo, receipt, backend, scenario, version, index, elapsed, start_up, sudo):
     tree = Path(receipt['worktree']); path = Path(receipt['attempt_path'])
     row = dict(backend=backend, attempt_id=receipt['attempt_id'], scenario=scenario, index=index,
-               dependency_version=version, elapsed_s=elapsed, phase=receipt['phase'],
+               dependency_version=version, controller_elapsed_s=elapsed, phase=receipt['phase'],
                reason=receipt.get('reason'),
                exit_code=receipt.get('exit_code'), artifacts=receipt.get('artifacts'),
                runner_cleanup=receipt['cleanup'], revision=receipt['revision'],
@@ -310,6 +311,16 @@ def collect_trial(root, repo, receipt, backend, scenario, version, index, elapse
     synthetic_cleanup(repo, receipt, sudo)
     row['fixture_discard_complete'] = not tree.exists()
     row['remaining_container'] = bool(w.inspect_container(w.docker_prefix(sudo), receipt)) if backend == 'docker' else False
+    finished = uptime()
+    row['elapsed_s'] = max(0, finished-start_up) + .01
+    # Fixture completion is sampled before its final write/exit; failures use
+    # launch time. Both are conservative lower bounds on process exit. Include
+    # the pair barrier, review, recovery, teardown and final inventory, plus one
+    # clock tick so uptime truncation cannot understate the bound.
+    cleanup_origin = row.get('assertions', {}).get('done', start_up)
+    row['cleanup_upper_bound_s'] = max(0, finished-cleanup_origin) + .01
+    row['cleanup_clock_origin'] = 'fixture_pre_exit' if 'assertions' in row else 'trial_start'
+    row['observed_end_at'] = w.stamp()
     return row
 
 
@@ -345,6 +356,49 @@ def boundary_probe(root, repo, raw, sudo):
                 configuration_verified_before_start=boundary_ok, attempt_id=result['attempt_id'])
 
 
+def cleanup_within_budget(row):
+    value = row.get('cleanup_upper_bound_s')
+    return (type(value) in (int, float) and math.isfinite(value)
+            and 0 <= value <= THRESHOLDS['cleanup_s'])
+
+
+def disk_usage(image_bytes, preparation=None):
+    components = {'cached_image_bytes': image_bytes}
+    if preparation is not None:
+        for key in ('stored_bytes', 'extracted_toolchain_bytes'):
+            components[key] = preparation.get(key)
+    known = all(type(v) is int and v >= 0 for v in components.values())
+    total = sum(components.values()) if known else None
+    return {'components': components, 'total_bytes': total,
+            'decision': 'unknown' if total is None else
+            ('pass' if total <= THRESHOLDS['image_budget_bytes'] else 'fail')}
+
+
+def run_batch(runner, root, repo, raw, specs, sudo):
+    # Join every controller/finalizer BEFORE host artifact review starts. A local
+    # review lock alone cannot coordinate with peer Docker subprocesses.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(specs)) as pool:
+        futures = [pool.submit(runner, root, repo, raw, *spec, sudo, True) for spec in specs]
+        concurrent.futures.wait(futures)
+        outcomes = []
+        if any(future.exception() is not None for future in futures):
+            # Do not mutate shared Git administration if a peer's finalization
+            # failed. Private ownership receipts remain for explicit recovery.
+            for future, spec in zip(futures, specs):
+                exc = future.exception()
+                outcomes.append(dict(scenario=spec[0], dependency_version=spec[1], index=spec[2],
+                                     error=(type(exc).__name__+': '+str(exc)) if exc else
+                                     'Peer finalizer failed; artifact review and teardown deferred'))
+            return outcomes
+        for future, spec in zip(futures, specs):
+            try:
+                outcomes.append(collect_trial(*future.result()))
+            except Exception as exc:
+                outcomes.append(dict(scenario=spec[0], dependency_version=spec[1], index=spec[2],
+                                     error=type(exc).__name__+': '+str(exc)))
+        return outcomes
+
+
 def evaluate(rows, boundaries):
     successful = [r for r in rows if r['scenario'] in ('sequential', 'concurrent')]
     docker = [r for r in rows if r['backend'] == 'docker']
@@ -364,7 +418,7 @@ def evaluate(rows, boundaries):
     runtime_pass = bool(metrics) and metrics['median_launch_overhead_s'] <= THRESHOLDS['median_launch_overhead_s'] and metrics['max_launch_overhead_s'] <= THRESHOLDS['max_launch_overhead_s'] and metrics['docker_median_command_s'] <= THRESHOLDS['runtime_ratio']*metrics['native_median_command_s']+THRESHOLDS['short_runtime_allowance_s']
     pairs = [r for r in docker if r['scenario'] == 'concurrent']
     isolation = len(pairs) == 6 and len({r.get('attempt_id') for r in pairs}) == 6 and all(r.get('assertions',{}).get('dependency_version') == r['dependency_version'] for r in pairs)
-    cleanup = complete and all(r.get('tracked_before_fixture_discard') and r.get('fixture_discard_complete') and r.get('second_cleanup_harmless') and not r.get('remaining_container') and r.get('elapsed_s',float('inf')) <= 40 for r in rows)
+    cleanup = complete and all(r.get('tracked_before_fixture_discard') and r.get('fixture_discard_complete') and r.get('second_cleanup_harmless') and not r.get('remaining_container') and cleanup_within_budget(r) for r in rows)
     artifacts = len(successful) == 32 and all(r.get('patch_applies_and_asserts') and r.get('export_hashes_valid') for r in successful)
     artifacts &= all(r.get('unsafe_artifact_rejected') and r.get('preserved') for r in rows if r['scenario'] == 'failed_export')
     # A shell fixture can show correctness/isolation, but not the ADR's unique
@@ -424,14 +478,10 @@ def main():
             for scenario, version, index in trial_plan():
                 if scenario == 'concurrent' and version == 2: continue
                 specs = [(scenario,version,index)] if scenario != 'concurrent' else [(scenario,v,index) for v in (1,2)]
-                with concurrent.futures.ThreadPoolExecutor(max_workers=len(specs)) as pool:
-                    futures = [pool.submit(runner,root,repo,raw,*spec,args.sudo) for spec in specs]
-                    for future, spec in zip(futures,specs):
-                        try: row = future.result()
-                        except Exception as exc:
-                            row = dict(backend=backend,scenario=spec[0],dependency_version=spec[1],index=spec[2],error=type(exc).__name__+': '+str(exc))
-                        result['trials'].append(row)
-                        w.atomic(root/'results.json',result)
+                for row in run_batch(runner, root, repo, raw, specs, args.sudo):
+                    row.setdefault('backend', backend)
+                    result['trials'].append(row)
+                    w.atomic(root/'results.json',result)
                 print(backend,scenario,index,flush=True)
     result['base_checkout_unchanged'] = not w.git(repo,'status','--porcelain','--ignored')
     result['remaining_worktrees'] = w.git(repo,'worktree','list','--porcelain').decode().count('worktree ')-1
@@ -441,7 +491,8 @@ def main():
         result['decision']['cold_preparation'] = 'pass' if result['preparation']['total_preparation_s'] <= THRESHOLDS['cold_prepare_s'] else 'fail'
         result['decision']['remaining_evidence'] = ['Measure ordinary edit disposition and operator cleanup actions.', 'Demonstrate a concrete workload benefit beyond equally isolated native worktrees.']
     result['decision']['base_checkout_unchanged'] = result['base_checkout_unchanged']
-    result['decision']['image_disk_budget'] = 'pass' if image['Size'] <= THRESHOLDS['image_budget_bytes'] else 'fail'
+    result['disk_usage'] = disk_usage(image['Size'], result.get('preparation'))
+    result['decision']['image_disk_budget'] = result['disk_usage']['decision']
     if args.matched_toolchain:
         from .evaluation_disposition import exercise
         result['disposition'] = exercise(root/'disposition',raw,args.sudo)

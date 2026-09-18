@@ -87,3 +87,7 @@ work. Image size is Docker's reported cached size, not registry transfer size.
 Native controller interruption kills the private tmux server; Docker interruption
 kills its controller process, then invokes one explicit recovery operation.
 These mechanisms differ and are recorded, not equated to provider interruption.
+
+Review correction: older cleanup/disk pass labels lacked complete measurements.
+Use the [corrected gate evidence](docker-worker-matched-evaluation.md#review-correction-and-replacement-evidence);
+original observations remain preserved.

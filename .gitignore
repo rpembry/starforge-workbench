@@ -71,3 +71,4 @@ config/workbench.yaml
 !/docs/evaluations/docker-workers-54.json
 !/docs/evaluations/docker-workers-54-matched.json
 !/docs/evaluations/docker-workers-54-matched-failed.json
+!/docs/evaluations/docker-workers-54-reviewed.json

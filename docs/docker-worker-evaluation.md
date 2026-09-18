@@ -100,3 +100,7 @@ production operator friction remain open; conditional expansion is not approved.
 The [matched-toolchain follow-up](docker-worker-matched-evaluation.md) measures
 cold task preparation and edit disposition; the latter fails the operator-friction
 gate. The recommendation remains iterate, with a specific bounded next change.
+
+Review correction: older cleanup/disk pass labels lacked complete measurements.
+Use the [corrected gate evidence](docker-worker-matched-evaluation.md#review-correction-and-replacement-evidence);
+original observations remain preserved.
