@@ -406,6 +406,10 @@ def main():
     launch.add_argument('argv', nargs=argparse.REMAINDER)
     for name in ('inspect', 'recover', 'cancel'):
         sub.add_parser(name).add_argument('attempt', type=Path)
+    sub.add_parser('review').add_argument('attempt', type=Path)
+    dispose_parser = sub.add_parser('dispose')
+    dispose_parser.add_argument('attempt',type=Path)
+    dispose_parser.add_argument('--review-sha256',required=True)
     args = parser.parse_args()
     try:
         if args.operation == 'run':
@@ -415,6 +419,9 @@ def main():
             argv = args.argv[1:] if args.argv[:1] == ['--'] else args.argv
             result = run_worker(raw, args.repository, args.revision, args.state_root, args.task,
                                 argv, args.artifact, args.sudo)
+        elif args.operation in ('review','dispose'):
+            from .worker_disposition import review, dispose
+            result = review(args.attempt,args.sudo) if args.operation == 'review' else dispose(args.attempt,args.review_sha256,args.sudo)
         elif args.operation == 'inspect':
             path, receipt = load_attempt(args.attempt)
             try:

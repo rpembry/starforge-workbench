@@ -99,3 +99,7 @@ zero-manual-cleanup gate. Separately, select a representative real toolchain
 conflict before claiming a reason to expand Docker. Keep native as the default;
 provider credentials, richer lifecycle integration and service fixtures remain
 gated/deferred.
+
+Follow-up implementation: [reviewed-work disposition result](docker-worker-disposition-results.md)
+exercises the public archive/dispose flow and closes the measured cleanup-command
+gap for supported fixtures. The original observations above remain unchanged.

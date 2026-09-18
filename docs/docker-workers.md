@@ -110,3 +110,45 @@ The checks cover concurrent edits, restricted runtime, retained artifacts,
 idempotent cleanup, timeout, cancellation, unavailable commands and rejected
 creation. They establish basic runner behavior, not provider compatibility or the
 cost/benefit decision in #54.
+
+## Review and archive retained work
+
+A completed command can leave changes that normal cleanup intentionally retains.
+Use the explicit review/dispose flow after reviewing the patch and deciding how
+to accept its source changes:
+
+```sh
+uv run python -m starforge_workbench.docker_worker review /path/to/attempt
+# Inspect the returned review_manifest, existing artifacts, and retained work.
+uv run python -m starforge_workbench.docker_worker dispose /path/to/attempt \
+  --review-sha256 EXACT_REVIEW_SHA256
+```
+
+Use `--sudo` before the subcommand if required for Docker observation. The review
+hash pins a byte-and-mode inventory; it is not authentication or proof that a
+person reviewed it. Disposal is an explicit operation, not implied by exit zero,
+patch acceptance elsewhere, an attention alert, or `recover`.
+
+The operation requires complete artifacts, a terminal attempt, no remaining owned
+container, the controller lock, matching repository/worktree ownership and an
+unchanged review snapshot. It inventories tracked, untracked and ignored files,
+empty directories, scratch, and exported artifacts. This initial version refuses
+staged changes, changed HEAD, symlinks, hardlinks, special files, more than 10,000
+entries or more than 128 MiB of payload. Unsupported work stays available for
+manual review; it is never silently omitted from an archive.
+
+Disposal moves the original worktree and scratch directories into the attempt's
+private `archive/`, flushes files/directories, rechecks the inventory, then removes
+only the missing old worktree registration using Git without `--force` or a global
+prune. Artifacts retain their existing paths. The private journal is written before
+moves, making retries safe after interrupted moves or unregistration. Original
+file bytes remain in the archive; there is no automatic archive purge. The
+archive's old `.git` pointer is historical metadata, not a usable checkout—restore
+source files into a fresh worktree rather than resuming Git inside the archive.
+
+Do not edit the attempt concurrently with review/disposal. The controller lock
+coordinates Workbench commands, not arbitrary editors. Detected changes or a
+reappearing source path stop the operation and preserve both locations. If failure
+occurs before moves, create a fresh review after resolving changes. After moves,
+retry the same approved token; changed archives or ambiguous state require manual
+inspection. `dispose` never repairs that ambiguity by deleting either copy.
