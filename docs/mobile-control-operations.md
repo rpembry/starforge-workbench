@@ -84,7 +84,9 @@ session, isolated provider state, synthetic text, and no production credential.
 4. Review the systemd unit with `systemd-analyze security` and
    `systemctl --user cat workbench-instruction-worker.service`. Confirm its
    executable, credential/config paths, read-only home policy, sole writable
-   delivery-state path, and network requirements match the host.
+   delivery-state path, and network requirements match the host. Keep the host
+   `/tmp` view: exact-registration validation must read the existing tmux
+   socket, so `PrivateTmp=true` would make the worker fail closed.
 5. Complete the disposable acceptance checklist below. Enabling requires a
    separate deployment authorization. When authorized, enable the server claim
    gate first, then set the local worker's `enabled` value to `true` atomically.

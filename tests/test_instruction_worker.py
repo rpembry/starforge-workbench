@@ -1,6 +1,7 @@
 """Synthetic worker checks: no live server, provider, or conversation input."""
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -12,6 +13,12 @@ from workbench.repository import SQLiteRepository
 
 
 REGISTERED = 'registered_synthetic_0001'
+
+
+def test_worker_unit_preserves_host_tmux_socket_view():
+    unit = (Path(__file__).resolve().parents[1] / 'deploy/workbench-instruction-worker.service').read_text()
+    assert 'PrivateTmp=false' in unit
+    assert 'PrivateTmp=true' not in unit
 INSTRUCTION = 'instruction_synthetic_001'
 SESSION = 'ses_synthetic_session_001'
 
