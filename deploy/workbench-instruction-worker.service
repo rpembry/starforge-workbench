@@ -2,12 +2,12 @@
 Description=AI Workbench local OpenCode instruction worker (opt-in)
 StartLimitIntervalSec=0
 ConditionPathExists=%h/.config/starforge-ai-workbench/instruction-worker.json
-After=network-online.target
+After=network-online.target workbench-opencode-api.service workbench-opencode-publisher.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/share/starforge-ai-workbench/collector-current/.venv/bin/python -m starforge_workbench.instruction_worker --config %h/.config/starforge-ai-workbench/instruction-worker.json --credentials-file %h/.config/starforge-ai-workbench/collector.json
+ExecStart=%h/.local/share/starforge-ai-workbench/collector-current/.venv/bin/python -m starforge_workbench.instruction_worker --config %h/.config/starforge-ai-workbench/instruction-worker.json --credentials-file %h/.config/starforge-ai-workbench/instruction-collector.json
 UnsetEnvironment=WB_API_URL WB_CLIENT_CONFIG WB_CREDENTIALS_FILE
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
