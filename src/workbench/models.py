@@ -188,6 +188,54 @@ class RegisteredSessionIn(Model):
         return EventIn.aware_time(value)
 
 
+InstructionIdempotencyKey = Annotated[str, Field(pattern=r'^[A-Za-z0-9._~-]{16,128}$')]
+InstructionLeaseToken = Annotated[str, Field(pattern=r'^[A-Za-z0-9_-]{32,128}$')]
+
+
+class InstructionIn(Model):
+    idempotency_key: InstructionIdempotencyKey
+    registered_session_id: RegisteredSessionIdentity
+    text: Annotated[str, Field(min_length=1, max_length=2000)]
+    expiry_minutes: Annotated[int, Field(ge=1, le=60)] = 15
+
+    @field_validator('text')
+    @classmethod
+    def plain_text(cls, value):
+        if any(ord(character) < 32 and character not in {'\n', '\t'} or 127 <= ord(character) <= 159
+               for character in value):
+            raise ValueError('Instruction contains a disallowed control character')
+        return value
+
+
+class InstructionClaimIn(Model):
+    registered_session_id: RegisteredSessionIdentity
+
+
+class InstructionLeaseIn(Model):
+    lease_token: InstructionLeaseToken
+
+
+class InstructionResultIn(InstructionLeaseIn):
+    outcome: Literal['retryable', 'received', 'responded', 'failed', 'uncertain']
+    reason_code: Literal['provider_unavailable', 'session_busy', 'provider_accepted',
+                         'provider_response_error', 'provider_response_without_error',
+                         'provider_rejected', 'session_missing', 'unsupported_provider',
+                         'acknowledgement_lost', 'delivery_ambiguous', 'worker_interrupted']
+
+    @model_validator(mode='after')
+    def matching_reason(self):
+        valid = {
+            'retryable': {'provider_unavailable', 'session_busy'},
+            'received': {'provider_accepted'},
+            'responded': {'provider_response_error', 'provider_response_without_error'},
+            'failed': {'provider_rejected', 'session_missing', 'unsupported_provider'},
+            'uncertain': {'acknowledgement_lost', 'delivery_ambiguous', 'worker_interrupted'},
+        }
+        if self.reason_code not in valid[self.outcome]:
+            raise ValueError('Reason code does not match instruction outcome')
+        return self
+
+
 class ProviderGenerationIn(Model):
     provider: Literal['opencode']
     session_id: ProviderIdentity
