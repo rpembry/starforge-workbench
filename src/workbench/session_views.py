@@ -1,6 +1,8 @@
 """Presentation of registered-session evidence without provider content."""
 from datetime import datetime, timezone
 
+from .repository import Problem
+
 
 EVIDENCE_LABELS = {
     'present': 'Present',
@@ -58,10 +60,16 @@ def display_session(row, repository, current=None):
     item['action_title'] = None
     item['objective_title'] = None
     if row['run_id'] and row['action_id']:
-        run = repository.get('runs', row['run_id'])
-        if run['action_id'] == row['action_id']:
-            action = repository.get('actions', row['action_id'])
-            item['action_title'] = action['title']
-            if action['objective_id']:
-                item['objective_title'] = repository.get('objectives', action['objective_id'])['title']
+        try:
+            run = repository.get('runs', row['run_id'])
+            if run['action_id'] == row['action_id']:
+                action = repository.get('actions', row['action_id'])
+                item['action_title'] = action['title']
+                if action['objective_id']:
+                    item['objective_title'] = repository.get('objectives', action['objective_id'])['title']
+        except Problem as exc:
+            if exc.status != 404:
+                raise
+            # Keep the session visible when a linked record cannot be resolved.
+            # Never invent an association from the stored IDs alone.
     return item

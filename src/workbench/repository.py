@@ -34,6 +34,10 @@ TRANSITIONS = {
     'done': set(), 'rejected': set(), 'canceled': set(),
 }
 
+SESSION_STALE_AFTER_SECONDS = 30
+SESSION_HOST_OFFLINE_AFTER_SECONDS = 90
+SESSION_MAX_FUTURE_SKEW_SECONDS = 300
+
 
 class SQLiteRepository:
     def __init__(self, path: Path):
@@ -253,7 +257,7 @@ class SQLiteRepository:
         from datetime import datetime, timedelta, timezone
         data = dict(data)
         observed = datetime.fromisoformat(data['observed_at'])
-        if observed > datetime.now(timezone.utc) + timedelta(minutes=5):
+        if observed > datetime.now(timezone.utc) + timedelta(seconds=SESSION_MAX_FUTURE_SKEW_SECONDS):
             raise Problem(422, 'future_observation', 'Observation time is too far in the future')
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -278,7 +282,7 @@ class SQLiteRepository:
             if old:
                 if data['observation_sequence'] <= old['observation_sequence']:
                     raise Problem(409, 'observation_sequence', 'Observation sequence must increase')
-                if data['observed_at'] <= old['observed_at']:
+                if observed <= datetime.fromisoformat(old['observed_at']):
                     raise Problem(409, 'observation_clock', 'Observation time must increase')
                 if any(old[k] != data[k] for k in ('host', 'display_name', 'provider')):
                     raise Problem(409, 'registration_identity', 'Registered session identity cannot change')
@@ -310,7 +314,8 @@ class SQLiteRepository:
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(row['heartbeat_at'])).total_seconds()
         host_age = (datetime.now(timezone.utc) - datetime.fromisoformat(host_heartbeat_at)).total_seconds()
         row['heartbeat_age_seconds'] = max(0, int(age))
-        row['visibility'] = 'offline' if host_age > 90 else ('stale' if age > 30 else 'fresh')
+        row['visibility'] = ('offline' if host_age > SESSION_HOST_OFFLINE_AFTER_SECONDS
+                             else 'stale' if age > SESSION_STALE_AFTER_SECONDS else 'fresh')
         return row
 
     def list_registered_sessions(self, limit=100, offset=0):
