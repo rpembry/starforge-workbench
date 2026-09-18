@@ -1,98 +1,183 @@
-# OpenCode delivery: live validation
+# OpenCode delivery: synthetic live validation
 
-Validated on 2026-09-17 with OpenCode 1.18.31 against a disposable synthetic
-OpenAI-compatible mock provider. This was a deliberate disposable integration
-test for the issue-61 delivery spike, separate from automated fixture
-coverage. Existing development sessions were not used as test subjects.
+Validated on 2026-09-17 with OpenCode 1.18.31 and a disposable synthetic,
+OpenAI-shaped mock provider. This was a deliberate integration spike,
+separate from automated fixture coverage. Existing development sessions were
+not opened, resumed, or sent input.
 
 ## Isolation and method
 
 A loopback-only OpenCode server (`127.0.0.1:4098`, `--hostname 127.0.0.1
 --port 4098 --pure --print-logs`) used separate XDG configuration, data,
-cache and state under `spike/oc-61/` inside this worktree; nothing else was
-hooked into the environment. The configured provider (`openai`,
-`baseURL http://127.0.0.1:4097/v1`) pointed at a synthetic mock
-(`spike/oc-61/mock_provider.py`; deterministic completions, configurable
-`MOCK_DELAY_MS`). All prompts were synthetic and clearly labelled. The server
-warned `OPENCODE_SERVER_PASSWORD is not set; server is unsecured`; it was
-never exposed beyond loopback (`ss` confirmed both listeners bound to
-`127.0.0.1`). No existing sessions, databases or deployments were touched.
-Raw sanitized probe records (method/path/status/field evidence only) live in
-`spike/oc-61/evidence/` and are not committed under the default-deny ignore
-policy.
+cache, and state directories inside this worktree. The configured provider
+pointed to a synthetic mock on `127.0.0.1:4097`. All prompts and identifiers
+were synthetic. The unsecured test server was never exposed beyond loopback;
+`ss` confirmed both listeners were bound to `127.0.0.1`.
+
+The original run used ignored worktree-local scripts and retained raw synthetic
+responses only in ignored local state. The committed
+[`deploy/oc-delivery-smoke.py`](../deploy/oc-delivery-smoke.py) reconstructs the
+loopback mock, writes a fresh isolated configuration, and emits sanitized
+structural probe results. Its probe output never includes prompt text,
+assistant text, error messages, response bodies, message metadata paths,
+headers, or credentials.
+The full experiment sequence was not rerun merely to replace the helper, so
+the evidence below remains the 2026-09-17 observation against version 1.18.31.
 
 ## Results
 
-| Check | Result |
+| Check | Observed result |
 | --- | --- |
-| Exact-session addressing | `GET /session/{id}` → 200 echo; `GET /session/ses___nonexistent___` → 404 `NotFoundError`. After `DELETE /session/{id}` → 200, id-addressable lookups → 404. |
-| Client-supplied message identity | `POST /session/{id}/message` with `messageID: msg_...` → 200; the message record is stored *under the client's id*, and the assistant message carries `parentID` equal to that client id. |
-| Client-addressed message lookup | `GET /session/{id}/message/{clientID}` → 200 when admitted, 404 `Message not found` when not. |
-| Acceptance acknowledgement | `POST /session/{id}/message` → 200 only after the turn completes; `POST /session/{id}/prompt_async` → 204 immediately; `POST /api/session/{id}/prompt` → 200 `SessionInputAdmitted` with `admittedSeq`. |
-| Retry duplication risk | Resending the *same* `messageID` returns 200 but appends a second text part to the same message (no server-side dedup). Same text with a *new* `messageID` creates a distinct message. |
-| Busy session | While a generation is in flight: `POST /api/session/{id}/wait` → 503 `ServiceUnavailableError`; `DELETE /session/{id}/message/...` → 409 `SessionBusyError`; `prompt_async` and `/api/.../prompt` (`delivery: queue`/`steer`) still admit → 204 / 200 with sequences; a synchronous `POST .../message` admits the user message but the call waits on the busy generation (no rejection, can hang). |
-| Later-output correlation | `GET /session/{id}/message` returns the full graph; each assistant message links back to the client-supplied user message via `parentID`. The durable SSE `GET /api/session/{id}/event` is documented to deliver `msg_`-keyed events (`PrompAdmitted` with `admittedSeq`, step/text started/ended, step failed) but emitted no frames during the bounded capture window. |
-| Loop/termination artifact | Against text-only synthetic completions the build-agent loop never emitted a finish, producing unbounded consecutive assistant turns (interrupted via `POST /api/session/{id}/interrupt` → 204). This affects how a synchronous `POST`/acceptance is interpreted, not the admission path. |
+| Exact-session addressing | `GET /session/{id}` returned 200 with the same synthetic ID; a nonexistent ID returned 404 `NotFoundError`. After `DELETE /session/{id}` returned 200, ID-addressable lookups returned 404. |
+| Client-supplied message identity | With `noReply: true`, `POST /session/{id}/message` using a client-selected `messageID` returned 200 and stored the user message under that ID. A generated assistant record, when present, linked to the client ID through `parentID`. |
+| Client-addressed message lookup | `GET /session/{id}/message/{clientID}` returned 200 for a stored message and 404 `Message not found` for an unused ID. |
+| API status versus assistant outcome | An early synchronous message request returned HTTP 200 **with an assistant `info.error`** (`APIError`, synthetic upstream 404). That was API completion, not a successful provider response. Separate later records demonstrated `parentID` correlation and text-part creation, but the synthetic provider did not produce a bounded successful end-to-end turn. |
+| Acceptance acknowledgement | Synchronous `POST /session/{id}/message` did not return until the attempted turn ended. `POST /session/{id}/prompt_async` returned 204 immediately. `POST /api/session/{id}/prompt` returned 200 `SessionInputAdmitted` with `admittedSeq`. These statuses establish API admission/completion only, not successful assistant output. |
+| Retry duplication risk | Resending the same accepted `messageID` returned 200 but appended a second text part to the same message. The server did not deduplicate it. The same text under a new `messageID` created a distinct message. |
+| Busy session | During an in-flight generation, `POST /api/session/{id}/wait` returned 503 `ServiceUnavailableError`; message deletion returned 409 `SessionBusyError`; `prompt_async` and `/api/.../prompt` with `delivery: queue` or `steer` still admitted input; a synchronous message request timed out while the user record was present. |
+| Later-output correlation | Message records linked assistant records to the client-supplied user ID through `parentID`. A bounded subscription to `GET /api/session/{id}/event` produced no frames, so durable SSE correlation and replay remain unverified. |
+| Loop/termination artifact | The narrow synthetic Responses API implementation did not give OpenCode the finish behavior it expected. OpenCode produced consecutive assistant records until `POST /api/session/{id}/interrupt` returned 204. This prevents treating synchronous HTTP completion as evidence of a normal provider turn. |
 
 ## Findings and decisions
 
-- **Exact addressing** is available at request time for sessions and messages;
-  both `ses_`/`msg_` ids are client-visible and stable under an exact id.
-- **Client-originated identity** is the only idempotency affordance OpenCode
-  exposes: the caller chooses `messageID` and can re-address that exact record.
-  There is no server-side request dedup, so blind retry of a timed-out POST
-  duplicates parts and re-runs the generation.
-- **Idempotency decision (honest `uncertain`)**: no provider-enforced
-  idempotency control exists in this API. The reliable client pattern is —
-  on an ambiguous outcome, `GET /session/{id}/message/{clientID}`: 200 means
-  accepted (never resubmit that id); 404 means not accepted (safe to submit
-  once). Resending an accepted id appends rather than replays.
-- **Acceptance vs output separation**: `prompt_async`/`/api prompt` give
-  explicit in-time admission (204 / 200 with `admittedSeq`); the synchronous
-  message POST conflates admission with completion and can block indefinitely
-  on a never-finishing provider. Delivery callers should use admitted
-  acknowledgement semantics plus id-addressable lookup for correlation.
-- **Busy behavior**: admission endpoints remain available while busy, but
-  read-mutating and generation-coupled synchronous calls are rejected (409)
-  or blocked (503 / hang). The contract should prefer `delivery: queue` while
-  busy and treat long synchronous POSTs as `uncertain` until looked up.
-- The `docs/adr-remote-session-control.md` contract (PR #67) should adopt:
-  client-chosen `messageID` + id-addressable lookup as the correlation and
-  retry-control mechanism, `prompt_async`/`/api prompt` for acceptance
-  semantics, `wait`/`interrupt` for busy control, and a documented bound on
-  how long a synchronous submit may wait.
+- **Exact addressing** is available for sessions and stored messages. Both
+  `ses_` and `msg_` identities are client-visible.
+- **No provider-enforced idempotency was observed.** A client-selected
+  `messageID` provides correlation, but resubmitting an accepted ID mutates the
+  stored message and can repeat work.
+- **Ambiguous delivery remains `uncertain`.** After a timeout, a 200 lookup is
+  evidence that a record with the client ID exists and therefore must not be
+  resubmitted. A 404 does **not** make retry safe: the original request could
+  still be in flight, not yet visible, or accepted just after the lookup. This
+  spike did not establish a grace period or terminal negative acknowledgement
+  that converts that ambiguity into safe retry.
+- **HTTP and assistant outcomes are separate.** A synchronous HTTP 200 can
+  contain an assistant record with `info.error`. A delivery adapter must inspect
+  the returned or subsequently addressed assistant record and distinguish
+  `error`, `completed_without_error`, and not-yet-completed. Even
+  `completed_without_error` is only provider-turn evidence; it does not prove
+  the requested work succeeded or completed.
+- **Busy admission is observable but not exactly-once.** Queue/steer admission
+  remains available while busy, but a lost acknowledgement still has the same
+  uncertainty. The surrounding contract must not convert admission into
+  delivered output or blindly retry it.
+- The provider-neutral contract should therefore retain an explicit
+  `uncertain` state. No tmux fallback is equivalent to provider admission, and
+  this spike does not justify a remote-control implementation by itself.
 
 ## Reproducible smoke procedure
 
-1. `MOCK_DELAY_MS=4000 nohup python3 spike/oc-61/mock_provider.py &`
-   (listens `127.0.0.1:4097`).
-2. Start a disposable server:
-   `XDG_CONFIG_HOME=spike/oc-61/config XDG_DATA_HOME=spike/oc-61/data
-   XDG_STATE_HOME=spike/oc-61/state XDG_CACHE_HOME=spike/oc-61/cache nohup
-   /home/rpembry/.opencode/bin/opencode serve --hostname 127.0.0.1 --port
-   4098 --pure --print-logs &`.
-3. Create a session (`POST /session`), then exercise:
-   exact lookup (200/404), `msg_`-identified submission (200, `parentID`
-   echo), id-addressable message lookup (200/404), same-id resubmit (200,
-   part appended), new-id resubmit (200, new message), `prompt_async` (204).
-4. Busy window: with `MOCK_DELAY_MS=30000`, submit via `prompt_async`, then
-   probe `wait` (503), message delete (409), `/api/session/{id}/prompt` with
-   `delivery: queue` and `steer` (200, `admittedSeq`), and a synchronous
-   `message` POST (admitted but call waits).
-5. Interrupt (`POST /api/session/{id}/interrupt` → 204) and delete the
-   session (200); confirm id-addressable lookups return 404. Sanitized probe
-   records are written by `spike/oc-61/probe.py` and reviewed before use.
+Run this only against a fresh disposable OpenCode server. Do not target an
+existing server, session, data directory, or provider credential.
+
+1. Confirm the binary under test and create private disposable state from this
+   checkout:
+
+   ```sh
+   opencode --version
+   umask 077
+   export SMOKE_ROOT="$(mktemp -d -p "$PWD" .oc-delivery-smoke.XXXXXX)"
+   mkdir "$SMOKE_ROOT/data" "$SMOKE_ROOT/state" "$SMOKE_ROOT/cache"
+   python3 deploy/oc-delivery-smoke.py write-config "$SMOKE_ROOT/config" 4097
+   printf 'Use this SMOKE_ROOT in each terminal: %s\n' "$SMOKE_ROOT"
+   ```
+
+2. In a second terminal, start the synthetic provider in the foreground. A
+   30-second delay creates a bounded busy window:
+
+   ```sh
+   python3 deploy/oc-delivery-smoke.py mock 4097 30000
+   ```
+
+3. In a third terminal, set `SMOKE_ROOT` to the exact absolute path printed in
+   step 1, then start OpenCode in the foreground with only the disposable XDG
+   roots:
+
+   ```sh
+   export SMOKE_ROOT=/absolute/path/printed-in-step-1
+   env \
+     XDG_CONFIG_HOME="$SMOKE_ROOT/config" \
+     XDG_DATA_HOME="$SMOKE_ROOT/data" \
+     XDG_STATE_HOME="$SMOKE_ROOT/state" \
+     XDG_CACHE_HOME="$SMOKE_ROOT/cache" \
+     opencode serve --hostname 127.0.0.1 --port 4098 --pure --print-logs
+   ```
+
+4. In the first terminal, confirm both listeners are loopback-only, then create
+   synthetic request files. These files contain no real prompt or provider
+   data:
+
+   ```sh
+   ss -ltn '( sport = :4097 or sport = :4098 )'
+   printf '%s\n' '{"title":"synthetic-delivery-smoke"}' >"$SMOKE_ROOT/session.json"
+   printf '%s\n' '{"messageID":"msg_spike_repeat","noReply":true,"model":{"providerID":"openai","modelID":"gpt-6-astra"},"parts":[{"type":"text","text":"SYNTHETIC IDEMPOTENCY PROBE"}]}' >"$SMOKE_ROOT/no-reply.json"
+   printf '%s\n' '{"messageID":"msg_spike_busy","model":{"providerID":"openai","modelID":"gpt-6-astra"},"parts":[{"type":"text","text":"SYNTHETIC BUSY PROBE"}]}' >"$SMOKE_ROOT/busy.json"
+   printf '%s\n' '{"id":"msg_spike_queue","prompt":{"text":"SYNTHETIC QUEUE PROBE"},"delivery":"queue"}' >"$SMOKE_ROOT/queue.json"
+   ```
+
+5. Create the session and copy its synthetic `ses_` ID from the sanitized
+   output into `SESSION_ID`:
+
+   ```sh
+   python3 deploy/oc-delivery-smoke.py probe post /session "$SMOKE_ROOT/session.json"
+   export SESSION_ID=ses_REPLACE_WITH_SYNTHETIC_ID
+   python3 deploy/oc-delivery-smoke.py probe get "/session/$SESSION_ID"
+   python3 deploy/oc-delivery-smoke.py probe get /session/ses___nonexistent___
+   ```
+
+6. Demonstrate client identity and lack of deduplication without invoking the
+   provider. The first exact lookup should summarize one text part; after the
+   same-ID resubmit it should summarize two:
+
+   ```sh
+   python3 deploy/oc-delivery-smoke.py probe post "/session/$SESSION_ID/message" "$SMOKE_ROOT/no-reply.json"
+   python3 deploy/oc-delivery-smoke.py probe get "/session/$SESSION_ID/message/msg_spike_repeat"
+   python3 deploy/oc-delivery-smoke.py probe post "/session/$SESSION_ID/message" "$SMOKE_ROOT/no-reply.json"
+   python3 deploy/oc-delivery-smoke.py probe get "/session/$SESSION_ID/message/msg_spike_repeat"
+   python3 deploy/oc-delivery-smoke.py probe get "/session/$SESSION_ID/message/msg_spike_missing"
+   ```
+
+7. Exercise admission while busy. Run the first command, then issue the others
+   during the mock delay:
+
+   ```sh
+   python3 deploy/oc-delivery-smoke.py probe post "/session/$SESSION_ID/prompt_async" "$SMOKE_ROOT/busy.json"
+   python3 deploy/oc-delivery-smoke.py probe post-empty "/api/session/$SESSION_ID/wait"
+   python3 deploy/oc-delivery-smoke.py probe post "/api/session/$SESSION_ID/prompt" "$SMOKE_ROOT/queue.json"
+   PROBE_TIMEOUT=2 python3 deploy/oc-delivery-smoke.py probe post "/session/$SESSION_ID/message" "$SMOKE_ROOT/busy.json"
+   python3 deploy/oc-delivery-smoke.py probe get "/session/$SESSION_ID/message/msg_spike_busy"
+   ```
+
+   A 200 lookup after the timeout means do not resubmit. A 404 leaves delivery
+   uncertain and is not permission to retry.
+
+8. Interrupt and delete only the disposable synthetic session, stop both
+   foreground servers, and remove the disposable directory after reviewing its
+   exact path:
+
+   ```sh
+   python3 deploy/oc-delivery-smoke.py probe post-empty "/api/session/$SESSION_ID/interrupt"
+   python3 deploy/oc-delivery-smoke.py probe delete "/session/$SESSION_ID"
+   python3 deploy/oc-delivery-smoke.py probe get "/session/$SESSION_ID"
+   ```
+
+The helper refuses non-loopback origins and redirects, refuses to overwrite its
+generated configuration or evidence output, bounds response/event collection,
+and emits structural summaries only. The disposable OpenCode server still has
+no authentication; loopback binding and isolated state are mandatory.
 
 ## Checks
 
-`uv run pytest -q` and `git diff --check` were run after the committed change;
-environmental skips are reported at run time (0 here). Desktop integration
+`uv run pytest -q`: 260 passed, 6 skipped, 4 subtests passed. The skips are
+environmental/opt-in checks. `git diff --check` passed. Desktop integration
 tests remain explicit opt-in.
 
 ## Scope limits
 
-Only the loopback synthetic path above was exercised. Real-provider finish
-semantics, multi-user auth (`OPENCODE_SERVER_PASSWORD`), TLS, the durable
-event SSE replay behaviour, subagents/child sessions and permission routes
-were not validated; missing evidence means unknown. These observations
-never authorize execution or establish accepted-action completion.
+Only the loopback synthetic path above was exercised. A real provider's normal
+finish semantics, authentication, TLS, durable SSE replay, subagents/child
+sessions, permission routes, and a safe negative-acknowledgement retry window
+were not validated. The committed helper was reviewed and locally checked, but
+the complete 2026-09-17 experiment was not rerun from it. Missing evidence means
+unknown. These observations never authorize execution or establish accepted
+action completion.
