@@ -4,7 +4,17 @@ version = "0.2.0"
 license = "MIT"
 description = "A personal AI workbench reference implementation"
 requires-python = ">=3.12"
-dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1", "httpx>=0.28,<1", "jinja2>=3.1.6,<4", "PyYAML>=6,<7", "jsonschema>=4.23,<5", "PyJWT[crypto]>=2.10,<3", "python-multipart>=0.0.20,<1"]
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.34,<1",
+    "httpx>=0.28,<1",
+    "jinja2>=3.1.6,<4",
+    "PyYAML>=6,<7",
+    "jsonschema>=4.23,<5",
+    "PyJWT[crypto]>=2.10,<3",
+    "python-multipart>=0.0.20,<1",
+    "mcp>=2,<3",
+]
 
 [dependency-groups]
 dev = ["pytest>=8,<10"]
@@ -20,6 +30,7 @@ packages = ["src/workbench", "src/starforge_workbench"]
 wb-api = "workbench.client:main"
 wb-collect = "workbench.collector:main"
 wb-notify = "workbench.notifications:main"
+wb-mcp = "workbench.mcp_server:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
