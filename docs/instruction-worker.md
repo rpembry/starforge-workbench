@@ -60,14 +60,42 @@ provider input. A claim is renewed immediately before attempting delivery;
 without confirmed renewal the worker sends nothing.
 
 The provider adapter has one durable-attempt marker per instruction, written
-before any POST. `prompt_async` HTTP 204 means admission only and maps to
+before any POST. For a claimed instruction it also retains the opaque instruction
+ID and reporting lease in that private marker until later response evidence is
+reported or found unreportable. `prompt_async` HTTP 204 means admission only and maps to
 `received`; a definite missing session before POST maps to `failed`; a provider
 preflight outage maps to the server's retryable queue state. Once a POST may
 have begun, timeout, unexpected status, crash, or later message lookup 404
 maps to `uncertain` without automatic resubmission. Message lookup 200 after a
-crash can establish a stored user message. No state means the requested work
-was completed. The worker never logs text, lease tokens, provider output, or
-private paths; only aggregate counters or a generic unavailable marker.
+crash can establish a stored user message.
+
+After `received`, each worker sweep asks the same loopback API for at most the
+100 most recent records in the exact session. The response body is bounded to
+8 MiB, remains only in local process memory, and is discarded after inspecting
+allowlisted metadata. A completed assistant record with `finish: stop` and the
+delivered user-message ID as its parent advances the instruction to `responded`.
+Intermediate `tool-calls` records do not. A correlated typed assistant error
+also advances to `responded` with an error reason. Records are read in the
+API's returned order, treated as chronological, and the last terminal record
+for the same parent is authoritative: an earlier error superseded by a later
+clean completion is not reported as an error, and the reverse holds too.
+Neither outcome means the requested work succeeded or completed. A restart reuses the private marker and
+never sends the instruction again. The worker never logs text, lease tokens,
+provider output, or private paths to disk or stdout; only aggregate counters
+or a generic unavailable marker.
+
+By separate, explicit design choice, the same terminal record's bounded text
+(or, for an error, its message) is also relayed live over the network as an
+ephemeral preview: a one-shot, in-memory-only excerpt handed to
+[`take_preview`](../src/starforge_workbench/opencode_delivery.py) and posted,
+best-effort, to `/api/instructions/{id}/response-preview` right before the
+durable `/results` report in the same sweep. The server never writes this
+excerpt anywhere; it only fans it out to operator dashboard tabs connected to
+`/api/instructions/preview-stream` at that moment, and drops it if none are
+connected. A failure or non-202 response on this path is silently ignored and
+never affects the durable outcome reported immediately after it. See
+[the adapter doc](opencode-delivery-adapter.md#ephemeral-live-preview) for the
+excerpt's exact bounds.
 
 The local unit recipe is
 [`deploy/workbench-instruction-worker.service`](../deploy/workbench-instruction-worker.service).
@@ -98,5 +126,9 @@ completed without error. This proves a synthetic normal response, not that
 the requested work was done. No existing session was used. Before
 enabling this worker, repeat an end-to-end disposable smoke with the exact
 host-local model and registration to verify admission and result reporting.
-A real-provider normal finish and durable output replay are still unverified,
-so `responded` is not automatically inferred.
+A production acceptance on OpenCode 1.18.31 later established exact-session
+API admission and a correlated completed assistant record using one explicitly
+authorized synthetic instruction. That observation did not expose response
+content and did not prove the requested work succeeded. The automated suite
+now covers response correlation and durable replay; provider upgrades still
+require the disposable smoke procedure.

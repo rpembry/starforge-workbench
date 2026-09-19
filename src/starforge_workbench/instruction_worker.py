@@ -59,9 +59,39 @@ def _result_outcome(result):
 
 def cycle(api, config, adapter, resolver=resolve_opencode_registration):
     """Sweep locally owned OpenCode registrations once, returning aggregate counts."""
-    counts = {'eligible': 0, 'claimed': 0, 'reported': 0, 'ambiguous': 0}
+    counts = {'eligible': 0, 'claimed': 0, 'reported': 0, 'responses_reported': 0,
+              'previews_sent': 0, 'ambiguous': 0}
     if not config['enabled']:
         return counts
+    for evidence in adapter.pending_responses():
+        # Best-effort and content-bearing; never allowed to affect the
+        # durable outcome reported just below. A failure here (network
+        # error, no live viewer, anything) is silently dropped.
+        excerpt = adapter.take_preview(evidence.instruction_id)
+        if excerpt:
+            preview = _post(api, f'/api/instructions/{evidence.instruction_id}/response-preview', {
+                'lease_token': evidence.lease_token, 'outcome': evidence.reason,
+                'excerpt': excerpt})
+            if preview is not None and preview.status_code == 202:
+                try:
+                    relayed = preview.json().get('status') == 'relayed'
+                except (AttributeError, TypeError, ValueError):
+                    relayed = False
+                if relayed:
+                    counts['previews_sent'] += 1
+        report = _post(api, f'/api/instructions/{evidence.instruction_id}/results', {
+            'lease_token': evidence.lease_token, 'outcome': evidence.outcome,
+            'reason_code': evidence.reason})
+        if report is not None and report.status_code == 200:
+            adapter.mark_response(evidence.instruction_id, 'reported')
+            counts['responses_reported'] += 1
+        elif report is not None and report.status_code in (409, 422):
+            # The server rejected the durable lease/state pairing. Repeating
+            # cannot make that transition valid and must not loop forever.
+            adapter.mark_response(evidence.instruction_id, 'unreportable')
+            counts['ambiguous'] += 1
+        else:
+            counts['ambiguous'] += 1
     state_file = Path(config['registration_state'])
     if not state_file.is_file():
         return counts
@@ -110,7 +140,7 @@ def cycle(api, config, adapter, resolver=resolve_opencode_registration):
                     # No transmission without a confirmed live lease.
                     counts['ambiguous'] += 1
                     continue
-                result = adapter.deliver(instruction_id, exact, text)
+                result = adapter.deliver(instruction_id, exact, text, token)
                 outcome, reason = _result_outcome(result)
         except (OSError, ValueError, RuntimeError, KeyError):
             # After a claim, unknown local failure must not become another POST.
@@ -139,7 +169,8 @@ def main():
                 with client(role='collector', credentials_file=args.credentials_file) as api:
                     counts = cycle(api, config, adapter)
             else:
-                counts = {'eligible': 0, 'claimed': 0, 'reported': 0, 'ambiguous': 0}
+                counts = {'eligible': 0, 'claimed': 0, 'reported': 0,
+                          'responses_reported': 0, 'previews_sent': 0, 'ambiguous': 0}
             if args.once or counts['claimed'] or counts['ambiguous']:
                 print(json.dumps(counts, sort_keys=True), flush=True)
         except (OSError, ValueError, WorkerConfigError, httpx.HTTPError):

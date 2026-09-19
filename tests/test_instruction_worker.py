@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from starforge_workbench.instruction_worker import cycle, load_config
-from starforge_workbench.opencode_delivery import DeliveryResult
+from starforge_workbench.opencode_delivery import DeliveryResult, ResponseEvidence
 from workbench.auth import Auth
 from workbench.main import create_app
 from workbench.repository import SQLiteRepository
@@ -65,13 +65,19 @@ class FakeAPI:
                       'state': 'claimed', 'text': 'SYNTHETIC INSTRUCTION',
                       'lease_token': 'synthetic_lease_token'}
         self.renew_status = 200
+        self.claim_status = 200
+        self.preview_status = 202
+        self.preview_result = 'relayed'
 
     def post(self, path, json):
         self.calls.append((path, json))
         if path == '/api/instructions/claim':
-            return Response(200, self.claim)
+            return Response(self.claim_status, self.claim if self.claim_status == 200 else None)
         if path.endswith('/renew'):
             return Response(self.renew_status, {'state': 'claimed'})
+        if path.endswith('/response-preview'):
+            return Response(self.preview_status,
+                            {'status': self.preview_result} if self.preview_status == 202 else None)
         if path.endswith('/results'):
             return Response(200, {'state': json['outcome']})
         raise AssertionError('Unexpected worker request')
@@ -81,9 +87,21 @@ class FakeAdapter:
     def __init__(self, state='received'):
         self.state = state
         self.calls = []
+        self.response_evidence = []
+        self.marked = []
+        self.previews = {}
 
-    def deliver(self, instruction_id, session_id, text):
-        self.calls.append((instruction_id, session_id, text))
+    def pending_responses(self):
+        return self.response_evidence
+
+    def take_preview(self, instruction_id):
+        return self.previews.pop(instruction_id, None)
+
+    def mark_response(self, instruction_id, state):
+        self.marked.append((instruction_id, state))
+
+    def deliver(self, instruction_id, session_id, text, lease_token):
+        self.calls.append((instruction_id, session_id, text, lease_token))
         return DeliveryResult(self.state, 'synthetic', 'msg_synthetic')
 
 
@@ -113,9 +131,11 @@ def test_claim_only_exact_registration_then_report_admission(tmp_path):
         return SESSION
 
     result = cycle(api, config(tmp_path), adapter, resolver)
-    assert result == {'eligible': 1, 'claimed': 1, 'reported': 1, 'ambiguous': 0}
+    assert result == {'eligible': 1, 'claimed': 1, 'reported': 1,
+                      'responses_reported': 0, 'previews_sent': 0, 'ambiguous': 0}
     assert resolver_calls == [REGISTERED, REGISTERED]
-    assert adapter.calls == [(INSTRUCTION, SESSION, 'SYNTHETIC INSTRUCTION')]
+    assert adapter.calls == [(INSTRUCTION, SESSION, 'SYNTHETIC INSTRUCTION',
+                              'synthetic_lease_token')]
     assert [path for path, _ in api.calls] == [
         '/api/instructions/claim', f'/api/instructions/{INSTRUCTION}/renew',
         f'/api/instructions/{INSTRUCTION}/results']
@@ -131,6 +151,74 @@ def test_kill_switch_and_missing_local_evidence_prevent_claim(tmp_path):
     assert not api.calls
     assert cycle(api, dict(disabled, enabled=True), adapter, lambda *args: None)['claimed'] == 0
     assert not api.calls and not adapter.calls
+
+
+def test_completed_response_is_reported_once_before_new_claims(tmp_path):
+    api, adapter = FakeAPI(), FakeAdapter()
+    api.claim_status = 404
+    adapter.response_evidence = [ResponseEvidence(
+        INSTRUCTION, 'synthetic_lease_token', 'responded',
+        'provider_response_without_error')]
+
+    result = cycle(api, config(tmp_path), adapter, lambda *args: SESSION)
+
+    assert result['responses_reported'] == 1
+    assert adapter.marked == [(INSTRUCTION, 'reported')]
+    assert api.calls[0] == (f'/api/instructions/{INSTRUCTION}/results', {
+        'lease_token': 'synthetic_lease_token', 'outcome': 'responded',
+        'reason_code': 'provider_response_without_error'})
+    assert api.calls[1][0] == '/api/instructions/claim'
+
+
+def test_preview_is_sent_before_the_durable_report_when_available(tmp_path):
+    api, adapter = FakeAPI(), FakeAdapter()
+    api.claim_status = 404
+    adapter.response_evidence = [ResponseEvidence(
+        INSTRUCTION, 'synthetic_lease_token', 'responded',
+        'provider_response_without_error')]
+    adapter.previews[INSTRUCTION] = 'Synthetic excerpt.'
+
+    result = cycle(api, config(tmp_path), adapter, lambda *args: SESSION)
+
+    assert result['previews_sent'] == 1
+    assert result['responses_reported'] == 1
+    assert api.calls[0] == (f'/api/instructions/{INSTRUCTION}/response-preview', {
+        'lease_token': 'synthetic_lease_token', 'outcome': 'provider_response_without_error',
+        'excerpt': 'Synthetic excerpt.'})
+    assert api.calls[1][0] == f'/api/instructions/{INSTRUCTION}/results'
+    # take_preview() is one-shot: nothing left for a caller to re-send.
+    assert adapter.take_preview(INSTRUCTION) is None
+
+
+def test_preview_relay_failure_does_not_affect_durable_reporting(tmp_path):
+    api, adapter = FakeAPI(), FakeAdapter()
+    api.claim_status = 404
+    api.preview_status = 500  # e.g. no live viewer, or a transient relay error
+    adapter.response_evidence = [ResponseEvidence(
+        INSTRUCTION, 'synthetic_lease_token', 'responded',
+        'provider_response_without_error')]
+    adapter.previews[INSTRUCTION] = 'Synthetic excerpt.'
+
+    result = cycle(api, config(tmp_path), adapter, lambda *args: SESSION)
+
+    assert result['previews_sent'] == 0
+    assert result['responses_reported'] == 1
+    assert adapter.marked == [(INSTRUCTION, 'reported')]
+
+
+def test_dropped_preview_is_not_counted_as_relayed(tmp_path):
+    api, adapter = FakeAPI(), FakeAdapter()
+    api.claim_status = 404
+    api.preview_result = 'dropped'
+    adapter.response_evidence = [ResponseEvidence(
+        INSTRUCTION, 'synthetic_lease_token', 'responded',
+        'provider_response_without_error')]
+    adapter.previews[INSTRUCTION] = 'Synthetic excerpt.'
+
+    result = cycle(api, config(tmp_path), adapter, lambda *args: SESSION)
+
+    assert result['previews_sent'] == 0
+    assert result['responses_reported'] == 1
 
 
 def test_generation_change_after_claim_never_sends(tmp_path):
@@ -214,7 +302,10 @@ def test_worker_claim_and_receipt_against_synthetic_server(tmp_path):
         adapter = FakeAdapter()
         result = cycle(api, config(tmp_path), adapter, lambda *args: SESSION)
         assert result['claimed'] == result['reported'] == 1
-        assert adapter.calls == [(created.json()['id'], SESSION, 'SYNTHETIC INSTRUCTION')]
+        assert adapter.calls[0][:3] == (
+            created.json()['id'], SESSION, 'SYNTHETIC INSTRUCTION')
+        assert len(adapter.calls) == 1
+        assert adapter.calls[0][3]
         api.headers['Authorization'] = 'Bearer ' + operator
         untouched = api.get('/api/instructions?registered_session_id=registered_synthetic_0002')
         assert untouched.status_code == 200 and untouched.json()['items'] == []
@@ -223,3 +314,22 @@ def test_worker_claim_and_receipt_against_synthetic_server(tmp_path):
         assert stored.json()['state'] == 'received'
         assert all('SYNTHETIC INSTRUCTION' not in json.dumps(entry)
                    for entry in stored.json()['history'])
+        api.headers['Authorization'] = 'Bearer ' + collector
+        adapter.response_evidence = [ResponseEvidence(
+            created.json()['id'], adapter.calls[0][3], 'responded',
+            'provider_response_without_error')]
+        adapter.previews[created.json()['id']] = 'SYNTHETIC LIVE-ONLY EXCERPT'
+        follow_up = cycle(api, config(tmp_path), adapter, lambda *args: SESSION)
+        assert follow_up['responses_reported'] == 1
+        # No operator SSE subscriber is connected in this integration test,
+        # so the server accepts and drops the ephemeral preview rather than
+        # falsely reporting it as relayed.
+        assert follow_up['previews_sent'] == 0
+        api.headers['Authorization'] = 'Bearer ' + operator
+        responded = api.get('/api/instructions/' + created.json()['id']).json()
+        assert responded['state'] == 'responded'
+        assert [entry['state'] for entry in responded['history']][-2:] == [
+            'received', 'responded']
+        # The ephemeral excerpt is relayed live only; it never reaches the
+        # durable record or its audit history.
+        assert 'SYNTHETIC LIVE-ONLY EXCERPT' not in json.dumps(responded)

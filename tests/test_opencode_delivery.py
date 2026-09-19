@@ -17,6 +17,7 @@ class FakeOpenCode:
         self.calls = []
         self.post_result = post_result
         self.lookup_result = lookup_result
+        self.messages = []
 
     def __call__(self, method, path, payload=None):
         self.calls.append((method, path, payload))
@@ -24,6 +25,8 @@ class FakeOpenCode:
             return 200, json.dumps({'id': SESSION}).encode()
         if method == 'GET' and path == f'/session/{OTHER}':
             return 404, b''
+        if method == 'GET' and path == f'/session/{SESSION}/message?limit=100':
+            return 200, json.dumps(self.messages).encode()
         if method == 'GET' and '/message/' in path:
             return self.lookup_result, b''
         if method == 'POST' and path == f'/session/{SESSION}/prompt_async':
@@ -137,6 +140,161 @@ def test_busy_admission_and_changed_identity_fail_closed(tmp_path):
     with pytest.raises(DeliveryError, match='changed target'):
         delivery.deliver(INSTRUCTION, SESSION, 'different text')
     assert len([call for call in fake.calls if call[0] == 'POST']) == 1
+
+
+def test_correlated_final_response_is_content_free_and_reported_once(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    result = delivery.deliver(
+        INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    fake.messages = [
+        {'info': {'id': 'msg_tool_step', 'role': 'assistant',
+                  'parentID': result.message_id, 'finish': 'tool-calls',
+                  'time': {'created': 1000, 'completed': 1100}},
+         'parts': [{'type': 'text', 'text': 'PRIVATE INTERMEDIATE OUTPUT'}]},
+        {'info': {'id': 'msg_other', 'role': 'assistant',
+                  'parentID': 'msg_unrelated', 'finish': 'stop',
+                  'time': {'created': 1200, 'completed': 1300}},
+         'parts': [{'type': 'text', 'text': 'PRIVATE UNRELATED OUTPUT'}]},
+        {'info': {'id': 'msg_final', 'role': 'assistant',
+                  'parentID': result.message_id, 'finish': 'stop',
+                  'time': {'created': 1400, 'completed': 1500}},
+         'parts': [{'type': 'text', 'text': 'PRIVATE FINAL OUTPUT'}]},
+    ]
+
+    restarted = adapter(tmp_path, fake)
+    evidence = restarted.pending_responses()
+
+    assert len(evidence) == 1
+    assert evidence[0].instruction_id == INSTRUCTION
+    assert evidence[0].outcome == 'responded'
+    assert evidence[0].reason == 'provider_response_without_error'
+    assert 'PRIVATE' not in repr(evidence)
+    restarted.mark_response(INSTRUCTION, 'reported')
+    assert adapter(tmp_path, fake).pending_responses() == []
+    receipt = next((tmp_path / 'private-state').glob('*.json')).read_text()
+    assert 'synthetic_lease_token' not in receipt
+    assert 'PRIVATE' not in receipt
+
+
+def test_tool_continuation_is_pending_and_correlated_error_is_terminal(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    result = delivery.deliver(
+        INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    fake.messages = [{'info': {
+        'id': 'msg_tool_step', 'role': 'assistant', 'parentID': result.message_id,
+        'finish': 'tool-calls', 'time': {'created': 1000, 'completed': 1100}}}]
+    assert delivery.pending_responses() == []
+
+    fake.messages.append({'info': {
+        'id': 'msg_error', 'role': 'assistant', 'parentID': result.message_id,
+        'time': {'created': 1200}, 'error': {'name': 'SyntheticError',
+                                            'message': 'PRIVATE ERROR'}}})
+    evidence = delivery.pending_responses()
+    assert len(evidence) == 1
+    assert evidence[0].reason == 'provider_response_error'
+    assert 'PRIVATE' not in repr(evidence)
+
+
+def test_recovered_error_reports_final_disposition_not_earlier_error(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    result = delivery.deliver(
+        INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    fake.messages = [
+        {'info': {'id': 'msg_transient_error', 'role': 'assistant',
+                  'parentID': result.message_id, 'time': {'created': 1000},
+                  'error': {'name': 'SyntheticError', 'message': 'PRIVATE TRANSIENT ERROR'}}},
+        {'info': {'id': 'msg_recovered', 'role': 'assistant',
+                  'parentID': result.message_id, 'finish': 'stop',
+                  'time': {'created': 1100, 'completed': 1200}}},
+    ]
+
+    restarted = adapter(tmp_path, fake)
+    evidence = restarted.pending_responses()
+
+    assert len(evidence) == 1
+    assert evidence[0].outcome == 'responded'
+    assert evidence[0].reason == 'provider_response_without_error'
+    assert 'PRIVATE' not in repr(evidence)
+
+
+def test_late_error_after_prior_success_reports_final_disposition(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    result = delivery.deliver(
+        INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    fake.messages = [
+        {'info': {'id': 'msg_first_stop', 'role': 'assistant',
+                  'parentID': result.message_id, 'finish': 'stop',
+                  'time': {'created': 1000, 'completed': 1100}}},
+        {'info': {'id': 'msg_later_error', 'role': 'assistant',
+                  'parentID': result.message_id, 'time': {'created': 1200},
+                  'error': {'name': 'SyntheticError', 'message': 'PRIVATE LATER ERROR'}}},
+    ]
+
+    restarted = adapter(tmp_path, fake)
+    evidence = restarted.pending_responses()
+
+    assert len(evidence) == 1
+    assert evidence[0].outcome == 'responded'
+    assert evidence[0].reason == 'provider_response_error'
+    assert 'PRIVATE' not in repr(evidence)
+
+
+def test_take_preview_returns_text_excerpt_once_then_nothing(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    result = delivery.deliver(
+        INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    fake.messages = [{'info': {
+        'id': 'msg_final', 'role': 'assistant', 'parentID': result.message_id,
+        'finish': 'stop', 'time': {'created': 1000, 'completed': 1100}},
+        'parts': [{'type': 'text', 'text': 'Synthetic final answer.'},
+                  {'type': 'text', 'text': 'Second part.'}]}]
+
+    restarted = adapter(tmp_path, fake)
+    evidence = restarted.pending_responses()
+
+    assert len(evidence) == 1
+    assert restarted.take_preview(INSTRUCTION) == 'Synthetic final answer. Second part.'
+    assert restarted.take_preview(INSTRUCTION) is None
+
+
+def test_take_preview_falls_back_to_error_message_and_is_bounded(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    result = delivery.deliver(
+        INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    fake.messages = [{'info': {
+        'id': 'msg_error', 'role': 'assistant', 'parentID': result.message_id,
+        'time': {'created': 1000},
+        'error': {'name': 'SyntheticError', 'message': 'x' * 600}},
+        'parts': [{'type': 'text', 'text': 'PRIVATE PARTIAL OUTPUT'}]}]
+
+    restarted = adapter(tmp_path, fake)
+    restarted.pending_responses()
+
+    excerpt = restarted.take_preview(INSTRUCTION)
+    assert excerpt == 'x' * 500
+
+
+def test_mark_response_clears_preview_even_if_never_taken(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    result = delivery.deliver(
+        INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    fake.messages = [{'info': {
+        'id': 'msg_final', 'role': 'assistant', 'parentID': result.message_id,
+        'finish': 'stop', 'time': {'created': 1000, 'completed': 1100}},
+        'parts': [{'type': 'text', 'text': 'Never fetched.'}]}]
+
+    restarted = adapter(tmp_path, fake)
+    restarted.pending_responses()
+    restarted.mark_response(INSTRUCTION, 'reported')
+
+    assert restarted.take_preview(INSTRUCTION) is None
 
 
 @pytest.mark.parametrize('origin', [
