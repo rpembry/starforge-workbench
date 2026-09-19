@@ -10,6 +10,13 @@ The tools read bounded Workbench records, create only proposals or attributed
 accomplishments, and return a standup report. They cannot accept, complete, or
 execute work.
 
+The server instructions tell connected agents to treat an unsupported Workbench
+(`aiw`) operation as a possible MCP capability gap. An agent should consider
+creating a GitHub feature request for future support; if it lacks GitHub access,
+it should notify the user of the gap and suggest the feature request instead.
+Filing or suggesting an issue does not replace completing the current request
+through an authorized, safe path when one exists.
+
 `restore_session` defaults to a launcher preview. A live restoration requires
 both an explicit `dry_run: false` tool argument and `WB_MCP_ALLOW_RESTORE=1` in
 the server environment. It targets only a context ID from the private
