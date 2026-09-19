@@ -19,8 +19,9 @@ from .models import (ActionIn, ActionPatch, ArtifactIn, EventIn, ObjectiveIn,
                      RunIn, RunLink, RunPatch, Transition, CollectorIn, ImportBatch,
                      ProviderAttentionIn, ProviderGenerationIn, RegisteredSessionIn,
                      InstructionClaimIn, InstructionIn, InstructionLeaseIn,
-                     InstructionResultIn)
+                     InstructionResultIn, InstructionPreviewIn)
 from .repository import Problem, SQLiteRepository
+from .response_preview import ResponsePreviewHub
 from .settings import load_settings
 
 
@@ -68,6 +69,7 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     app = FastAPI(lifespan=lifespan, title='AI Workbench', version='0.2.0', docs_url=None, redoc_url=None, openapi_url=None)
     app.state.repository = repository
     app.state.settings = settings
+    app.state.response_preview = ResponsePreviewHub()
 
     bearer = APIKeyHeader(name='Cf-Access-Jwt-Assertion', auto_error=False, description='Signed identity assertion injected by Cloudflare Access; machine clients authenticate at the edge with service-token headers.') if isinstance(auth, CloudflareAuth) else HTTPBearer(auto_error=False)
 
@@ -190,6 +192,40 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     @app.post('/api/instructions/{identity}/results')
     def instruction_result(identity: str, body: InstructionResultIn, who=Depends(collector)):
         return repository.report_instruction_result(identity, body.model_dump(mode='json'), who.name)
+
+    @app.post('/api/instructions/{identity}/response-preview', status_code=202)
+    def instruction_response_preview(identity: str, body: InstructionPreviewIn, who=Depends(collector)):
+        # Proves the caller currently holds this instruction's lease; nothing
+        # about the excerpt itself is written anywhere. A failed lease check
+        # raises the same 404/409 as /results so the worker can tell apart
+        # "not mine" from "no one is watching" (a 202 with delivered=false).
+        repository.verify_instruction_lease(identity, body.lease_token, who.name)
+        delivered = app.state.response_preview.publish(identity, body.outcome, body.excerpt)
+        return {'status': 'relayed' if delivered else 'dropped'}
+
+    @app.get('/api/instructions/preview-stream', dependencies=[Depends(operator)])
+    async def instruction_preview_stream(request: Request):
+        import asyncio
+        import json as _json
+        from fastapi.responses import StreamingResponse
+        queue = app.state.response_preview.subscribe()
+
+        async def events():
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=15)
+                    except asyncio.TimeoutError:
+                        yield ': keep-alive\n\n'
+                        continue
+                    yield 'data: ' + _json.dumps(event) + '\n\n'
+            finally:
+                app.state.response_preview.unsubscribe(queue)
+
+        return StreamingResponse(events(), media_type='text/event-stream',
+                                 headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
 
     @app.get('/api/instructions')
     def instructions(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
@@ -375,6 +411,10 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     @app.get('/assets/htmx.min.js')
     def htmx():
         return FileResponse(Path(__file__).with_name('static')/'htmx.min.js', media_type='application/javascript')
+
+    @app.get('/assets/response-preview.js')
+    def response_preview_script():
+        return FileResponse(Path(__file__).with_name('static')/'response-preview.js', media_type='application/javascript')
 
     @app.get('/ui/dashboard', response_class=HTMLResponse, dependencies=[Depends(operator)])
     def dashboard_fragment(request: Request):

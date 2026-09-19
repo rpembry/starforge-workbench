@@ -47,11 +47,38 @@ records. It reports a response only for a correlated typed error or a completed
 Matching records are treated as chronologically ordered and only the last
 terminal one for a given instruction is reported, so a transient error the
 agent went on to resolve is not what gets reported.
-Although the OpenCode API response includes message parts, the adapter neither
-logs nor persists them, and the server receives only the state/reason pair. The #61
+Although the OpenCode API response includes message parts, the adapter never
+logs or persists them to disk: the durable `/results` report the worker sends
+carries only the state/reason pair, never message content. The #61
 [synthetic spike](opencode-delivery-live-smoke.md) established these limits on
 OpenCode 1.18.31. A later authorized synthetic production acceptance observed
 a normal correlated assistant completion without treating it as task success.
+
+## Ephemeral live preview
+
+Separately from the durable state/reason pair above, `_response` also extracts
+a bounded excerpt of the same terminal record: joined `text` parts for a clean
+completion, or the typed error's `message` for an error, control characters
+stripped, capped at 500 characters. This excerpt is held only in
+`OpenCodeDelivery._previews`, an in-process dict, never written to the
+attempt-marker file or anywhere else on disk. `take_preview(instruction_id)`
+is the only way out: it pops and returns the excerpt once, so a second call
+(or a process restart) gets nothing. `mark_response` also clears it as a
+safety net, so an excerpt can never outlive the instruction it belongs to
+even if the worker never calls `take_preview`.
+
+The worker sends whatever `take_preview` returns, best-effort, to
+`/api/instructions/{id}/response-preview` immediately before its `/results`
+report for the same instruction. The server does not persist it either: it
+authenticates the same lease token used for `/results`, then fans the excerpt
+out only to operator dashboard tabs currently connected to
+`/api/instructions/preview-stream` (Server-Sent Events, `text/event-stream`,
+one in-memory `asyncio.Queue` per connected tab). A viewer who is not
+connected at that moment never sees it; nothing is buffered for later
+delivery, and a server restart clears every subscriber. The dashboard client
+(`static/response-preview.js`) mirrors the same ephemerality on its side: it
+keeps entries only in the page's DOM, caps the visible list, and removes each
+entry after 60 seconds, all without browser storage.
 
 `tests/test_opencode_delivery.py` uses a fake provider and synthetic text to
 cover exact-session routing, busy admission, response correlation, restart/replay, ambiguous timeout,

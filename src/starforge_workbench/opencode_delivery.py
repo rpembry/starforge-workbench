@@ -40,6 +40,31 @@ class ResponseEvidence:
     reason: str
 
 
+def _excerpt(item, limit=500):
+    """Bounded, control-character-free text for the ephemeral preview only.
+
+    Prefers the assistant message's text parts; falls back to a typed
+    error's message. Returns '' when there is nothing usable -- callers
+    must treat that as "no preview", not as an error.
+    """
+    info = item.get('info') if isinstance(item, dict) else None
+    parts = item.get('parts') if isinstance(item, dict) else None
+    pieces = []
+    if isinstance(parts, list):
+        for part in parts:
+            if isinstance(part, dict) and part.get('type') == 'text' and isinstance(part.get('text'), str):
+                pieces.append(part['text'])
+    text = ' '.join(pieces).strip()
+    if not text and isinstance(info, dict):
+        error = info.get('error')
+        message = error.get('message') if isinstance(error, dict) else None
+        if isinstance(message, str):
+            text = message.strip()
+    text = ''.join(character for character in text
+                   if not (ord(character) < 32 and character not in '\n\t') and not 127 <= ord(character) <= 159)
+    return text[:limit]
+
+
 def _private_root(path):
     root = Path(path).absolute()
     if root.resolve() != root or not root.is_dir():
@@ -124,6 +149,10 @@ class OpenCodeDelivery:
         self.model = {'providerID': provider_id, 'modelID': model_id}
         self.timeout = timeout
         self.transport = transport or self._http
+        # Ephemeral only: excerpts live here in process memory, never on
+        # disk, and are removed the first time they are taken or when the
+        # instruction's disposition is finalized.
+        self._previews = {}
 
     def _http(self, method, path, payload=None):
         connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=self.timeout)
@@ -254,9 +283,20 @@ class OpenCodeDelivery:
                 raise DeliveryError('Invalid local response receipt')
             result = self._response(session_id, message_id)
             if result:
-                outcome, reason = result
+                outcome, reason, excerpt = result
                 evidence.append(ResponseEvidence(instruction_id, lease_token, outcome, reason))
+                if excerpt:
+                    self._previews[instruction_id] = excerpt
         return evidence
+
+    def take_preview(self, instruction_id):
+        """Return and clear the one-shot ephemeral excerpt for an instruction.
+
+        In-memory only. Unavailable after the first take, after
+        mark_response(), or across a process restart -- there is nothing to
+        recover in any of those cases, by design.
+        """
+        return self._previews.pop(instruction_id, None)
 
     def _response(self, session_id, message_id):
         try:
@@ -275,22 +315,26 @@ class OpenCodeDelivery:
                 info = item.get('info') if isinstance(item, dict) else None
                 if (isinstance(info, dict) and info.get('role') == 'assistant' and
                         info.get('parentID') == message_id):
-                    matched.append(info)
+                    matched.append(item)
         except (UnicodeError, ValueError, AttributeError):
             return None
         # The API's returned order is treated as chronological. A later
         # terminal record (error or clean stop) supersedes an earlier one for
         # the same parent, so a transient error the agent went on to resolve
-        # is not reported once a subsequent clean completion is observed.
+        # is not reported once a subsequent clean completion is observed. The
+        # excerpt travels only through the one-shot, in-memory preview cache;
+        # it is never part of ResponseEvidence, the durable /results report,
+        # or anything written to disk.
         outcome = None
-        for info in matched:
+        for item in matched:
+            info = item.get('info', {})
             if isinstance(info.get('error'), dict):
-                outcome = 'responded', 'provider_response_error'
+                outcome = 'responded', 'provider_response_error', _excerpt(item)
                 continue
             completed = info.get('time', {}).get('completed') if isinstance(info.get('time'), dict) else None
             if (not isinstance(completed, bool) and isinstance(completed, (int, float)) and
                     info.get('finish') == 'stop'):
-                outcome = 'responded', 'provider_response_without_error'
+                outcome = 'responded', 'provider_response_without_error', _excerpt(item)
         return outcome
 
     def mark_response(self, instruction_id, state):
@@ -303,3 +347,4 @@ class OpenCodeDelivery:
         receipt['response_state'] = state
         receipt.pop('lease_token', None)
         _save(path, receipt)
+        self._previews.pop(instruction_id, None)

@@ -60,10 +60,20 @@ def _result_outcome(result):
 def cycle(api, config, adapter, resolver=resolve_opencode_registration):
     """Sweep locally owned OpenCode registrations once, returning aggregate counts."""
     counts = {'eligible': 0, 'claimed': 0, 'reported': 0, 'responses_reported': 0,
-              'ambiguous': 0}
+              'previews_sent': 0, 'ambiguous': 0}
     if not config['enabled']:
         return counts
     for evidence in adapter.pending_responses():
+        # Best-effort and content-bearing; never allowed to affect the
+        # durable outcome reported just below. A failure here (network
+        # error, no live viewer, anything) is silently dropped.
+        excerpt = adapter.take_preview(evidence.instruction_id)
+        if excerpt:
+            preview = _post(api, f'/api/instructions/{evidence.instruction_id}/response-preview', {
+                'lease_token': evidence.lease_token, 'outcome': evidence.reason,
+                'excerpt': excerpt})
+            if preview is not None and preview.status_code == 202:
+                counts['previews_sent'] += 1
         report = _post(api, f'/api/instructions/{evidence.instruction_id}/results', {
             'lease_token': evidence.lease_token, 'outcome': evidence.outcome,
             'reason_code': evidence.reason})
@@ -155,7 +165,7 @@ def main():
                     counts = cycle(api, config, adapter)
             else:
                 counts = {'eligible': 0, 'claimed': 0, 'reported': 0,
-                          'responses_reported': 0, 'ambiguous': 0}
+                          'responses_reported': 0, 'previews_sent': 0, 'ambiguous': 0}
             if args.once or counts['claimed'] or counts['ambiguous']:
                 print(json.dumps(counts, sort_keys=True), flush=True)
         except (OSError, ValueError, WorkerConfigError, httpx.HTTPError):

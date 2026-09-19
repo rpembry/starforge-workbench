@@ -81,8 +81,21 @@ for the same parent is authoritative: an earlier error superseded by a later
 clean completion is not reported as an error, and the reverse holds too.
 Neither outcome means the requested work succeeded or completed. A restart reuses the private marker and
 never sends the instruction again. The worker never logs text, lease tokens,
-provider output, or private paths; only aggregate counters or a generic
-unavailable marker.
+provider output, or private paths to disk or stdout; only aggregate counters
+or a generic unavailable marker.
+
+By separate, explicit design choice, the same terminal record's bounded text
+(or, for an error, its message) is also relayed live over the network as an
+ephemeral preview: a one-shot, in-memory-only excerpt handed to
+[`take_preview`](../src/starforge_workbench/opencode_delivery.py) and posted,
+best-effort, to `/api/instructions/{id}/response-preview` right before the
+durable `/results` report in the same sweep. The server never writes this
+excerpt anywhere; it only fans it out to operator dashboard tabs connected to
+`/api/instructions/preview-stream` at that moment, and drops it if none are
+connected. A failure or non-202 response on this path is silently ignored and
+never affects the durable outcome reported immediately after it. See
+[the adapter doc](opencode-delivery-adapter.md#ephemeral-live-preview) for the
+excerpt's exact bounds.
 
 The local unit recipe is
 [`deploy/workbench-instruction-worker.service`](../deploy/workbench-instruction-worker.service).

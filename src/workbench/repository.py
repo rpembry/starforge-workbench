@@ -497,6 +497,16 @@ class SQLiteRepository:
             raise Problem(409, 'lease_mismatch', 'Instruction lease does not match')
         return row
 
+    def verify_instruction_lease(self, identity, token, principal):
+        """Read-only proof that `principal` holds the current lease on
+        `identity`. Raises the same Problems as the other lease-checking
+        flows; performs no state transition and touches no other table."""
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._verify_instruction_lease(db, identity, token, principal)
+            db.commit()
+            return row['id']
+
     def renew_instruction_claim(self, identity, token, principal, claims_enabled=False):
         from datetime import datetime, timedelta, timezone
         with self.connection() as db:

@@ -397,3 +397,89 @@ def test_stopped_registration_cannot_retarget_queued_instruction(api):
     assert unavailable.status_code == 409
     api.headers['Authorization'] = 'Bearer ' + OPERATOR
     assert api.get('/api/instructions/' + item['id']).json()['state'] == 'queued'
+
+
+def test_response_preview_relays_live_and_never_persists(api):
+    register_session(api)
+    item = create_instruction(api)
+    claimed = claim(api)
+    token = claimed.json()['lease_token']
+    admitted = api.post(f'/api/instructions/{item["id"]}/results', json={
+        'lease_token': token, 'outcome': 'received', 'reason_code': 'provider_accepted'})
+    assert admitted.status_code == 200
+
+    subscriber = api.app.state.response_preview.subscribe()
+    relayed = api.post(f'/api/instructions/{item["id"]}/response-preview', json={
+        'lease_token': token, 'outcome': 'provider_response_without_error',
+        'excerpt': 'SYNTHETIC LIVE EXCERPT'})
+    assert relayed.status_code == 202
+    assert relayed.json() == {'status': 'relayed'}
+    assert subscriber.get_nowait() == {
+        'instruction_id': item['id'], 'outcome': 'provider_response_without_error',
+        'excerpt': 'SYNTHETIC LIVE EXCERPT'}
+
+    api.headers['Authorization'] = 'Bearer ' + OPERATOR
+    stored = api.get('/api/instructions/' + item['id'])
+    assert 'SYNTHETIC LIVE EXCERPT' not in stored.text
+
+
+def test_response_preview_reports_dropped_without_a_subscriber(api):
+    register_session(api)
+    item = create_instruction(api)
+    claimed = claim(api)
+    token = claimed.json()['lease_token']
+    api.post(f'/api/instructions/{item["id"]}/results', json={
+        'lease_token': token, 'outcome': 'received', 'reason_code': 'provider_accepted'})
+
+    response = api.post(f'/api/instructions/{item["id"]}/response-preview', json={
+        'lease_token': token, 'outcome': 'provider_response_without_error',
+        'excerpt': 'no one is watching'})
+    assert response.status_code == 202
+    assert response.json() == {'status': 'dropped'}
+
+
+def test_response_preview_requires_matching_lease_and_collector_role(api):
+    register_session(api)
+    item = create_instruction(api)
+    claimed = claim(api)
+    token = claimed.json()['lease_token']
+
+    api.headers['Authorization'] = 'Bearer ' + OPERATOR
+    forbidden = api.post(f'/api/instructions/{item["id"]}/response-preview', json={
+        'lease_token': token, 'outcome': 'provider_response_without_error', 'excerpt': 'x'})
+    assert forbidden.status_code == 403
+
+    api.headers['Authorization'] = 'Bearer ' + COLLECTOR
+    wrong_token = api.post(f'/api/instructions/{item["id"]}/response-preview', json={
+        'lease_token': 'z' * 32, 'outcome': 'provider_response_without_error', 'excerpt': 'x'})
+    assert wrong_token.status_code == 409
+
+    missing = api.post('/api/instructions/missing_instruction_0001/response-preview', json={
+        'lease_token': token, 'outcome': 'provider_response_without_error', 'excerpt': 'x'})
+    assert missing.status_code == 404
+
+
+def test_response_preview_bounds_excerpt_and_rejects_control_characters(api):
+    register_session(api)
+    item = create_instruction(api)
+    claimed = claim(api)
+    token = claimed.json()['lease_token']
+    api.post(f'/api/instructions/{item["id"]}/results', json={
+        'lease_token': token, 'outcome': 'received', 'reason_code': 'provider_accepted'})
+
+    too_long = api.post(f'/api/instructions/{item["id"]}/response-preview', json={
+        'lease_token': token, 'outcome': 'provider_response_without_error', 'excerpt': 'x' * 501})
+    assert too_long.status_code == 422
+
+    control = api.post(f'/api/instructions/{item["id"]}/response-preview', json={
+        'lease_token': token, 'outcome': 'provider_response_without_error',
+        'excerpt': 'DO_NOT_ECHO\x00'})
+    assert control.status_code == 422
+    assert 'DO_NOT_ECHO' not in control.text
+
+
+def test_preview_stream_requires_operator_role(api):
+    api.headers['Authorization'] = 'Bearer ' + COLLECTOR
+    assert api.get('/api/instructions/preview-stream').status_code == 403
+    api.headers.clear()
+    assert api.get('/api/instructions/preview-stream').status_code == 401

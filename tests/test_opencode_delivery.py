@@ -243,6 +243,59 @@ def test_late_error_after_prior_success_reports_final_disposition(tmp_path):
     assert 'PRIVATE' not in repr(evidence)
 
 
+def test_take_preview_returns_text_excerpt_once_then_nothing(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    result = delivery.deliver(
+        INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    fake.messages = [{'info': {
+        'id': 'msg_final', 'role': 'assistant', 'parentID': result.message_id,
+        'finish': 'stop', 'time': {'created': 1000, 'completed': 1100}},
+        'parts': [{'type': 'text', 'text': 'Synthetic final answer.'},
+                  {'type': 'text', 'text': 'Second part.'}]}]
+
+    restarted = adapter(tmp_path, fake)
+    evidence = restarted.pending_responses()
+
+    assert len(evidence) == 1
+    assert restarted.take_preview(INSTRUCTION) == 'Synthetic final answer. Second part.'
+    assert restarted.take_preview(INSTRUCTION) is None
+
+
+def test_take_preview_falls_back_to_error_message_and_is_bounded(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    result = delivery.deliver(
+        INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    fake.messages = [{'info': {
+        'id': 'msg_error', 'role': 'assistant', 'parentID': result.message_id,
+        'time': {'created': 1000},
+        'error': {'name': 'SyntheticError', 'message': 'x' * 600}}}]
+
+    restarted = adapter(tmp_path, fake)
+    restarted.pending_responses()
+
+    excerpt = restarted.take_preview(INSTRUCTION)
+    assert excerpt == 'x' * 500
+
+
+def test_mark_response_clears_preview_even_if_never_taken(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    result = delivery.deliver(
+        INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    fake.messages = [{'info': {
+        'id': 'msg_final', 'role': 'assistant', 'parentID': result.message_id,
+        'finish': 'stop', 'time': {'created': 1000, 'completed': 1100}},
+        'parts': [{'type': 'text', 'text': 'Never fetched.'}]}]
+
+    restarted = adapter(tmp_path, fake)
+    restarted.pending_responses()
+    restarted.mark_response(INSTRUCTION, 'reported')
+
+    assert restarted.take_preview(INSTRUCTION) is None
+
+
 @pytest.mark.parametrize('origin', [
     'http://example.com:4098', 'http://0.0.0.0:4098', 'https://127.0.0.1:4098',
     'http://127.0.0.1:4098/path', 'http://127.0.0.1:4098?x=1',

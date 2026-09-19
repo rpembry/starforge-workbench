@@ -236,6 +236,26 @@ class InstructionResultIn(InstructionLeaseIn):
         return self
 
 
+class InstructionPreviewIn(InstructionLeaseIn):
+    """An ephemeral, content-bearing companion to InstructionResultIn.
+
+    This is never stored: the server relays it live to connected operator
+    viewers and discards it. It intentionally reuses the same lease token as
+    /results so only the collector that owns this instruction's delivery can
+    publish a preview for it, without adding a second credential to manage.
+    """
+    outcome: Literal['provider_response_error', 'provider_response_without_error']
+    excerpt: Annotated[str, Field(min_length=1, max_length=500)]
+
+    @field_validator('excerpt')
+    @classmethod
+    def plain_excerpt(cls, value):
+        if any(ord(character) < 32 and character not in {'\n', '\t'} or 127 <= ord(character) <= 159
+               for character in value):
+            raise ValueError('Excerpt contains a disallowed control character')
+        return value
+
+
 class ProviderGenerationIn(Model):
     provider: Literal['opencode']
     session_id: ProviderIdentity
