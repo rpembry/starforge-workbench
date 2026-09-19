@@ -278,15 +278,20 @@ class OpenCodeDelivery:
                     matched.append(info)
         except (UnicodeError, ValueError, AttributeError):
             return None
+        # The API's returned order is treated as chronological. A later
+        # terminal record (error or clean stop) supersedes an earlier one for
+        # the same parent, so a transient error the agent went on to resolve
+        # is not reported once a subsequent clean completion is observed.
+        outcome = None
         for info in matched:
             if isinstance(info.get('error'), dict):
-                return 'responded', 'provider_response_error'
-        for info in matched:
+                outcome = 'responded', 'provider_response_error'
+                continue
             completed = info.get('time', {}).get('completed') if isinstance(info.get('time'), dict) else None
             if (not isinstance(completed, bool) and isinstance(completed, (int, float)) and
                     info.get('finish') == 'stop'):
-                return 'responded', 'provider_response_without_error'
-        return None
+                outcome = 'responded', 'provider_response_without_error'
+        return outcome
 
     def mark_response(self, instruction_id, state):
         if state not in {'reported', 'unreportable'}:

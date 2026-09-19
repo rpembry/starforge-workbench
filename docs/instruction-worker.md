@@ -75,8 +75,11 @@ After `received`, each worker sweep asks the same loopback API for at most the
 allowlisted metadata. A completed assistant record with `finish: stop` and the
 delivered user-message ID as its parent advances the instruction to `responded`.
 Intermediate `tool-calls` records do not. A correlated typed assistant error
-also advances to `responded` with an error reason. Neither outcome means the
-requested work succeeded or completed. A restart reuses the private marker and
+also advances to `responded` with an error reason. Records are read in the
+API's returned order, treated as chronological, and the last terminal record
+for the same parent is authoritative: an earlier error superseded by a later
+clean completion is not reported as an error, and the reverse holds too.
+Neither outcome means the requested work succeeded or completed. A restart reuses the private marker and
 never sends the instruction again. The worker never logs text, lease tokens,
 provider output, or private paths; only aggregate counters or a generic
 unavailable marker.

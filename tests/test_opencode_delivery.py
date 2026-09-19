@@ -197,6 +197,52 @@ def test_tool_continuation_is_pending_and_correlated_error_is_terminal(tmp_path)
     assert 'PRIVATE' not in repr(evidence)
 
 
+def test_recovered_error_reports_final_disposition_not_earlier_error(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    result = delivery.deliver(
+        INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    fake.messages = [
+        {'info': {'id': 'msg_transient_error', 'role': 'assistant',
+                  'parentID': result.message_id, 'time': {'created': 1000},
+                  'error': {'name': 'SyntheticError', 'message': 'PRIVATE TRANSIENT ERROR'}}},
+        {'info': {'id': 'msg_recovered', 'role': 'assistant',
+                  'parentID': result.message_id, 'finish': 'stop',
+                  'time': {'created': 1100, 'completed': 1200}}},
+    ]
+
+    restarted = adapter(tmp_path, fake)
+    evidence = restarted.pending_responses()
+
+    assert len(evidence) == 1
+    assert evidence[0].outcome == 'responded'
+    assert evidence[0].reason == 'provider_response_without_error'
+    assert 'PRIVATE' not in repr(evidence)
+
+
+def test_late_error_after_prior_success_reports_final_disposition(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    result = delivery.deliver(
+        INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    fake.messages = [
+        {'info': {'id': 'msg_first_stop', 'role': 'assistant',
+                  'parentID': result.message_id, 'finish': 'stop',
+                  'time': {'created': 1000, 'completed': 1100}}},
+        {'info': {'id': 'msg_later_error', 'role': 'assistant',
+                  'parentID': result.message_id, 'time': {'created': 1200},
+                  'error': {'name': 'SyntheticError', 'message': 'PRIVATE LATER ERROR'}}},
+    ]
+
+    restarted = adapter(tmp_path, fake)
+    evidence = restarted.pending_responses()
+
+    assert len(evidence) == 1
+    assert evidence[0].outcome == 'responded'
+    assert evidence[0].reason == 'provider_response_error'
+    assert 'PRIVATE' not in repr(evidence)
+
+
 @pytest.mark.parametrize('origin', [
     'http://example.com:4098', 'http://0.0.0.0:4098', 'https://127.0.0.1:4098',
     'http://127.0.0.1:4098/path', 'http://127.0.0.1:4098?x=1',

@@ -44,6 +44,9 @@ task is complete. For a received worker instruction, the adapter performs a
 bounded local-only metadata check over the exact session's 100 most recent
 records. It reports a response only for a correlated typed error or a completed
 `finish: stop` assistant record; intermediate tool-call records do not count.
+Matching records are treated as chronologically ordered and only the last
+terminal one for a given instruction is reported, so a transient error the
+agent went on to resolve is not what gets reported.
 Although the OpenCode API response includes message parts, the adapter neither
 logs nor persists them, and the server receives only the state/reason pair. The #61
 [synthetic spike](opencode-delivery-live-smoke.md) established these limits on
