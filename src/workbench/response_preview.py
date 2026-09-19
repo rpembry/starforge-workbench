@@ -11,7 +11,7 @@ import asyncio
 
 
 class ResponsePreviewHub:
-    """Fan-out of ephemeral response excerpts to live dashboard viewers."""
+    """Fan-out of ephemeral response excerpts to live operator pages."""
 
     def __init__(self, max_queue=8):
         self._subscribers = set()

@@ -77,7 +77,7 @@ only to operator dashboard or session-detail tabs currently connected to
 one in-memory `asyncio.Queue` per connected tab). Session-detail clients discard
 events for every other registered session. A viewer who is not
 connected at that moment never sees it; nothing is buffered for later
-delivery, and a server restart clears every subscriber. The dashboard client
+delivery, and a server restart clears every subscriber. The browser client
 (`static/response-preview.js`) mirrors the same ephemerality on its side: it
 keeps entries only in the page's DOM, caps the visible list, and removes each
 entry after 60 seconds, all without browser storage.
