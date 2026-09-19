@@ -1,4 +1,4 @@
-// Guaranteed-ephemeral live provider output. Entries exist only in this
+// Application-ephemeral live provider output. Entries exist only in this
 // tab's memory: nothing here is written to localStorage, sessionStorage, or
 // any server-side store, and each entry removes itself after a short time.
 // A page reload starts empty again.

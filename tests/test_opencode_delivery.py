@@ -270,7 +270,8 @@ def test_take_preview_falls_back_to_error_message_and_is_bounded(tmp_path):
     fake.messages = [{'info': {
         'id': 'msg_error', 'role': 'assistant', 'parentID': result.message_id,
         'time': {'created': 1000},
-        'error': {'name': 'SyntheticError', 'message': 'x' * 600}}}]
+        'error': {'name': 'SyntheticError', 'message': 'x' * 600}},
+        'parts': [{'type': 'text', 'text': 'PRIVATE PARTIAL OUTPUT'}]}]
 
     restarted = adapter(tmp_path, fake)
     restarted.pending_responses()

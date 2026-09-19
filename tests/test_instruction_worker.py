@@ -67,6 +67,7 @@ class FakeAPI:
         self.renew_status = 200
         self.claim_status = 200
         self.preview_status = 202
+        self.preview_result = 'relayed'
 
     def post(self, path, json):
         self.calls.append((path, json))
@@ -75,7 +76,8 @@ class FakeAPI:
         if path.endswith('/renew'):
             return Response(self.renew_status, {'state': 'claimed'})
         if path.endswith('/response-preview'):
-            return Response(self.preview_status, {'status': 'relayed'} if self.preview_status == 202 else None)
+            return Response(self.preview_status,
+                            {'status': self.preview_result} if self.preview_status == 202 else None)
         if path.endswith('/results'):
             return Response(200, {'state': json['outcome']})
         raise AssertionError('Unexpected worker request')
@@ -204,6 +206,21 @@ def test_preview_relay_failure_does_not_affect_durable_reporting(tmp_path):
     assert adapter.marked == [(INSTRUCTION, 'reported')]
 
 
+def test_dropped_preview_is_not_counted_as_relayed(tmp_path):
+    api, adapter = FakeAPI(), FakeAdapter()
+    api.claim_status = 404
+    api.preview_result = 'dropped'
+    adapter.response_evidence = [ResponseEvidence(
+        INSTRUCTION, 'synthetic_lease_token', 'responded',
+        'provider_response_without_error')]
+    adapter.previews[INSTRUCTION] = 'Synthetic excerpt.'
+
+    result = cycle(api, config(tmp_path), adapter, lambda *args: SESSION)
+
+    assert result['previews_sent'] == 0
+    assert result['responses_reported'] == 1
+
+
 def test_generation_change_after_claim_never_sends(tmp_path):
     api, adapter = FakeAPI(), FakeAdapter()
     calls = 0
@@ -304,7 +321,10 @@ def test_worker_claim_and_receipt_against_synthetic_server(tmp_path):
         adapter.previews[created.json()['id']] = 'SYNTHETIC LIVE-ONLY EXCERPT'
         follow_up = cycle(api, config(tmp_path), adapter, lambda *args: SESSION)
         assert follow_up['responses_reported'] == 1
-        assert follow_up['previews_sent'] == 1
+        # No operator SSE subscriber is connected in this integration test,
+        # so the server accepts and drops the ephemeral preview rather than
+        # falsely reporting it as relayed.
+        assert follow_up['previews_sent'] == 0
         api.headers['Authorization'] = 'Bearer ' + operator
         responded = api.get('/api/instructions/' + created.json()['id']).json()
         assert responded['state'] == 'responded'

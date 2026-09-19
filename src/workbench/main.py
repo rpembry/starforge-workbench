@@ -194,12 +194,17 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
         return repository.report_instruction_result(identity, body.model_dump(mode='json'), who.name)
 
     @app.post('/api/instructions/{identity}/response-preview', status_code=202)
-    def instruction_response_preview(identity: str, body: InstructionPreviewIn, who=Depends(collector)):
+    async def instruction_response_preview(identity: str, body: InstructionPreviewIn,
+                                           who=Depends(collector)):
         # Proves the caller currently holds this instruction's lease; nothing
         # about the excerpt itself is written anywhere. A failed lease check
         # raises the same 404/409 as /results so the worker can tell apart
         # "not mine" from "no one is watching" (a 202 with delivered=false).
-        repository.verify_instruction_lease(identity, body.lease_token, who.name)
+        from starlette.concurrency import run_in_threadpool
+        await run_in_threadpool(
+            repository.verify_instruction_lease, identity, body.lease_token, who.name)
+        # ResponsePreviewHub owns asyncio queues and must be published from the
+        # application event loop, never from FastAPI's sync worker thread.
         delivered = app.state.response_preview.publish(identity, body.outcome, body.excerpt)
         return {'status': 'relayed' if delivered else 'dropped'}
 

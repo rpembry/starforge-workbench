@@ -459,6 +459,29 @@ def test_response_preview_requires_matching_lease_and_collector_role(api):
     assert missing.status_code == 404
 
 
+def test_response_preview_is_allowed_only_between_received_and_responded(api):
+    register_session(api)
+    item = create_instruction(api)
+    claimed = claim(api).json()
+    payload = {'lease_token': claimed['lease_token'],
+               'outcome': 'provider_response_without_error', 'excerpt': 'x'}
+
+    before_received = api.post(
+        f'/api/instructions/{item["id"]}/response-preview', json=payload)
+    assert before_received.status_code == 409
+    api.post(f'/api/instructions/{item["id"]}/results', json={
+        'lease_token': claimed['lease_token'], 'outcome': 'received',
+        'reason_code': 'provider_accepted'})
+    assert api.post(
+        f'/api/instructions/{item["id"]}/response-preview', json=payload).status_code == 202
+    api.post(f'/api/instructions/{item["id"]}/results', json={
+        'lease_token': claimed['lease_token'], 'outcome': 'responded',
+        'reason_code': 'provider_response_without_error'})
+    after_responded = api.post(
+        f'/api/instructions/{item["id"]}/response-preview', json=payload)
+    assert after_responded.status_code == 409
+
+
 def test_response_preview_bounds_excerpt_and_rejects_control_characters(api):
     register_session(api)
     item = create_instruction(api)

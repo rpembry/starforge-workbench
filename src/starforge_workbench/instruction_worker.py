@@ -73,7 +73,12 @@ def cycle(api, config, adapter, resolver=resolve_opencode_registration):
                 'lease_token': evidence.lease_token, 'outcome': evidence.reason,
                 'excerpt': excerpt})
             if preview is not None and preview.status_code == 202:
-                counts['previews_sent'] += 1
+                try:
+                    relayed = preview.json().get('status') == 'relayed'
+                except (AttributeError, TypeError, ValueError):
+                    relayed = False
+                if relayed:
+                    counts['previews_sent'] += 1
         report = _post(api, f'/api/instructions/{evidence.instruction_id}/results', {
             'lease_token': evidence.lease_token, 'outcome': evidence.outcome,
             'reason_code': evidence.reason})

@@ -504,6 +504,9 @@ class SQLiteRepository:
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._verify_instruction_lease(db, identity, token, principal)
+            if row['state'] != 'received':
+                raise Problem(409, 'invalid_transition',
+                              'Response preview requires received delivery evidence')
             db.commit()
             return row['id']
 

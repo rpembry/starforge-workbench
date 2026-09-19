@@ -40,7 +40,7 @@ class ResponseEvidence:
     reason: str
 
 
-def _excerpt(item, limit=500):
+def _excerpt(item, limit=500, error=False):
     """Bounded, control-character-free text for the ephemeral preview only.
 
     Prefers the assistant message's text parts; falls back to a typed
@@ -50,14 +50,19 @@ def _excerpt(item, limit=500):
     info = item.get('info') if isinstance(item, dict) else None
     parts = item.get('parts') if isinstance(item, dict) else None
     pieces = []
-    if isinstance(parts, list):
+    if error and isinstance(info, dict):
+        typed_error = info.get('error')
+        message = typed_error.get('message') if isinstance(typed_error, dict) else None
+        if isinstance(message, str):
+            pieces.append(message)
+    if not pieces and isinstance(parts, list):
         for part in parts:
             if isinstance(part, dict) and part.get('type') == 'text' and isinstance(part.get('text'), str):
                 pieces.append(part['text'])
     text = ' '.join(pieces).strip()
     if not text and isinstance(info, dict):
-        error = info.get('error')
-        message = error.get('message') if isinstance(error, dict) else None
+        typed_error = info.get('error')
+        message = typed_error.get('message') if isinstance(typed_error, dict) else None
         if isinstance(message, str):
             text = message.strip()
     text = ''.join(character for character in text
@@ -329,7 +334,7 @@ class OpenCodeDelivery:
         for item in matched:
             info = item.get('info', {})
             if isinstance(info.get('error'), dict):
-                outcome = 'responded', 'provider_response_error', _excerpt(item)
+                outcome = 'responded', 'provider_response_error', _excerpt(item, error=True)
                 continue
             completed = info.get('time', {}).get('completed') if isinstance(info.get('time'), dict) else None
             if (not isinstance(completed, bool) and isinstance(completed, (int, float)) and
