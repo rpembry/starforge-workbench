@@ -90,10 +90,11 @@ ephemeral preview: a one-shot, in-memory-only excerpt handed to
 [`take_preview`](../src/starforge_workbench/opencode_delivery.py) and posted,
 best-effort, to `/api/instructions/{id}/response-preview` right before the
 durable `/results` report in the same sweep. The server never writes this
-excerpt anywhere; it only fans it out to operator dashboard tabs connected to
-`/api/instructions/preview-stream` at that moment, and drops it if none are
-connected. A failure or non-202 response on this path is silently ignored and
-never affects the durable outcome reported immediately after it. See
+excerpt anywhere; it only fans it out to operator dashboard or matching
+session-detail tabs connected to `/api/instructions/preview-stream` at that
+moment, and drops it if none are connected. Session-detail tabs discard events
+for other registered sessions. A failure or non-202 response on this path is
+silently ignored and never affects the durable outcome reported immediately after it. See
 [the adapter doc](opencode-delivery-adapter.md#ephemeral-live-preview) for the
 excerpt's exact bounds.
 

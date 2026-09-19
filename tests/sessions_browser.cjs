@@ -6,6 +6,14 @@ const {chromium} = require(process.env.WB_PLAYWRIGHT_MODULE);
   try {
     const page = await browser.newPage({viewport: {width: 360, height: 740}, deviceScaleFactor: 3,
       extraHTTPHeaders: {Authorization: 'Bearer ' + 'o'.repeat(40)}});
+    await page.addInitScript(() => {
+      class SyntheticEventSource {
+        constructor() { window.syntheticPreviewSource = this; }
+        close() {}
+      }
+      window.EventSource = SyntheticEventSource;
+      window.emitSyntheticPreview = event => window.syntheticPreviewSource.onmessage({data: JSON.stringify(event)});
+    });
     for (const path of ['/sessions', '/sessions/registered_session_0001']) {
       await page.goto(process.env.WB_TEST_URL + path);
       assert.equal(await page.locator('main').count(), 1);
@@ -33,5 +41,17 @@ const {chromium} = require(process.env.WB_PLAYWRIGHT_MODULE);
     assert.equal(await page.getByText(instruction, {exact: true}).count(), 1);
     assert.equal(await page.locator('.instruction h3 .badge').filter({hasText: 'Queued'}).count(), 1);
     assert.equal(await page.getByRole('button', {name: /Pause|Continue|Stop/}).count(), 0);
+    await page.evaluate(() => window.emitSyntheticPreview({
+      instruction_id: 'instruction_other', registered_session_id: 'registered_session_0002',
+      outcome: 'provider_response_without_error', excerpt: 'MUST NOT APPEAR'}));
+    assert.equal(await page.getByText('MUST NOT APPEAR', {exact: true}).count(), 0);
+    for (let index = 1; index <= 6; index++) {
+      await page.evaluate(index => window.emitSyntheticPreview({
+        instruction_id: 'instruction_' + index, registered_session_id: 'registered_session_0001',
+        outcome: 'provider_response_without_error', excerpt: 'Session preview ' + index}), index);
+    }
+    assert.equal(await page.locator('#response-preview-feed article').count(), 5);
+    assert.equal(await page.getByText('Session preview 1', {exact: true}).count(), 0);
+    assert.equal(await page.getByText('Session preview 6', {exact: true}).count(), 1);
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

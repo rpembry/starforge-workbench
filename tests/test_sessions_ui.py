@@ -79,6 +79,9 @@ def test_sessions_page_escapes_labels_and_omits_summary(api, repo):
     assert 'Queue instruction' in detail.text
     assert '15 minutes (default)' in detail.text
     assert 'Pause, Continue, and Stop are not provided' in detail.text
+    assert 'Live provider output' in detail.text
+    assert 'data-registered-session-id="registered_session_0001"' in detail.text
+    assert 'src="/assets/response-preview.js"' in detail.text
 
 
 def test_sessions_view_distinguishes_stale_offline_unknown_and_work(api, repo, monkeypatch):

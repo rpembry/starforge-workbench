@@ -508,7 +508,8 @@ class SQLiteRepository:
                 raise Problem(409, 'invalid_transition',
                               'Response preview requires received delivery evidence')
             db.commit()
-            return row['id']
+            return {'instruction_id': row['id'],
+                    'registered_session_id': row['registered_session_id']}
 
     def renew_instruction_claim(self, identity, token, principal, claims_enabled=False):
         from datetime import datetime, timedelta, timezone

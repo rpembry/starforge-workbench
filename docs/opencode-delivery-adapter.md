@@ -70,10 +70,12 @@ even if the worker never calls `take_preview`.
 The worker sends whatever `take_preview` returns, best-effort, to
 `/api/instructions/{id}/response-preview` immediately before its `/results`
 report for the same instruction. The server does not persist it either: it
-authenticates the same lease token used for `/results`, then fans the excerpt
-out only to operator dashboard tabs currently connected to
+authenticates the same lease token used for `/results`, attaches the opaque
+registered-session identity proven by that lease, then fans the excerpt out
+only to operator dashboard or session-detail tabs currently connected to
 `/api/instructions/preview-stream` (Server-Sent Events, `text/event-stream`,
-one in-memory `asyncio.Queue` per connected tab). A viewer who is not
+one in-memory `asyncio.Queue` per connected tab). Session-detail clients discard
+events for every other registered session. A viewer who is not
 connected at that moment never sees it; nothing is buffered for later
 delivery, and a server restart clears every subscriber. The dashboard client
 (`static/response-preview.js`) mirrors the same ephemerality on its side: it

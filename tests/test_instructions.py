@@ -415,7 +415,8 @@ def test_response_preview_relays_live_and_never_persists(api):
     assert relayed.status_code == 202
     assert relayed.json() == {'status': 'relayed'}
     assert subscriber.get_nowait() == {
-        'instruction_id': item['id'], 'outcome': 'provider_response_without_error',
+        'instruction_id': item['id'], 'registered_session_id': SESSION_ID,
+        'outcome': 'provider_response_without_error',
         'excerpt': 'SYNTHETIC LIVE EXCERPT'}
 
     api.headers['Authorization'] = 'Bearer ' + OPERATOR
