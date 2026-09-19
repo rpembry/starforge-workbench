@@ -11,7 +11,7 @@ import asyncio
 
 
 class ResponsePreviewHub:
-    """Fan-out of ephemeral response excerpts to live dashboard viewers."""
+    """Fan-out of ephemeral response excerpts to live operator pages."""
 
     def __init__(self, max_queue=8):
         self._subscribers = set()
@@ -25,10 +25,12 @@ class ResponsePreviewHub:
     def unsubscribe(self, queue):
         self._subscribers.discard(queue)
 
-    def publish(self, instruction_id, outcome, excerpt):
+    def publish(self, instruction_id, registered_session_id, outcome, excerpt):
         """Fan an excerpt out to current subscribers only. Returns whether at
         least one subscriber received it; nothing is queued for the future."""
-        event = {'instruction_id': instruction_id, 'outcome': outcome, 'excerpt': excerpt}
+        event = {'instruction_id': instruction_id,
+                 'registered_session_id': registered_session_id,
+                 'outcome': outcome, 'excerpt': excerpt}
         delivered = False
         for queue in list(self._subscribers):
             try:

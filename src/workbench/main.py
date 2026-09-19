@@ -201,11 +201,13 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
         # raises the same 404/409 as /results so the worker can tell apart
         # "not mine" from "no one is watching" (a 202 with delivered=false).
         from starlette.concurrency import run_in_threadpool
-        await run_in_threadpool(
+        target = await run_in_threadpool(
             repository.verify_instruction_lease, identity, body.lease_token, who.name)
         # ResponsePreviewHub owns asyncio queues and must be published from the
         # application event loop, never from FastAPI's sync worker thread.
-        delivered = app.state.response_preview.publish(identity, body.outcome, body.excerpt)
+        delivered = app.state.response_preview.publish(
+            target['instruction_id'], target['registered_session_id'],
+            body.outcome, body.excerpt)
         return {'status': 'relayed' if delivered else 'dropped'}
 
     @app.get('/api/instructions/preview-stream', dependencies=[Depends(operator)])

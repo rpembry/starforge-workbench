@@ -8,9 +8,14 @@
 
   var MAX_ENTRIES = 5;
   var LIFETIME_MS = 60000;
+  var sessionId = container.getAttribute('data-registered-session-id');
 
   function addEntry(event) {
     if (!event || typeof event.excerpt !== 'string' || !event.excerpt) return;
+    // A session page must never display another session's response. The main
+    // dashboard has no session scope and intentionally continues to show all
+    // live previews available to the operator.
+    if (sessionId && event.registered_session_id !== sessionId) return;
     var article = document.createElement('article');
     var badge = document.createElement('span');
     badge.className = 'badge';
