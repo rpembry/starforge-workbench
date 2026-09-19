@@ -26,6 +26,13 @@ def invoke(server, name, arguments=None):
     return asyncio.run(run()).structured_content
 
 
+def test_server_instructions_explain_unsupported_operation_fallback():
+    instructions = build_server().instructions
+    assert 'GitHub feature request' in instructions
+    assert 'GitHub access is unavailable' in instructions
+    assert 'notify the user' in instructions
+
+
 def test_read_and_append_tools_use_bounded_api_contracts():
     api = API()
     server = build_server(api_factory=lambda **kwargs: api, manifest_path=lambda: None, context_loader=lambda path: [{'id': 'daily', 'provider': 'codex', 'enabled': True}])
