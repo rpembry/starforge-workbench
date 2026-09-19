@@ -5,6 +5,7 @@ Read README.md and docs/adapting.md, then inspect current source and tests; docu
 - Preserve unrelated changes. Keep edits focused and test the affected behavior.
 - When tightening runtime policies, test previously supported pinned images.
 - Do not spawn agents automatically.
+- When a requested Starforge Workbench (`aiw`) operation is not directly supported by its MCP server, consider creating a GitHub feature request to add that capability for future use. If GitHub access is unavailable, notify the user of the capability gap and suggest the feature request. Do not let filing or suggesting the issue substitute for completing the current request through an authorized, safe path when one exists.
 - Do not install services, launch providers, change existing session bindings, or enable collection merely to inspect or test the code.
 - Use synthetic data and isolated test state. Never commit private manifests, credentials, transcripts, databases, machine inventories, or real deployment configuration.
 - Keep observation, proposal, accepted work, process presence, activity, and completion semantics separate. Missing collector evidence means unknown visibility.

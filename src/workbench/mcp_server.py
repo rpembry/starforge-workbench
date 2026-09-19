@@ -45,7 +45,13 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
                        description='Local tools for Workbench state and deliberate launcher restoration.',
                        instructions=('This local stdio server uses the configured Workbench operator credential. '
                                      'Observations and proposals do not prove task completion. Session restoration '
-                                     'is disabled by default and requires an explicit local opt-in.'), version='0.2.0')
+                                     'is disabled by default and requires an explicit local opt-in. When a requested '
+                                     'Starforge Workbench (aiw) operation is not directly supported by this MCP '
+                                     'server, consider creating a GitHub feature request to add the capability. If '
+                                     'GitHub access is unavailable, notify the user of the capability gap and suggest '
+                                     'the feature request. Filing or suggesting an issue does not replace completing '
+                                     'the current request through an authorized, safe path when one exists.'),
+                       version='0.2.0')
 
     def request(method: str, path: str, payload=None):
         with api_factory(role='operator') as api:
