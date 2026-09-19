@@ -20,7 +20,7 @@ and OpenCode's unauthenticated loopback API.
 | Cross-session delivery | The operator selects an opaque registered session. The owning collector resolves it through private generation-bound state before and after claim; the adapter preflights and posts only the exact `ses_` ID. | Display names are not authority. Stop if local registration or binding evidence is unexpected. |
 | Stale, replaced, or foreign target | Fresh collector/session evidence and ownership are required. A generation change blocks delivery; queued work is never retargeted by name. | Heartbeats prove observation, not idle state or task readiness. |
 | Replay or duplicate provider work | API creation is idempotent. A private durable marker is written before the sole provider POST. Timeout, crash, unexpected response, and unresolved restart become `uncertain`, never an automatic resend. | OpenCode does not provide proven idempotency. Preserve receipts and resolve ambiguity manually. |
-| Credential or transcript disclosure | Operator and collector roles are separate. Credentials and local state must be private and outside Git. Audit/history omit instruction text, lease tokens, provider output, local paths, and provider session IDs. | The operator UI and queue intentionally contain instruction text. Apply normal database and browser-access protections. |
+| Credential or transcript disclosure | Operator and collector roles are separate. Credentials and local state must be private and outside Git. Audit/history omit instruction text, lease tokens, provider output, local paths, and provider session IDs. The local worker discards bounded provider message bodies after checking correlation metadata. | The operator UI and queue intentionally contain instruction text. Private delivery receipts temporarily contain an opaque reporting lease. Apply normal database, filesystem, and browser-access protections. |
 | Public provider endpoint or interception | The adapter accepts only explicit `http://127.0.0.1:PORT`; redirects and credentialed, wildcard, remote, HTTPS, or path-bearing origins are rejected. The unit cannot configure an origin from server data. | OpenCode's local API is unauthenticated. Verify its listener is loopback-only and do not publish or proxy it. |
 | Unauthorized browser submission | Only authenticated operators can view or create instructions. The form checks the configured public origin and requires exact-target confirmation; Cloudflare service credentials cannot act as a browser operator. | Cloudflare policy, allowed operator identities, and `WB_PUBLIC_ORIGIN` require deployment review. |
 | Evidence overstatement | `received` means API admission or stored-message evidence; `responded` means correlated output without proving requested work success. `uncertain` is terminal. | Use provider/session output and ordinary work review to determine whether requested work completed. |
@@ -171,7 +171,9 @@ Before production enablement, repeat the UI portion from the intended Android
 browser through the reviewed Cloudflare Access policy, but target only a newly
 created disposable OpenCode session. Use synthetic text. Verify the other
 disposable session has no instruction or provider message, the selected session
-has exactly one, and the timeline says `received` rather than completed. Stop
+has exactly one, and the timeline says `received` after admission and then
+`Response observed` after a correlated final assistant record. Confirm that the
+page still says this is not proof the work completed. Stop
 and disable both gates after the demonstration.
 
 The automated phone-view and fake-provider evidence is not a real Android,

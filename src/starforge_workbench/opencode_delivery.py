@@ -4,7 +4,7 @@ This module does not poll Workbench or control a provider session by itself. A
 trusted local worker must supply an exact registered session ID and a claim.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import http.client
 import json
@@ -30,6 +30,14 @@ class DeliveryResult:
     state: str
     reason: str
     message_id: str
+
+
+@dataclass(frozen=True)
+class ResponseEvidence:
+    instruction_id: str
+    lease_token: str = field(repr=False)
+    outcome: str
+    reason: str
 
 
 def _private_root(path):
@@ -124,8 +132,17 @@ class OpenCodeDelivery:
             headers = {} if body is None else {'Content-Type': 'application/json'}
             connection.request(method, path, body=body, headers=headers)
             response = connection.getresponse()
-            # Only the exact-session preflight needs a bounded response body.
-            data = response.read(8193) if method == 'GET' and path.count('/') == 2 else b''
+            if method == 'GET' and path.endswith('/message?limit=100'):
+                # The API includes message parts. They remain local, are never
+                # logged or persisted here, and are bounded before parsing.
+                data = response.read(8 * 1024 * 1024 + 1)
+                if len(data) > 8 * 1024 * 1024:
+                    return 413, b''
+            # Only the exact-session preflight needs another response body.
+            elif method == 'GET' and path.count('/') == 2:
+                data = response.read(8193)
+            else:
+                data = b''
             return response.status, data
         finally:
             connection.close()
@@ -137,13 +154,16 @@ class OpenCodeDelivery:
             return 'unavailable'
         return 'present' if status == 200 else 'absent' if status == 404 else 'unavailable'
 
-    def deliver(self, instruction_id, session_id, text):
+    def deliver(self, instruction_id, session_id, text, lease_token=None):
         if not isinstance(instruction_id, str) or not IDENTITY.fullmatch(instruction_id):
             raise DeliveryError('Invalid instruction identity')
         if not isinstance(session_id, str) or not IDENTITY.fullmatch(session_id) or not session_id.startswith('ses_'):
             raise DeliveryError('Invalid exact OpenCode session identity')
         if not isinstance(text, str):
             raise DeliveryError('Instruction must be text')
+        if lease_token is not None and (not isinstance(lease_token, str) or
+                                        not IDENTITY.fullmatch(lease_token)):
+            raise DeliveryError('Invalid response-reporting lease')
         text = text.strip()
         if not 1 <= len(text) <= 2000 or any(
             unicodedata.category(char) == 'Cc' and char not in '\n\t' for char in text
@@ -192,6 +212,9 @@ class OpenCodeDelivery:
                                   message_id)
         receipt = {'session_id': session_id, 'message_id': message_id,
                    'content_sha256': content_hash, 'state': 'attempted'}
+        if lease_token is not None:
+            receipt.update(instruction_id=instruction_id, lease_token=lease_token,
+                           response_state='pending')
         try:
             _save(path, receipt, exclusive=True)
         except FileExistsError:
@@ -209,3 +232,69 @@ class OpenCodeDelivery:
         receipt['state'] = 'uncertain'
         _save(path, receipt)
         return DeliveryResult('uncertain', 'ambiguous_provider_boundary', message_id)
+
+    def pending_responses(self):
+        """Return terminal response evidence without provider content."""
+        evidence = []
+        for path in sorted(self.root.glob('*.json')):
+            if not re.fullmatch(r'[a-f0-9]{64}\.json', path.name):
+                continue
+            receipt = _load(path)
+            if receipt.get('state') != 'received' or receipt.get('response_state') != 'pending':
+                continue
+            instruction_id = receipt.get('instruction_id')
+            lease_token = receipt.get('lease_token')
+            session_id = receipt.get('session_id')
+            message_id = receipt.get('message_id')
+            if (not isinstance(instruction_id, str) or not IDENTITY.fullmatch(instruction_id) or
+                path.name != hashlib.sha256(instruction_id.encode()).hexdigest() + '.json' or
+                not isinstance(lease_token, str) or not IDENTITY.fullmatch(lease_token) or
+                not isinstance(session_id, str) or not IDENTITY.fullmatch(session_id) or
+                not isinstance(message_id, str) or not IDENTITY.fullmatch(message_id)):
+                raise DeliveryError('Invalid local response receipt')
+            result = self._response(session_id, message_id)
+            if result:
+                outcome, reason = result
+                evidence.append(ResponseEvidence(instruction_id, lease_token, outcome, reason))
+        return evidence
+
+    def _response(self, session_id, message_id):
+        try:
+            status, body = self.transport(
+                'GET', f'/session/{session_id}/message?limit=100')
+        except (OSError, TimeoutError, http.client.HTTPException):
+            return None
+        if status != 200 or len(body) > 8 * 1024 * 1024:
+            return None
+        try:
+            messages = json.loads(body)
+            if not isinstance(messages, list):
+                return None
+            matched = []
+            for item in messages:
+                info = item.get('info') if isinstance(item, dict) else None
+                if (isinstance(info, dict) and info.get('role') == 'assistant' and
+                        info.get('parentID') == message_id):
+                    matched.append(info)
+        except (UnicodeError, ValueError, AttributeError):
+            return None
+        for info in matched:
+            if isinstance(info.get('error'), dict):
+                return 'responded', 'provider_response_error'
+        for info in matched:
+            completed = info.get('time', {}).get('completed') if isinstance(info.get('time'), dict) else None
+            if (not isinstance(completed, bool) and isinstance(completed, (int, float)) and
+                    info.get('finish') == 'stop'):
+                return 'responded', 'provider_response_without_error'
+        return None
+
+    def mark_response(self, instruction_id, state):
+        if state not in {'reported', 'unreportable'}:
+            raise DeliveryError('Invalid response receipt state')
+        path = self.root / (hashlib.sha256(instruction_id.encode()).hexdigest() + '.json')
+        receipt = _load(path)
+        if receipt.get('instruction_id') != instruction_id:
+            raise DeliveryError('Instruction identity changed target')
+        receipt['response_state'] = state
+        receipt.pop('lease_token', None)
+        _save(path, receipt)
