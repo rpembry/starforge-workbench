@@ -3,6 +3,7 @@
 Read README.md and docs/adapting.md, then inspect current source and tests; documentation can lag implementation. This repository is a public personal reference implementation.
 
 - Preserve unrelated changes. Keep edits focused and test the affected behavior.
+- When tightening runtime policies, test previously supported pinned images.
 - Do not spawn agents automatically.
 - Do not install services, launch providers, change existing session bindings, or enable collection merely to inspect or test the code.
 - Use synthetic data and isolated test state. Never commit private manifests, credentials, transcripts, databases, machine inventories, or real deployment configuration.

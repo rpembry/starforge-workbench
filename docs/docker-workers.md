@@ -152,3 +152,39 @@ reappearing source path stop the operation and preserve both locations. If failu
 occurs before moves, create a fresh review after resolving changes. After moves,
 retry the same approved token; changed archives or ambiguous state require manual
 inspection. `dispose` never repairs that ambiguity by deleting either copy.
+
+## Environment policy (#51, first increment)
+
+Image environment defaults are untrusted configuration. Before allocating an
+attempt, the runner rejects unknown names, duplicate names, malformed entries,
+and values outside the fixed policy. Each entry is bounded to 256 characters.
+The accepted names and values are:
+
+| Name | Accepted image value | Effective value |
+| --- | --- | --- |
+| `PATH` | `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, optionally prefixed with `/usr/local/bin:` by official Python images | Standard path without the duplicate prefix, explicitly supplied |
+| `HOME` | `/tmp` or `/root` | `/tmp`, explicitly supplied |
+| `LANG` | `C`, `C.UTF-8`, or `en_US.UTF-8` | `C.UTF-8`, explicitly supplied |
+| `PYTHON_VERSION` | Bounded numeric major.minor.patch, optional a/b/rc suffix | Image value |
+| `PYTHON_SHA256` | 64 hexadecimal characters | Image value |
+| `GPG_KEY` | 40 hexadecimal characters (public key fingerprint) | Image value |
+
+Missing image entries are allowed; the runner always supplies PATH/HOME/LANG.
+Python metadata supports the official images used in the evaluation, without
+allowing arbitrary environment entries. Image variables such as tokens,
+`LD_PRELOAD`, proxy settings, and alternate executable search paths fail closed.
+Use an image with approved defaults; this implementation has no bypass flag.
+
+The created container must have exactly the expected effective environment before
+it can start. The receipt stores a SHA-256 fingerprint of that environment,
+not its values. Error messages do not echo supplied names or values. Host
+credentials are not forwarded to Docker with `--env` or `--env-file`.
+
+This is configuration enforcement, not secret detection or output redaction.
+Do not place secrets in images, commands, task labels, committed repositories,
+logs, or artifacts: those channels are not made safe by an environment allowlist.
+A digest pins image identity, not image trust. Nonempty `secret_refs` remain
+rejected, and no provider credentials are delivered. Task-scoped credential
+injection/redaction and audited exceptions remain outstanding #51 work. Native
+launchers, network `none`, role-only mounts and the existing isolation controls
+are unchanged.
