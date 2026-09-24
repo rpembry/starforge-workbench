@@ -9,6 +9,7 @@ Read README.md and docs/adapting.md, then inspect current source and tests; docu
 - Do not install services, launch providers, change existing session bindings, or enable collection merely to inspect or test the code.
 - Use synthetic data and isolated test state. Never commit private manifests, credentials, transcripts, databases, machine inventories, or real deployment configuration.
 - Use synthetic employer-neutral names and example.com/example.invalid URLs in public tests, examples, issues, and PR descriptions.
+- Reviews must look for non-generic names and employer-specific URLs in public code, tests, examples, documentation, issues, and PR descriptions, and recommend removing or replacing unnecessary references with synthetic examples. Preserve required attribution and intentional project branding.
 - Keep observation, proposal, accepted work, process presence, activity, and completion semantics separate. Missing collector evidence means unknown visibility.
 - Local configuration belongs outside Git. Preserve the default-deny ignore policy and third-party license notices.
 - Run `uv run pytest -q` and `git diff --check`; report environmental skips. Desktop integration tests are explicit opt-in checks.
