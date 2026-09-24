@@ -64,6 +64,22 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
         """List configured launcher contexts without disclosing commands or filesystem paths."""
         return context_loader(manifest_path())
 
+    @server.tool(name='browser_workspace_list', structured_output=True)
+    def browser_workspace_list() -> dict[str, object]:
+        """List Workbench-owned Chrome workspaces and their named URL entries."""
+        return request('GET', '/api/browser/workspaces')
+
+    @server.tool(name='browser_workspace_add', structured_output=True)
+    def browser_workspace_add(name: str, url: str, workspace: str = 'default', match: Literal['origin', 'url'] = 'origin') -> dict[str, object]:
+        """Add a named URL to a Chrome workspace; use this for requests such as adding a site to Chrome."""
+        return request('POST', f'/api/browser/workspaces/{workspace}/entries',
+                       {'name': name, 'url': url, 'match': match})
+
+    @server.tool(name='browser_workspace_remove', structured_output=True)
+    def browser_workspace_remove(name: str, workspace: str = 'default') -> dict[str, object]:
+        """Remove a named URL from a Chrome workspace; this changes desired state but does not close tabs."""
+        return request('DELETE', f'/api/browser/workspaces/{workspace}/entries/{name}')
+
     @server.tool(name='worklog_query', structured_output=True)
     def worklog_query(table: Literal['actions', 'artifacts', 'collectors', 'events', 'import_batches', 'import_records', 'objectives', 'runs'], limit: int = 100, offset: int = 0) -> dict[str, object]:
         """Read a bounded page of current Workbench records through its authenticated API."""

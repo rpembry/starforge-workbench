@@ -87,6 +87,13 @@ Exact-ID operator association of an existing process generation is documented in
 [action-to-run linking](docs/action-run-linking.md).
 [RECENT activity](docs/recent-activity.md) shows readable subject titles and relative times, with original audit details on expansion.
 
+### Chrome workspaces
+
+Workbench can own a named, editable Chrome workspace without hard-coding tabs
+in a shell script. Use `bin/chrome` or `bin/ai-workbench chrome`; see the
+[Chrome workspace guide](docs/browser-workspaces.md) for CRUD, launch, and
+optional non-destructive refresh behavior.
+
 ### Report suggestions
 
 Optional [automatic Ollama suggestions](docs/report-suggestions.md) add saved,

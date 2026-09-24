@@ -186,3 +186,18 @@ def test_browser_policy_allows_only_same_origin_images(api):
         assert directives['img-src'] == "'self'"
         assert directives['default-src'] == "'none'"
         assert directives['script-src'] == "'self'"
+
+
+def test_browser_workspace_api_owns_crud(api, monkeypatch, tmp_path):
+    config = tmp_path / 'browser-workspaces.yaml'
+    monkeypatch.setenv('WB_BROWSER_WORKSPACES_FILE', str(config))
+    created = api.post('/api/browser/workspaces/default/entries', json={
+        'name': 'Workbench', 'url': 'https://workbench.example.com/'
+    })
+    assert created.status_code == 201
+    assert created.json()['match'] == 'origin'
+    assert api.get('/api/browser/workspaces').json()['workspaces']['default'][0]['name'] == 'Workbench'
+    updated = api.patch('/api/browser/workspaces/default/entries/Workbench', json={'name': 'Home'})
+    assert updated.status_code == 200
+    assert api.delete('/api/browser/workspaces/default/entries/Home').status_code == 200
+    assert api.get('/api/browser/workspaces').json()['workspaces']['default'] == []

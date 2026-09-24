@@ -1,0 +1,12 @@
+version: 1
+workspaces:
+  default:
+    - name: Gmail
+      url: https://mail.google.com/
+      match: origin
+    - name: ChatGPT
+      url: https://chatgpt.com/
+      match: origin
+    - name: Workbench
+      url: https://workbench.embry.com/
+      match: origin

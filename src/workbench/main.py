@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 from fastapi.templating import Jinja2Templates
 from fastapi.security import HTTPBearer, APIKeyHeader
 from starlette.exceptions import HTTPException
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from .auth import Auth, CloudflareAuth
 from .models import (ActionIn, ActionPatch, ArtifactIn, EventIn, ObjectiveIn,
@@ -23,6 +23,18 @@ from .models import (ActionIn, ActionPatch, ArtifactIn, EventIn, ObjectiveIn,
 from .repository import Problem, SQLiteRepository
 from .response_preview import ResponsePreviewHub
 from .settings import load_settings
+
+
+class BrowserWorkspaceEntryIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    url: str
+    match: Literal['origin', 'url'] = 'origin'
+
+
+class BrowserWorkspacePatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    url: str | None = None
+    match: Literal['origin', 'url'] | None = None
 
 
 def create_app(repository=None, auth=None, settings=None, instruction_claims_enabled=None):
@@ -151,6 +163,26 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     @app.get('/api/attention', dependencies=[Depends(operator)])
     def attention():
         return repository.dashboard()['attention']
+
+    @app.get('/api/browser/workspaces', dependencies=[Depends(operator)])
+    def browser_workspaces():
+        from starforge_workbench.browser import load_config
+        return load_config()
+
+    @app.post('/api/browser/workspaces/{workspace}/entries', status_code=201)
+    def browser_workspace_add(workspace: str, body: BrowserWorkspaceEntryIn, who=Depends(operator)):
+        from starforge_workbench.browser import add_entry
+        return add_entry(body.name, body.url, workspace, body.match)
+
+    @app.patch('/api/browser/workspaces/{workspace}/entries/{name}')
+    def browser_workspace_update(workspace: str, name: str, body: BrowserWorkspacePatch, who=Depends(operator)):
+        from starforge_workbench.browser import update_entry
+        return update_entry(name, body.url, body.name, workspace, body.match)
+
+    @app.delete('/api/browser/workspaces/{workspace}/entries/{name}')
+    def browser_workspace_remove(workspace: str, name: str, who=Depends(operator)):
+        from starforge_workbench.browser import remove_entry
+        return remove_entry(name, workspace)
 
     # Named request/response resources keep OpenAPI useful to an LLM client.
     def list_endpoint(table):
