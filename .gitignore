@@ -18,9 +18,12 @@
 !/src/**/htmx-LICENSE.txt
 !/bin/
 !/bin/ai-workbench
+!/bin/aiw
+!/bin/chrome
 !/bin/keep-collector.mjs
 !/config/
 !/config/workbench.example.yaml
+!/config/browser-workspaces.example.yaml
 !/config/settings.example.yaml
 !/config/execution.*.example.yaml
 !/config/opencode-attention.example.js

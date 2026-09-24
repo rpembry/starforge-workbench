@@ -699,6 +699,10 @@ def menu(c):
 
 
 def main(argv=None):
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] == 'chrome':
+        from starforge_workbench.browser import main as browser_main
+        return browser_main(raw_argv[1:])
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--manifest', type=Path, default=(ROOT/'config/workbench.yaml' if (ROOT/'config/workbench.yaml').exists() else ROOT/'config/workbench.example.yaml'))
     p.add_argument('--dry-run', action='store_true')
