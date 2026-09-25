@@ -19,15 +19,18 @@ Git. The existing `~/.config/starforge-ai-workbench` and
 `~/.local/state/starforge-ai-workbench` namespaces remain compatible; choosing a
 canonical repository does not rename state or reset sessions.
 
-For a fresh checkout, run `uv sync`. Supply a private manifest explicitly:
+For a fresh checkout, run `uv sync`. The launcher automatically prefers the
+private XDG manifest, such as `~/.config/starforge-ai-workbench/workbench.yaml`.
+You can also supply it explicitly:
 
 ```sh
 bin/ai-workbench --manifest ~/.config/starforge-ai-workbench/workbench.yaml list
 ```
 
 An ignored `config/workbench.yaml` symlink to that private manifest is another
-option for an existing installation. Never replace a working manifest with the
-example without adapting and reviewing it.
+option for an existing installation. It takes precedence over the public example
+only when no private XDG manifest is present. Never replace a working manifest
+with the example without adapting and reviewing it.
 
 ## Existing installations
 

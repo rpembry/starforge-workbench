@@ -4,7 +4,7 @@ Start by inspecting `src/starforge_workbench/cli.py` for launcher/provider assum
 
 ## Launcher
 
-Copy `config/workbench.example.yaml` to `config/workbench.yaml` (ignored by Git). Adjust each directory, provider, and enabled flag. The example intentionally contains no production or employer bindings. `bin/ai-workbench --dry-run up` previews the plan; `bin/ai-workbench doctor CONTEXT` checks prerequisites. Launch a configured context with `bin/ai-workbench up CONTEXT`, or add `--headless` to omit a graphical tab.
+Copy `config/workbench.example.yaml` to the private XDG configuration location, such as `~/.config/starforge-ai-workbench/workbench.yaml`, and adjust each directory, provider, and enabled flag. A checkout-local `config/workbench.yaml` is also supported for development and adaptation. The example intentionally contains no production or employer bindings. The launcher resolves an explicit `--manifest` first, then the private XDG manifest, then a checkout-local manifest, and finally the example. `bin/ai-workbench --dry-run up` previews the plan; `bin/ai-workbench doctor CONTEXT` checks prerequisites. Launch a configured context with `bin/ai-workbench up CONTEXT`, or add `--headless` to omit a graphical tab.
 
 Provider executables are discovered on PATH, with historical installation-path fallbacks in `PROVIDERS`. The launcher still expects Linux process metadata, tmux, and zsh. The desktop bridge uses `/usr/bin/python3` with GObject introspection and the installed Ptyxis schemas. An optional `~/bin/ren.sh` title helper is attempted; its absence does not prevent provider startup. CLI flags, resume catalogs, and provider installations are expected adaptation points.
 

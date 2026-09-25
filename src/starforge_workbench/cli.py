@@ -71,6 +71,15 @@ def cwd(c):
 def directories(c):
     return [cwd(c)] + [Path(os.path.expandvars(p)).expanduser().resolve() for p in c['additional_cwds']]
 
+def default_manifest():
+    config_home = Path(os.environ.get('XDG_CONFIG_HOME', HOME/'.config')).expanduser()
+    private = config_home/'starforge-ai-workbench/workbench.yaml'
+    local = ROOT/'config/workbench.yaml'
+    for candidate in (private, local, ROOT/'config/workbench.example.yaml'):
+        if candidate.exists():
+            return candidate
+    return ROOT/'config/workbench.example.yaml'
+
 def secure_dir(path):
     if path != STATE and STATE in path.parents:
         secure_dir(STATE)
@@ -704,7 +713,7 @@ def main(argv=None):
         from starforge_workbench.browser import main as browser_main
         return browser_main(raw_argv[1:])
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--manifest', type=Path, default=(ROOT/'config/workbench.yaml' if (ROOT/'config/workbench.yaml').exists() else ROOT/'config/workbench.example.yaml'))
+    p.add_argument('--manifest', type=Path, default=default_manifest())
     p.add_argument('--dry-run', action='store_true')
     p.add_argument('command', choices=['doctor','list','plan','up','attach','status','bind','_attach','_menu'])
     p.add_argument('contexts', nargs='*')

@@ -77,6 +77,36 @@ class LauncherTests(unittest.TestCase):
                 cli.main(['--dry-run','up'])
         self.assertFalse((self.path/'absent').exists())
 
+    def test_default_manifest_prefers_private_xdg_configuration(self):
+        checkout = self.path/'checkout'
+        local = checkout/'config/workbench.yaml'
+        local.parent.mkdir(parents=True)
+        local.write_text('local')
+        config_home = self.path/'xdg-config'
+        private = config_home/'starforge-ai-workbench/workbench.yaml'
+        private.parent.mkdir(parents=True)
+        private.write_text('private')
+        with patch.object(cli, 'ROOT', checkout), patch.object(cli, 'HOME', self.path), patch.dict(os.environ, {'XDG_CONFIG_HOME':str(config_home)}, clear=False):
+            self.assertEqual(cli.default_manifest(), private)
+        private.unlink()
+        with patch.object(cli, 'ROOT', checkout), patch.object(cli, 'HOME', self.path), patch.dict(os.environ, {'XDG_CONFIG_HOME':str(config_home)}, clear=False):
+            self.assertEqual(cli.default_manifest(), local)
+
+    def test_default_manifest_falls_back_to_example(self):
+        checkout = self.path/'checkout'
+        example = checkout/'config/workbench.example.yaml'
+        example.parent.mkdir(parents=True)
+        example.write_text('example')
+        with patch.object(cli, 'ROOT', checkout), patch.object(cli, 'HOME', self.path), patch.dict(os.environ, {'XDG_CONFIG_HOME':str(self.path/'empty')}, clear=False):
+            self.assertEqual(cli.default_manifest(), example)
+
+    def test_explicit_manifest_overrides_default(self):
+        explicit = self.path/'explicit.yaml'
+        with patch.object(cli, 'load', return_value={'contexts':[]}) as load:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli.main(['--manifest', str(explicit), '--dry-run', 'up'])
+        self.assertEqual(load.call_args.args[0], explicit.resolve())
+
     def test_provider_has_no_initial_prompt(self):
         args = cli.provider_argv(self.c, 'new')
         self.assertEqual(args[-2:], ['-a','on-request'])
