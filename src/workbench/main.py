@@ -19,7 +19,8 @@ from .models import (ActionIn, ActionPatch, ArtifactIn, EventIn, ObjectiveIn,
                      RunIn, RunLink, RunPatch, Transition, CollectorIn, ImportBatch,
                      ProviderAttentionIn, ProviderGenerationIn, RegisteredSessionIn,
                      InstructionClaimIn, InstructionIn, InstructionLeaseIn,
-                     InstructionResultIn, InstructionPreviewIn)
+                     InstructionResultIn, InstructionPreviewIn,
+                     WorkItemProjectionIn, WorkItemActionLinkIn)
 from .repository import Problem, SQLiteRepository
 from .response_preview import ResponsePreviewHub
 from .settings import load_settings
@@ -332,6 +333,25 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     @app.post('/api/actions/{action_id}/runs/{run_id}/link')
     def link_run(action_id: str, run_id: str, body: RunLink, who=Depends(operator)):
         return repository.link_run(action_id, run_id, body.model_dump(mode='json'), who.name)
+
+    @app.get('/api/flow/work-items')
+    def flow_work_items(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+                        who=Depends(operator)):
+        return {'items': repository.list_work_items(limit, offset), 'limit': limit, 'offset': offset}
+
+    @app.get('/api/flow/work-items/{work_item_id}')
+    def flow_work_item(work_item_id: str, who=Depends(operator)):
+        return repository.get_work_item(work_item_id)
+
+    @app.post('/api/flow/work-items', status_code=201)
+    def publish_flow_work_item(body: WorkItemProjectionIn, who=Depends(operator)):
+        return repository.publish_work_item(body.model_dump(mode='json'), who.name)
+
+    @app.post('/api/flow/work-items/{work_item_id}/actions/{action_id}/link')
+    def link_flow_action(work_item_id: str, action_id: str, body: WorkItemActionLinkIn,
+                         who=Depends(operator)):
+        return repository.link_work_item_action(work_item_id, action_id,
+                                                body.model_dump(mode='json'), who.name)
 
     @app.post('/api/imports', status_code=201)
     def import_batch(body: ImportBatch, who=Depends(operator)):

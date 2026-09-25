@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -77,6 +78,47 @@ class ActionPatch(Model):
 class Transition(Model):
     version: Annotated[int, Field(ge=1)]
     transition: Literal['propose', 'accept', 'start', 'wait', 'request-approval', 'approve', 'reject', 'complete', 'cancel']
+
+
+FlowId = Annotated[str, Field(pattern=r'^wi-[a-f0-9]{32}$')]
+FlowRevision = Annotated[str, Field(pattern=r'^(UNBORN|[a-f0-9]{40,64})$')]
+FlowHash = Annotated[str, Field(pattern=r'^[a-f0-9]{64}$')]
+FlowOperationId = Annotated[str, Field(min_length=1, max_length=120,
+                                       pattern=r'^[a-z0-9]+(?:-[a-z0-9]+)*$')]
+FlowTaskId = Annotated[str, Field(min_length=1, max_length=120,
+                                  pattern=r'^[a-z0-9]+(?:-[a-z0-9]+)*$')]
+
+
+class WorkItemProjectionIn(Model):
+    operation_id: FlowOperationId
+    work_item_id: FlowId
+    source_ref: Annotated[str, Field(min_length=1, max_length=500)]
+    document_revision: FlowRevision
+    document_hash: FlowHash
+    task_ids: Annotated[list[FlowTaskId], Field(max_length=100)] = Field(default_factory=list)
+    expected_version: Annotated[int, Field(ge=1)] | None = None
+
+    @field_validator('source_ref')
+    @classmethod
+    def plain_source(cls, value):
+        parsed = urlsplit(value)
+        if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or
+                parsed.query or parsed.fragment or parsed.port):
+            raise ValueError('Source reference must be a plain HTTPS URL')
+        return value
+
+    @field_validator('task_ids')
+    @classmethod
+    def unique_tasks(cls, value):
+        if len(value) != len(set(value)):
+            raise ValueError('Task IDs must be unique')
+        return value
+
+
+class WorkItemActionLinkIn(Model):
+    operation_id: FlowOperationId
+    work_item_version: Annotated[int, Field(ge=1)]
+    action_version: Annotated[int, Field(ge=1)]
 
 
 class EventIn(Model):
