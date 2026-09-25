@@ -75,8 +75,18 @@ def snapshot(reference: str, *, profile=None) -> dict:
     root = Path(config['root'])
     _history_guard(root, path)
     item, target, _ = _item(root, path, config, reference)
+    content = target.read_bytes()
     return {'work_item_id': item['id'], 'revision': revision(root),
-            'document_hash': digest(target.read_bytes()), 'document': target.read_text(encoding='utf-8')}
+            'document_hash': digest(content), 'document': content.decode('utf-8')}
+
+
+def operation_state(reference: str, operation_id: str, *, profile=None) -> dict | None:
+    path, config = load_profile(profile)
+    item, _, _ = _item(Path(config['root']), path, config, reference)
+    entry = _state(path)['operations'].get(operation_id)
+    if entry and entry['work_item_id'] != item['id']:
+        raise ValueError('Operation ID belongs to another work item')
+    return entry
 
 
 def _clean_index(root: Path) -> None:
@@ -146,7 +156,7 @@ def _outcome(message: str, item_id: str, operation_id: str, task_id: str | None,
 def mutate_document(reference: str, *, operation_id: str, expected_revision: str,
                     expected_hash: str, proposed: str, operation: str, actor: str,
                     task_id: str | None = None, evidence: str = '', profile=None,
-                    checkpoint_pending: bool = False) -> dict:
+                    checkpoint_pending: bool = False, client_hash: str | None = None) -> dict:
     """Commit an exact proposed document; completion gets a pre-removal checkpoint."""
     if operation not in {'add', 'update', 'block', 'complete', 'cancel', 'supersede', 'reopen', 'assign-id'}:
         raise ValueError('Unsupported FLOW operation')
@@ -165,6 +175,10 @@ def mutate_document(reference: str, *, operation_id: str, expected_revision: str
                 raise ValueError('Operation ID was previously used for a different mutation')
             if previous.get('request_hash') != request_hash:
                 raise ValueError('Operation ID was previously used for different content')
+            # Early version-1 journal entries omit client_hash. A direct caller
+            # still supplies None, while request_hash above verifies its bytes.
+            if previous.get('client_hash') != client_hash:
+                raise ValueError('Operation ID was previously used for different command arguments')
             if previous['status'] == 'committed':
                 return previous['result']
             if (previous['expected_revision'] != expected_revision or
@@ -183,7 +197,7 @@ def mutate_document(reference: str, *, operation_id: str, expected_revision: str
                           'after_revision': head, 'document_hash': previous['after_hash'],
                           'publication': 'pending'}
                 state['operations'][operation_id] = {'status': 'committed', 'operation': operation,
-                    'work_item_id': item['id'], 'request_hash': request_hash, 'result': result}
+                    'work_item_id': item['id'], 'request_hash': request_hash, 'client_hash': client_hash, 'result': result}
                 _save(path, state)
                 return result
             _pending_index(root, relative)
@@ -205,7 +219,7 @@ def mutate_document(reference: str, *, operation_id: str, expected_revision: str
                     'definition_checkpoint': previous.get('definition_checkpoint'),
                     'after_revision': commit_id, 'document_hash': previous['after_hash'], 'publication': 'pending'}
                 state['operations'][operation_id] = {'status': 'committed', 'operation': operation,
-                    'work_item_id': item['id'], 'request_hash': request_hash, 'result': result}
+                    'work_item_id': item['id'], 'request_hash': request_hash, 'client_hash': client_hash, 'result': result}
                 _save(path, state)
                 return result
             if (head == previous.get('definition_checkpoint') and
@@ -218,7 +232,7 @@ def mutate_document(reference: str, *, operation_id: str, expected_revision: str
                     'definition_checkpoint': head, 'after_revision': commit_id,
                     'document_hash': previous['after_hash'], 'publication': 'pending'}
                 state['operations'][operation_id] = {'status': 'committed', 'operation': operation,
-                    'work_item_id': item['id'], 'request_hash': request_hash, 'result': result}
+                    'work_item_id': item['id'], 'request_hash': request_hash, 'client_hash': client_hash, 'result': result}
                 _save(path, state)
                 return result
             if head == expected_revision and digest(before) == previous['before_hash']:
@@ -253,7 +267,8 @@ def mutate_document(reference: str, *, operation_id: str, expected_revision: str
         message = _outcome(operation, item['id'], operation_id, task_id, actor, evidence)
         state['operations'][operation_id] = {'status': 'pending', 'operation': operation,
             'work_item_id': item['id'], 'before_hash': digest(before), 'after_hash': digest(after),
-            'expected_revision': head, 'task_id': task_id, 'request_hash': request_hash}
+            'expected_revision': head, 'task_id': task_id, 'request_hash': request_hash,
+            'client_hash': client_hash}
         _save(path, state)
         try:
             definition_commit = None
@@ -272,6 +287,7 @@ def mutate_document(reference: str, *, operation_id: str, expected_revision: str
                   'definition_checkpoint': definition_commit, 'after_revision': commit_id,
                   'document_hash': digest(after), 'publication': 'pending'}
         state['operations'][operation_id] = {'status': 'committed', 'operation': operation,
-            'work_item_id': item['id'], 'request_hash': request_hash, 'result': result}
+            'work_item_id': item['id'], 'request_hash': request_hash, 'client_hash': client_hash,
+            'result': result}
         _save(path, state)
         return result
