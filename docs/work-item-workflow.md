@@ -4,8 +4,8 @@ FLOW is a staged local workflow described by [the design record](adr-flow-work-i
 The tracker retains the issue; a deliberately created private metadata repository
 holds the human-authored local queue. Implementation of registry, transactions,
 commands and code workspace preparation is tracked in #110, #111, #112 and #119.
-The local registry and checkpoint layer are implemented in the first stacked
-changes. Task commands and code workspace preparation follow in later changes.
+The local registry, checkpoint layer, and task commands are implemented in the
+first stacked changes. Code workspace preparation follows separately.
 
 The initial local registry uses `ai-workbench work init --root PATH` to select a
 new private metadata Git repository, with `--github-host`, `--github-repo`, and
@@ -17,6 +17,21 @@ previews it. `work show` and `work list` only read registered work items.
 issue's existing queue. A canonical URL or qualified `github:host/owner/repo#N`
 and `jira:site:KEY` identifies a source; a bare shorthand must resolve to one
 configured source. Opening metadata never clones a code checkout.
+
+`ai-workbench tasks list|show|next|history|reconcile` inspect one registered
+item; `reconcile` requires `--dry-run` and reports checked claims, missing IDs,
+and dirty target content without inferring completion. `next` only recommends
+an eligible task. `tasks add|update|block|complete|cancel|supersede|reopen`
+change the selected metadata file through the checkpoint layer. `assign-id`
+gives one unambiguous manual title a stable ID after a preview. Mutations accept
+`--preview`, `--expected-revision`, `--expected-hash`, and `--operation-id`;
+carry the preview's operation ID and version into the write so generated IDs and
+retry results stay stable. `complete` needs `--evidence`; `cancel` and
+`supersede` need `--reason`; `reopen` needs an explicit historical commit ID.
+Use `--checkpoint-pending` only after reviewing manual edits that should be
+retained before a terminal removal. JSON is the default output; `--format text`
+provides formatted output. The commands never start an agent or contact a
+tracker or Workbench API, and their checkpoint reports `publication: pending`.
 
 ## Small item
 
