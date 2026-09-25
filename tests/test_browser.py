@@ -2,7 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from starforge_workbench.browser import add_entry, entries, load_config, organize, refresh, remove_entry, save_config, update_entry
+from starforge_workbench.browser import (ChromeControlUnavailable, _running, add_entry, control_status,
+                                         entries, load_config, organize, refresh, remove_entry, save_config,
+                                         update_entry)
 
 
 def test_browser_workspace_crud_is_owned_by_workbench(tmp_path):
@@ -113,3 +115,28 @@ def test_organize_move_reports_close_failure_without_touching_unrelated_tabs(tmp
     assert result['still_open'] == ['selected']
     assert result['close_errors'] == [{'id': 'selected', 'url': 'https://docs.example.com/current', 'reason': 'close failed'}]
     assert tabs[1]['id'] == 'unrelated'
+
+
+def test_running_recognizes_google_chromes_chrome_process_name(tmp_path):
+    (tmp_path / '123').mkdir()
+    (tmp_path / '123' / 'comm').write_text('chrome\n')
+    assert _running(tmp_path) is True
+
+
+def test_missing_endpoint_explains_current_profile_protection(tmp_path, monkeypatch):
+    monkeypatch.setattr('starforge_workbench.browser.urlopen', lambda *args, **kwargs: (_ for _ in ()).throw(OSError('refused')))
+    monkeypatch.setattr('starforge_workbench.browser._running', lambda: True)
+
+    with pytest.raises(ChromeControlUnavailable, match='separate user-data directory'):
+        refresh(path=tmp_path / 'missing.yaml')
+
+
+def test_control_status_offers_explicit_normal_profile_connection(monkeypatch):
+    monkeypatch.setattr('starforge_workbench.browser._tabs', lambda port: (_ for _ in ()).throw(ChromeControlUnavailable('blocked')))
+
+    assert control_status() == {
+        'status': 'needs_explicit_normal_profile_connection',
+        'transport': 'chrome-devtools-mcp-auto-connect',
+        'port': 9222,
+        'next_action': 'Enable Remote Debugging in chrome://inspect/#remote-debugging and approve the Chrome prompt before connecting a trusted Chrome DevTools MCP client with --autoConnect.',
+    }
