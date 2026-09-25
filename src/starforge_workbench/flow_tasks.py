@@ -41,7 +41,11 @@ def _history(reference: str, profile=None, limit: int = 200) -> list[dict]:
 
 
 def _completed(reference: str, profile=None) -> set[str]:
-    return {entry['task_id'] for entry in _history(reference, profile) if entry['operation'] == 'complete' and entry['task_id']}
+    latest: dict[str, str] = {}
+    for entry in _history(reference, profile):
+        if entry['task_id'] and entry['operation'] in {'complete', 'cancel', 'supersede', 'reopen'}:
+            latest.setdefault(entry['task_id'], entry['operation'])
+    return {task_id for task_id, operation in latest.items() if operation == 'complete'}
 
 
 def inspect(reference: str, command: str, *, task_id: str | None = None, profile=None) -> dict:
@@ -62,7 +66,8 @@ def inspect(reference: str, command: str, *, task_id: str | None = None, profile
                 'dirty_target': committed.returncode == 0 and committed.stdout != target.read_text(encoding='utf-8'),
                 'next_action': 'Review the exact document and history; choose an explicit repair. No outcome is inferred.'}
     entries = []
-    completed = _completed(reference, profile) if command == 'next' else set()
+    completed = (_completed(reference, profile) -
+                 {task.task_id for task in document.tasks if task.task_id}) if command == 'next' else set()
     for task in document.tasks:
         missing = [dep.strip() for dep in task.fields.get('Blocked by', '').split(',') if dep.strip() and dep.strip() not in completed]
         entries.append({'task_id': task.task_id, 'title': task.title, 'priority': task.section,

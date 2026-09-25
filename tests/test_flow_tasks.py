@@ -112,3 +112,19 @@ def test_unknown_and_canceled_blockers_do_not_become_success(workspace):
     report = inspect(SOURCE, 'next', profile=profile)
     assert report['suggestion'] is None
     assert inspect(SOURCE, 'list', profile=profile)['tasks'][0]['unresolved_dependencies'] == ['unknown-01']
+
+
+def test_reopened_prerequisite_blocks_dependent_again(workspace):
+    profile, root = workspace
+    mutate(SOURCE, 'add', profile=profile, title='Prerequisite', operation_id='pre-01')
+    prerequisite = inspect(SOURCE, 'list', profile=profile)['tasks'][0]['task_id']
+    mutate(SOURCE, 'add', profile=profile, title='Dependent', operation_id='dep-01')
+    target = root / 'work/github/github.com/example-org/example-repo/issue-42/TASKS.md'
+    target.write_text(target.read_text().replace('- [ ] Dependent\n',
+        f'- [ ] Dependent\n  - **Blocked by**: {prerequisite}\n'))
+    terminal = mutate(SOURCE, 'complete', profile=profile, task_id=prerequisite,
+                      evidence='reviewed', operation_id='complete-pre', checkpoint_pending=True)
+    assert inspect(SOURCE, 'next', profile=profile)['suggestion']['title'] == 'Dependent'
+    mutate(SOURCE, 'reopen', profile=profile, task_id=prerequisite,
+           from_revision=terminal['definition_checkpoint'], operation_id='reopen-pre')
+    assert inspect(SOURCE, 'next', profile=profile)['suggestion']['title'] == 'Prerequisite'
