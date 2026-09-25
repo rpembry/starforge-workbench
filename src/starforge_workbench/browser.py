@@ -8,8 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-import time
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import urlopen
 
 import yaml
@@ -219,6 +218,82 @@ def refresh(workspace: str = DEFAULT_WORKSPACE, port: int = 9222, path=None) -> 
     return {'status': 'refreshed', 'workspace': workspace, 'existing_tabs': len(tabs), 'opened': opened}
 
 
+def organization_preview(workspace: str = DEFAULT_WORKSPACE, port: int = 9222, path=None) -> dict[str, object]:
+    """Describe the live tabs matched by one named workspace without changing Chrome."""
+    configured = entries(workspace, path)
+    selected = []
+    tabs = _tabs(port)
+    for tab in tabs:
+        for entry in configured:
+            if _canonical(tab['url'], entry['match']) != _canonical(entry['url'], entry['match']):
+                continue
+            selected.append({'id': tab.get('id'), 'url': tab['url'], 'entry': entry['name'], 'match': entry['match']})
+            break
+    return {
+        'status': 'preview',
+        'workspace': workspace,
+        'selected': selected,
+        'unmatched_tabs': len(tabs) - len(selected),
+    }
+
+
+def _close_tab(target_id: str, port: int) -> None:
+    if not target_id:
+        raise ValueError('Chrome did not supply an ID for a selected tab; no tab was closed')
+    try:
+        with urlopen(f'http://127.0.0.1:{port}/json/close/{quote(target_id, safe="")}', timeout=1) as response:
+            response.read()
+    except Exception as exc:
+        raise ValueError(f'Chrome could not close selected tab {target_id}') from exc
+
+
+def organize(workspace: str = DEFAULT_WORKSPACE, port: int = 9222, path=None,
+             apply: bool = False, action: str = 'copy') -> dict[str, object]:
+    """Put matched tabs in a new workspace window, optionally replacing the originals."""
+    if action not in {'copy', 'move'}:
+        raise ValueError("Organization action must be 'copy' or 'move'")
+    preview = organization_preview(workspace, port, path)
+    preview['action'] = action
+    if not apply:
+        return preview
+
+    selected = preview['selected']
+    result = {**preview, 'status': 'applied', 'opened': [], 'close_requested': [], 'closed': [],
+              'still_open': [], 'close_errors': [], 'verification': 'not_needed'}
+    if not selected:
+        return result
+    executable = _executable()
+    urls = [item['url'] for item in selected]
+    # A separate window is the supported CDP-compatible workspace boundary. Chrome's
+    # tab-group API is extension-only, so this CLI deliberately does not emulate it.
+    subprocess.Popen([executable, '--new-window', *urls], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    result['opened'] = urls
+    if action == 'copy':
+        return result
+
+    result['verification'] = 'pending'
+    for item in selected:
+        target_id = item['id']
+        if not isinstance(target_id, str) or not target_id:
+            result['close_errors'].append({'url': item['url'], 'reason': 'missing_target_id'})
+            continue
+        result['close_requested'].append(target_id)
+        try:
+            _close_tab(target_id, port)
+        except ValueError as exc:
+            result['close_errors'].append({'id': target_id, 'url': item['url'], 'reason': str(exc)})
+    try:
+        remaining = {tab.get('id') for tab in _tabs(port)}
+    except ValueError:
+        result['verification'] = 'unavailable'
+        return result
+    result['closed'] = [target_id for target_id in result['close_requested'] if target_id not in remaining]
+    result['still_open'] = [target_id for target_id in result['close_requested'] if target_id in remaining]
+    result['verification'] = 'verified'
+    return result
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog='ai-workbench chrome')
     parser.add_argument('--workspace', default=DEFAULT_WORKSPACE)
@@ -229,6 +304,11 @@ def main(argv=None) -> int:
     remove = sub.add_parser('remove'); remove.add_argument('name')
     update = sub.add_parser('update'); update.add_argument('name'); update.add_argument('--url'); update.add_argument('--name', dest='new_name'); update.add_argument('--match', choices=('origin', 'url'))
     sub.add_parser('refresh').add_argument('--port', type=int, default=int(os.environ.get('WB_CHROME_CDP_PORT', '9222')))
+    organize_parser = sub.add_parser('organize', help='Preview or explicitly organize matching live tabs into a workspace window')
+    organize_parser.add_argument('--port', type=int, default=int(os.environ.get('WB_CHROME_CDP_PORT', '9222')))
+    organize_parser.add_argument('--apply', action='store_true', help='Open the selected tabs in a new workspace window')
+    organize_parser.add_argument('--action', choices=('copy', 'move'), default='copy',
+                                help='copy preserves originals; move closes only selected originals after opening the window')
     args = parser.parse_args(argv)
     if args.command in {None, 'list'}:
         if args.command is None:
@@ -249,4 +329,6 @@ def main(argv=None) -> int:
         print(json.dumps(update_entry(args.name, args.url, args.new_name, args.workspace, args.match, args.config), indent=2))
     elif args.command == 'refresh':
         print(json.dumps(refresh(args.workspace, args.port, args.config), indent=2))
+    elif args.command == 'organize':
+        print(json.dumps(organize(args.workspace, args.port, args.config, args.apply, args.action), indent=2))
     return 0
