@@ -44,9 +44,11 @@ code-workspace paths in resume/prepare results.
 Set `WB_MCP_FLOW_WRITE=1` separately to register work-item creation and task
 edit tools. A task edit requires its current revision, document hash and stable
 operation ID; `flow_task_preview` returns a bounded diff and content hash plus a
-server-local token (lost on restart). `flow_task_apply` accepts only that token, uses
-the same domain operation as the CLI, and preserves its checkpoint/recovery
-behavior. After an uncertain result, inspect `flow_operation_status` and the
+server-local token (lost on restart and expired after 30 minutes if unused).
+`flow_task_apply` accepts only that token, uses the same domain operation as the
+CLI, and preserves its checkpoint/recovery behavior. Committed tokens leave the
+pending-preview limit; a bounded in-process cache permits short-term replay of
+the result. After an uncertain result, inspect `flow_operation_status` and the
 current task state before retrying. The token is not proof of human review;
 write requests still need actual authorization. `WB_MCP_FLOW_PREPARE=1` in
 addition registers explicit local code-workspace preparation, including a

@@ -4,12 +4,14 @@ from __future__ import annotations
 import difflib
 import hashlib
 import re
+from collections import OrderedDict
 from pathlib import Path
+from time import monotonic
 from typing import Literal
 from uuid import uuid4
 
 from starforge_workbench.flow import list_items, load_profile, open_item, show
-from starforge_workbench.flow_code import workspace
+from starforge_workbench.flow_code import MissingBindingError, workspace
 from starforge_workbench.flow_history import operation_state, snapshot
 from starforge_workbench.flow_packets import build_packet
 from starforge_workbench.flow_tasks import inspect, mutate
@@ -17,6 +19,9 @@ from starforge_workbench.flow_tasks import inspect, mutate
 
 TaskRead = Literal['list', 'show', 'next', 'history', 'reconcile']
 TaskEdit = Literal['add', 'update', 'block', 'complete', 'cancel', 'supersede', 'reopen', 'assign-id']
+PENDING_PREVIEW_LIMIT = 100
+PREVIEW_TTL_SECONDS = 1800
+COMPLETED_REPLAY_LIMIT = 100
 
 
 def _bounded(value, *, depth=0):
@@ -52,6 +57,13 @@ def register_flow_tools(server, *, profile: str | Path, allow_write: bool = Fals
     """Register only enabled tools; caller cannot select a different profile/root."""
     selected = Path(profile)
     previews: dict[str, dict] = {}
+    completed: OrderedDict[str, dict] = OrderedDict()
+
+    def expire_previews() -> None:
+        cutoff = monotonic() - PREVIEW_TTL_SECONDS
+        for token, saved in list(previews.items()):
+            if saved['created_at'] <= cutoff:
+                del previews[token]
 
     def current_profile() -> Path:
         return _private_profile(selected)
@@ -105,9 +117,7 @@ def register_flow_tools(server, *, profile: str | Path, allow_write: bool = Fals
         selected_profile = current_profile()
         try:
             result = workspace(reference, profile=selected_profile, create=False)
-        except ValueError as exc:
-            if str(exc) != 'No explicit repository binding; use work bind before preparation':
-                raise
+        except MissingBindingError:
             item = show(reference, profile=selected_profile)
             result = {'work_item_id': item['work_item_id'], 'repositories': [],
                       'repository_bindings': 'none',
@@ -151,7 +161,8 @@ def register_flow_tools(server, *, profile: str | Path, allow_write: bool = Fals
         for value in (reference, task_id, title, details, acceptance, reason, evidence, from_revision):
             if value is not None and len(value) > 1000:
                 raise ValueError('FLOW MCP text is too large; use the local CLI for deliberate larger edits')
-        if len(previews) >= 100:
+        expire_previews()
+        if len(previews) >= PENDING_PREVIEW_LIMIT:
             raise ValueError('Too many pending previews; restart this MCP server after reconciliation')
         previous = operation_state(reference, operation_id, profile=current_profile())
         if previous:
@@ -173,13 +184,18 @@ def register_flow_tools(server, *, profile: str | Path, allow_write: bool = Fals
             raise ValueError('Document change exceeds MCP preview limit; inspect it locally')
         proposed_hash = hashlib.sha256(result['proposed'].encode('utf-8')).hexdigest()
         token = uuid4().hex
-        previews[token] = {'request': request, 'proposed_hash': proposed_hash}
+        previews[token] = {'request': request, 'proposed_hash': proposed_hash,
+                           'created_at': monotonic()}
         return {key: value for key, value in result.items() if key != 'proposed'} | {
             'change_preview': changed, 'proposed_hash': proposed_hash, 'preview_token': token}
 
     @server.tool(name='flow_task_apply', structured_output=True)
     def flow_task_apply(preview_token: str) -> dict[str, object]:
         """Apply only the exact previewed local edit after an authorized request; no server action or tracker status changes."""
+        expire_previews()
+        if preview_token in completed:
+            completed.move_to_end(preview_token)
+            return completed[preview_token]
         saved = previews.get(preview_token)
         if saved is None:
             raise ValueError('Unknown or expired FLOW preview; inspect current state before retrying')
@@ -190,8 +206,13 @@ def register_flow_tools(server, *, profile: str | Path, allow_write: bool = Fals
                            **{key: value for key, value in request.items() if key not in {'reference', 'command'}})
             if hashlib.sha256(check['proposed'].encode('utf-8')).hexdigest() != saved['proposed_hash']:
                 raise ValueError('FLOW preview content changed; inspect it again')
-        return mutate(reference, command, profile=current_profile(),
-                      **{key: value for key, value in request.items() if key not in {'reference', 'command'}})
+        result = mutate(reference, command, profile=current_profile(),
+                        **{key: value for key, value in request.items() if key not in {'reference', 'command'}})
+        del previews[preview_token]
+        completed[preview_token] = result
+        if len(completed) > COMPLETED_REPLAY_LIMIT:
+            completed.popitem(last=False)
+        return result
 
     if allow_prepare:
         @server.tool(name='flow_prepare_workspace', structured_output=True)

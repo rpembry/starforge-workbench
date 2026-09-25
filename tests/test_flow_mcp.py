@@ -6,6 +6,7 @@ from mcp import Client
 
 from starforge_workbench.flow import init_profile, open_item
 from starforge_workbench.flow_tasks import inspect, mutate
+from workbench import flow_mcp
 from workbench.mcp_server import build_server
 
 
@@ -93,3 +94,56 @@ def test_stale_preview_oversized_text_and_wrong_profile_are_denied(profile, tmp_
     assert call(server, 'flow_item_show', {'reference': '../../outside'}).is_error
     foreign = build_server(flow_profile=tmp_path / 'missing.json', flow_write=True)
     assert call(foreign, 'flow_items').is_error
+
+
+def test_resume_only_handles_typed_missing_binding(profile, monkeypatch):
+    server = build_server(flow_profile=profile)
+    assert call(server, 'flow_resume_context', {'reference': SOURCE}).structured_content[
+        'repository_bindings'] == 'none'
+
+    def unrelated_error(*args, **kwargs):
+        raise ValueError('No explicit repository binding; use work bind before preparation')
+
+    monkeypatch.setattr(flow_mcp, 'workspace', unrelated_error)
+    assert call(server, 'flow_resume_context', {'reference': SOURCE}).is_error
+
+
+def test_committed_previews_do_not_exhaust_pending_capacity(profile, monkeypatch):
+    monkeypatch.setattr(flow_mcp, 'PENDING_PREVIEW_LIMIT', 1)
+    monkeypatch.setattr(flow_mcp, 'COMPLETED_REPLAY_LIMIT', 1)
+    server = build_server(flow_profile=profile, flow_write=True)
+    state = inspect(SOURCE, 'list', profile=profile)
+    first_args = {'reference': SOURCE, 'command': 'add', 'operation_id': 'first-preview',
+                  'expected_revision': state['revision'], 'expected_hash': state['document_hash'],
+                  'title': 'First synthetic task'}
+    first = call(server, 'flow_task_preview', first_args).structured_content
+    assert call(server, 'flow_task_preview', {**first_args, 'operation_id': 'blocked-preview'}).is_error
+    committed = call(server, 'flow_task_apply', {'preview_token': first['preview_token']}).structured_content
+    assert committed['status'] == 'committed'
+    assert call(server, 'flow_task_apply', {'preview_token': first['preview_token']}).structured_content == committed
+
+    state = inspect(SOURCE, 'list', profile=profile)
+    second = call(server, 'flow_task_preview', {**first_args, 'operation_id': 'second-preview',
+        'expected_revision': state['revision'], 'expected_hash': state['document_hash'],
+        'title': 'Second synthetic task'}).structured_content
+    assert second['preview_token'] != first['preview_token']
+    applied = call(server, 'flow_task_apply', {'preview_token': second['preview_token']}).structured_content
+    assert applied['status'] == 'committed'
+    assert call(server, 'flow_task_apply', {'preview_token': second['preview_token']}).structured_content == applied
+    assert call(server, 'flow_task_apply', {'preview_token': first['preview_token']}).is_error
+
+
+def test_abandoned_preview_expires_without_reaching_capacity(profile, monkeypatch):
+    monkeypatch.setattr(flow_mcp, 'PENDING_PREVIEW_LIMIT', 1)
+    clock = [0]
+    monkeypatch.setattr(flow_mcp, 'monotonic', lambda: clock[0])
+    server = build_server(flow_profile=profile, flow_write=True)
+    state = inspect(SOURCE, 'list', profile=profile)
+    args = {'reference': SOURCE, 'command': 'add', 'operation_id': 'abandoned-preview',
+            'expected_revision': state['revision'], 'expected_hash': state['document_hash'],
+            'title': 'Synthetic task'}
+    abandoned = call(server, 'flow_task_preview', args).structured_content
+    clock[0] = flow_mcp.PREVIEW_TTL_SECONDS + 1
+    replacement = call(server, 'flow_task_preview', {**args, 'operation_id': 'fresh-preview'}).structured_content
+    assert replacement['preview_token'] != abandoned['preview_token']
+    assert call(server, 'flow_task_apply', {'preview_token': abandoned['preview_token']}).is_error
