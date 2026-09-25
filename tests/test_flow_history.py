@@ -1,6 +1,7 @@
 from pathlib import Path
 import subprocess
 import json
+import fcntl
 
 import pytest
 
@@ -150,3 +151,42 @@ def test_definition_commit_then_journal_failure_retries(workspace, monkeypatch):
         actor='Example Operator', checkpoint_pending=True)
     assert result['definition_checkpoint']
     assert result['checkpoint'] != result['definition_checkpoint']
+
+
+def test_missing_retained_history_requires_reconciliation(workspace):
+    profile, root = workspace
+    change(profile, lambda text: text + '\n## P1\n\n- [ ] Task\n  - **ID**: task-01\n')
+    subprocess.run(['git', '-C', str(root), 'update-ref', '-d', 'refs/heads/flow-history'], check=True)
+    with pytest.raises(ValueError, match='history is missing'):
+        snapshot(SOURCE, profile=profile)
+
+
+def test_lock_conflict_preserves_document(workspace):
+    profile, _ = workspace
+    before = snapshot(SOURCE, profile=profile)
+    lock = profile.with_suffix('.lock')
+    with lock.open('w') as stream:
+        lock.chmod(0o600)
+        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(ValueError, match='another writer'):
+            change(profile, lambda text: text + '\n## P1\n\n- [ ] Task\n')
+    assert snapshot(SOURCE, profile=profile) == before
+
+
+def test_failed_atomic_replace_does_not_claim_completion(workspace, monkeypatch):
+    profile, root = workspace
+    from starforge_workbench import flow_history
+    before = snapshot(SOURCE, profile=profile)
+    def readonly(*args):
+        raise OSError('synthetic read-only filesystem')
+    real_replace = flow_history._replace
+    monkeypatch.setattr(flow_history, '_replace', readonly)
+    with pytest.raises(OSError, match='read-only'):
+        change(profile, lambda text: text + '\n## P1\n\n- [ ] Task\n')
+    assert snapshot(SOURCE, profile=profile) == before
+    monkeypatch.setattr(flow_history, '_replace', real_replace)
+    proposal = before['document'] + '\n## P1\n\n- [ ] Task\n'
+    retried = mutate_document(SOURCE, profile=profile, operation_id='operation-01',
+        expected_revision=before['revision'], expected_hash=before['document_hash'],
+        proposed=proposal, operation='add', actor='Example Operator')
+    assert retried['checkpoint'] != 'UNBORN'

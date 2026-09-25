@@ -44,6 +44,17 @@ def _save(profile: Path, state: dict) -> None:
     _atomic_json(profile.with_suffix('.operations.json'), state)
 
 
+def _history_guard(root: Path, profile: Path) -> None:
+    committed = [entry['result']['checkpoint'] for entry in _state(profile)['operations'].values()
+                 if entry['status'] == 'committed']
+    if not committed:
+        return
+    head = revision(root)
+    if head == 'UNBORN' or _run(root, 'merge-base', '--is-ancestor', committed[-1], head,
+                                check=False).returncode != 0:
+        raise ValueError('FLOW retained checkpoint history is missing or rewritten; reconcile before writing')
+
+
 def _item(root: Path, profile: Path, config: dict, reference: str) -> tuple[dict, Path, str]:
     item = _find(_registry(profile), resolve(reference, config)['canonical'])
     if not item:
@@ -62,6 +73,7 @@ def _item(root: Path, profile: Path, config: dict, reference: str) -> tuple[dict
 def snapshot(reference: str, *, profile=None) -> dict:
     path, config = load_profile(profile)
     root = Path(config['root'])
+    _history_guard(root, path)
     item, target, _ = _item(root, path, config, reference)
     return {'work_item_id': item['id'], 'revision': revision(root),
             'document_hash': digest(target.read_bytes()), 'document': target.read_text(encoding='utf-8')}
@@ -121,7 +133,10 @@ def _outcome(message: str, item_id: str, operation_id: str, task_id: str | None,
              actor: str, evidence: str) -> str:
     if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', operation_id):
         raise ValueError('Operation ID must be stable kebab-case')
-    if not actor.strip() or len(actor) > 120 or len(evidence) > 500 or '\n' in actor or '\n' in evidence:
+    if task_id is not None and not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', task_id):
+        raise ValueError('Task ID must be stable kebab-case')
+    if (not actor.strip() or len(actor) > 120 or len(evidence) > 500 or
+            any(character in value for value in (actor, evidence) for character in '\r\n')):
         raise ValueError('Actor/evidence must be concise single-line text')
     return (f'FLOW {message}\n\nFLOW-Operation: {operation_id}\nFLOW-Work-Item: {item_id}'
             + (f'\nFLOW-Task: {task_id}' if task_id else '')
@@ -141,6 +156,7 @@ def mutate_document(reference: str, *, operation_id: str, expected_revision: str
     root = Path(config['root'])
     with _writer_lock(path):
         _assert_retained_branch(root)
+        _history_guard(root, path)
         item, target, relative = _item(root, path, config, reference)
         state = _state(path)
         previous = state['operations'].get(operation_id)
