@@ -35,6 +35,14 @@
 !/tests/*.sh
 !/tests/*.cjs
 !/tests/keep_collector.test.mjs
+!/tests/fixtures/
+!/tests/fixtures/flow/
+!/tests/fixtures/flow/minimal.md
+!/tests/fixtures/flow/substantial.md
+!/tests/fixtures/flow/claimed-and-foreign.md
+!/tests/fixtures/flow/TODO.md
+!/tests/fixtures/flow/spec-kit-tasks.md
+!/tests/fixtures/flow/check-upstream.mjs
 !/docs/
 !/docs/*.md
 !/docs/images/

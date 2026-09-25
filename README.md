@@ -185,3 +185,5 @@ For suspected vulnerabilities or accidental disclosures, use the private reporti
 ## Engineering workflow
 
 See [human-directed agent coordination](docs/multi-agent-coordination.md) for how this project uses GitHub, Workbench, and assigned AI agents to develop and review changes. The current DevOps-oriented default uses Codex as primary engineer, Claude Code as adversarial reviewer, and Gemini as a selective investigator or architectural second opinion, with Randall directing and accepting the work. These are adaptable assignments rather than a fixed model hierarchy; the document also describes a possible future direction for evidence-based and real-time routing.
+
+The planned local work-item workflow and its authority boundaries are described in [the FLOW guide](docs/work-item-workflow.md).

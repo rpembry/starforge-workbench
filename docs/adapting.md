@@ -1,5 +1,8 @@
 # Adapting the reference
 
+The planned private work-item workflow has a [separate guide](work-item-workflow.md).
+Its local registry and task commands are staged work, not part of this release.
+
 Start by inspecting `src/starforge_workbench/cli.py` for launcher/provider assumptions and `src/workbench/` for API, state, and collection behavior. The public snapshot combines the service, attention view, launcher, and provider collectors from separate development slices. Their combined automated tests are useful evidence; they are not proof of compatibility with every provider release or desktop.
 
 ## Launcher
