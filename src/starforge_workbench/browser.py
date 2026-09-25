@@ -19,7 +19,11 @@ CONFIG_PATH = CONFIG_DIR / 'browser-workspaces.yaml'
 DEFAULT_WORKSPACE = 'default'
 WORKSPACE_RE = re.compile(r'^[a-z][a-z0-9_-]{0,47}$')
 NAME_RE = re.compile(r'^[^\x00\r\n]{1,120}$')
-CHROME_NAMES = {'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'}
+CHROME_NAMES = {'chrome', 'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'}
+
+
+class ChromeControlUnavailable(ValueError):
+    """Chrome is present but its local browser-control endpoint is unavailable."""
 
 
 def _config_path(path: Path | str | None = None) -> Path:
@@ -145,8 +149,7 @@ def update_entry(name: str, url: str | None = None, new_name: str | None = None,
     raise ValueError(f'No browser entry named {name!r} in workspace {workspace}')
 
 
-def _running() -> bool:
-    proc = Path('/proc')
+def _running(proc: Path = Path('/proc')) -> bool:
     try:
         for item in proc.iterdir():
             if not item.name.isdigit():
@@ -199,8 +202,31 @@ def _tabs(port: int) -> list[dict[str, object]]:
         with urlopen(f'http://127.0.0.1:{port}/json/list', timeout=1) as response:
             value = json.loads(response.read())
     except Exception as exc:
+        if _running():
+            raise ChromeControlUnavailable(
+                f'Chrome is running but its local DevTools endpoint is unavailable on port {port}. '
+                'Do not restart the normal browser with a separate user-data directory: that profile cannot represent '
+                'the current tabs. For explicit normal-profile control, enable Remote Debugging in '
+                'chrome://inspect/#remote-debugging, approve Chrome\'s connection prompt, and use a trusted '
+                'Chrome DevTools MCP client with --autoConnect.'
+            ) from exc
         raise ValueError(f'Chrome refresh requires a local DevTools endpoint on port {port}') from exc
     return [item for item in value if item.get('type') == 'page' and isinstance(item.get('url'), str)]
+
+
+def control_status(port: int = 9222) -> dict[str, object]:
+    """Report whether Workbench's isolated-profile DevTools control is available."""
+    try:
+        return {'status': 'connected', 'transport': 'devtools-port', 'page_count': len(_tabs(port)), 'port': port}
+    except ChromeControlUnavailable:
+        return {
+            'status': 'needs_explicit_normal_profile_connection',
+            'transport': 'chrome-devtools-mcp-auto-connect',
+            'port': port,
+            'next_action': 'Enable Remote Debugging in chrome://inspect/#remote-debugging and approve the Chrome prompt before connecting a trusted Chrome DevTools MCP client with --autoConnect.',
+        }
+    except ValueError:
+        return {'status': 'unavailable', 'transport': 'devtools-port', 'port': port}
 
 
 def refresh(workspace: str = DEFAULT_WORKSPACE, port: int = 9222, path=None) -> dict[str, object]:
@@ -304,6 +330,7 @@ def main(argv=None) -> int:
     remove = sub.add_parser('remove'); remove.add_argument('name')
     update = sub.add_parser('update'); update.add_argument('name'); update.add_argument('--url'); update.add_argument('--name', dest='new_name'); update.add_argument('--match', choices=('origin', 'url'))
     sub.add_parser('refresh').add_argument('--port', type=int, default=int(os.environ.get('WB_CHROME_CDP_PORT', '9222')))
+    sub.add_parser('control-status').add_argument('--port', type=int, default=int(os.environ.get('WB_CHROME_CDP_PORT', '9222')))
     organize_parser = sub.add_parser('organize', help='Preview or explicitly organize matching live tabs into a workspace window')
     organize_parser.add_argument('--port', type=int, default=int(os.environ.get('WB_CHROME_CDP_PORT', '9222')))
     organize_parser.add_argument('--apply', action='store_true', help='Open the selected tabs in a new workspace window')
@@ -329,6 +356,8 @@ def main(argv=None) -> int:
         print(json.dumps(update_entry(args.name, args.url, args.new_name, args.workspace, args.match, args.config), indent=2))
     elif args.command == 'refresh':
         print(json.dumps(refresh(args.workspace, args.port, args.config), indent=2))
+    elif args.command == 'control-status':
+        print(json.dumps(control_status(args.port), indent=2))
     elif args.command == 'organize':
         print(json.dumps(organize(args.workspace, args.port, args.config, args.apply, args.action), indent=2))
     return 0
