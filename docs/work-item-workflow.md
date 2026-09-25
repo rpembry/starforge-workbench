@@ -7,6 +7,17 @@ commands and code workspace preparation is tracked in #110, #111, #112 and #119.
 This guide describes their agreed contract, not commands available in the
 current release.
 
+The initial local registry uses `ai-workbench work init --root PATH` to select a
+new private metadata Git repository, with `--github-host`, `--github-repo`, and
+`--jira-site alias=https://site.example.com` source mappings. The private
+profile lives outside Git; `WB_FLOW_PROFILE` or `--profile` selects it. `work
+open REFERENCE` explicitly creates a missing metadata workspace; `--dry-run`
+previews it. `work show` and `work list` only read registered work items.
+`work open PR_URL --link-to ISSUE_URL` explicitly aliases a linked PR to the
+issue's existing queue. A canonical URL or qualified `github:host/owner/repo#N`
+and `jira:site:KEY` identifies a source; a bare shorthand must resolve to one
+configured source. Opening metadata never clones a code checkout.
+
 ## Small item
 
 ```markdown

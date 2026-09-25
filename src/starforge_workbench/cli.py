@@ -712,6 +712,9 @@ def main(argv=None):
     if raw_argv and raw_argv[0] == 'chrome':
         from starforge_workbench.browser import main as browser_main
         return browser_main(raw_argv[1:])
+    if raw_argv and raw_argv[0] == 'work':
+        from starforge_workbench.flow import main as work_main
+        return work_main(raw_argv[1:])
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--manifest', type=Path, default=default_manifest())
     p.add_argument('--dry-run', action='store_true')
