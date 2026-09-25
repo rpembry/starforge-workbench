@@ -5,7 +5,7 @@ import pytest
 
 from starforge_workbench.flow import init_profile, open_item
 from starforge_workbench.flow_markdown import parse
-from starforge_workbench.flow_tasks import inspect, mutate
+from starforge_workbench.flow_tasks import inspect, main, mutate
 
 SOURCE = 'https://github.com/example-org/example-repo/issues/42'
 
@@ -56,6 +56,9 @@ def test_add_edit_block_complete_and_history(workspace):
     outcome = mutate(SOURCE, 'complete', profile=profile, task_id=task_id,
                      evidence='example-review', operation_id='complete-01')
     assert outcome['checkpoint']
+    completed = inspect(SOURCE, 'show', profile=profile, task_id=task_id)
+    assert completed['status'] == 'complete'
+    assert completed['checkpoint'] == outcome['checkpoint']
     assert not inspect(SOURCE, 'list', profile=profile)['tasks']
     history = inspect(SOURCE, 'history', profile=profile, task_id=task_id)['entries']
     assert {'add', 'update', 'block', 'complete'} <= {entry['operation'] for entry in history}
@@ -128,3 +131,18 @@ def test_reopened_prerequisite_blocks_dependent_again(workspace):
     mutate(SOURCE, 'reopen', profile=profile, task_id=prerequisite,
            from_revision=terminal['definition_checkpoint'], operation_id='reopen-pre')
     assert inspect(SOURCE, 'next', profile=profile)['suggestion']['title'] == 'Prerequisite'
+
+
+def test_text_output_is_a_human_task_view(workspace, capsys):
+    profile, _ = workspace
+    mutate(SOURCE, 'add', profile=profile, title='Review example', operation_id='example-01')
+    assert main(['--profile', str(profile), '--format', 'text', 'list', SOURCE]) == 0
+    output = capsys.readouterr().out
+    assert 'P2 [task-' in output and 'Review example' in output
+    assert '{' not in output and '"tasks"' not in output
+    assert main(['--profile', str(profile), '--format', 'text', 'next', SOURCE]) == 0
+    assert 'Suggested: P2' in capsys.readouterr().out
+    with pytest.raises(SystemExit) as error:
+        main(['--profile', str(profile), 'show', SOURCE, 'unknown-01'])
+    assert error.value.code == 2
+    assert 'no terminal outcome' in capsys.readouterr().err

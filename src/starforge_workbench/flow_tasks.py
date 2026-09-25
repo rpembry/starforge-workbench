@@ -73,9 +73,20 @@ def inspect(reference: str, command: str, *, task_id: str | None = None, profile
         entries.append({'task_id': task.task_id, 'title': task.title, 'priority': task.section,
                         'checked_claim': task.checked, 'fields': task.fields, 'unresolved_dependencies': missing})
     if command == 'show':
-        task = document.selected(task_id or '')
-        return {'revision': state['revision'], 'document_hash': state['document_hash'],
-                'task': next(entry for entry in entries if entry['task_id'] == task.task_id), 'raw': task.block}
+        active = next((task for task in document.tasks if task.task_id == task_id), None)
+        if active:
+            return {'status': 'active', 'revision': state['revision'],
+                    'document_hash': state['document_hash'],
+                    'task': next(entry for entry in entries if entry['task_id'] == active.task_id),
+                    'raw': active.block}
+        latest = next((entry for entry in _history(reference, profile)
+                       if entry['task_id'] == task_id and entry['operation'] in
+                       {'complete', 'cancel', 'supersede', 'reopen'}), None)
+        if latest and latest['operation'] in {'complete', 'cancel', 'supersede'}:
+            return {'status': latest['operation'], 'revision': state['revision'],
+                    'task_id': task_id, 'checkpoint': latest['checkpoint'],
+                    'message': latest['message']}
+        raise ValueError('Task is not active and has no terminal outcome; inspect history or reconcile manual changes')
     if command == 'next':
         chosen = next((entry for entry in sorted(entries, key=lambda row: row['priority'])
                        if entry['task_id'] and not entry['checked_claim'] and
@@ -171,7 +182,7 @@ def mutate(reference: str, command: str, *, profile=None, task_id: str | None = 
         proposed = _append(document, old.section, old.block)
     else:
         if command == 'assign-id':
-            if not title or not preview and (not expected_revision or not expected_hash):
+            if not title or (not preview and (not expected_revision or not expected_hash)):
                 raise ValueError('Assign-ID requires exact title and a prior preview revision/hash')
             matches = [task for task in document.tasks if task.title == title and task.task_id is None]
             if len(matches) != 1:
@@ -218,6 +229,52 @@ def mutate(reference: str, command: str, *, profile=None, task_id: str | None = 
         operation=command, actor=actor, task_id=generated_id or task_id, evidence=evidence,
         checkpoint_pending=checkpoint_pending, client_hash=client_hash)
     return result
+
+
+def _render_text(command: str, result: dict) -> str:
+    revision = result.get('revision') or result.get('after_revision')
+    lines = [f'Revision: {revision}'] if revision else []
+    if command == 'list':
+        for task in result['tasks']:
+            lines.append(f"{task['priority']} [{task['task_id'] or 'no ID'}] {task['title']}")
+            if task['unresolved_dependencies']:
+                lines.append('  Waiting for: ' + ', '.join(task['unresolved_dependencies']))
+        if not result['tasks']:
+            lines.append('No active tasks.')
+    elif command == 'show':
+        if result['status'] == 'active':
+            task = result['task']
+            lines.append(f"{task['priority']} [{task['task_id']}] {task['title']}")
+            for name, value in task['fields'].items():
+                lines.append(f'  {name}: {value}')
+        else:
+            lines.extend([f"Task {result['task_id']}: {result['status']}",
+                          f"Checkpoint: {result['checkpoint']}"])
+    elif command == 'next':
+        task = result['suggestion']
+        lines.append(f"Suggested: {task['priority']} [{task['task_id']}] {task['title']}" if task
+                     else 'No eligible task.')
+        lines.append(result['rationale'])
+    elif command == 'history':
+        for entry in result['entries']:
+            lines.append(f"{entry['checkpoint'][:12]} {entry['operation']} {entry['task_id'] or '-'}")
+        if not result['entries']:
+            lines.append('No recorded FLOW outcomes in the bounded history.')
+    elif command == 'reconcile':
+        lines.extend([f"Checked claims: {', '.join(result['manual_checked']) or 'none'}",
+                      f"Missing since checkpoint: {', '.join(result['missing_since_checkpoint']) or 'none'}",
+                      f"Dirty target: {'yes' if result['dirty_target'] else 'no'}",
+                      result['next_action']])
+    elif result.get('status') == 'preview':
+        lines.extend([f"Preview: {result['operation']} {result['task_id'] or '-'}",
+                      f"Operation ID: {result['operation_id']}",
+                      f"Document hash: {result['document_hash']}",
+                      'Proposed TASKS.md:', result['proposed']])
+    else:
+        lines.extend([f"{result['status']}: {result['operation']} {result['task_id'] or '-'}",
+                      f"Checkpoint: {result['checkpoint']}",
+                      f"Publication: {result['publication']}"])
+    return '\n'.join(lines)
 
 
 def main(argv=None) -> int:
@@ -268,7 +325,7 @@ def main(argv=None) -> int:
                 'expected_hash', 'preview', 'checkpoint_pending') if key in values}
             result = mutate(args.reference, args.command, profile=args.profile, **options)
         if args.format == 'text':
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            print(_render_text(args.command, result))
         else:
             print(json.dumps(result, ensure_ascii=False))
         return 0

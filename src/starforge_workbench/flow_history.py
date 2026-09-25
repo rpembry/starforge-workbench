@@ -175,6 +175,8 @@ def mutate_document(reference: str, *, operation_id: str, expected_revision: str
                 raise ValueError('Operation ID was previously used for a different mutation')
             if previous.get('request_hash') != request_hash:
                 raise ValueError('Operation ID was previously used for different content')
+            # Early version-1 journal entries omit client_hash. A direct caller
+            # still supplies None, while request_hash above verifies its bytes.
             if previous.get('client_hash') != client_hash:
                 raise ValueError('Operation ID was previously used for different command arguments')
             if previous['status'] == 'committed':
