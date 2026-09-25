@@ -11,6 +11,7 @@ from uuid import uuid4
 from starforge_workbench.flow import list_items, load_profile, open_item, show
 from starforge_workbench.flow_code import workspace
 from starforge_workbench.flow_history import operation_state, snapshot
+from starforge_workbench.flow_packets import build_packet
 from starforge_workbench.flow_tasks import inspect, mutate
 
 
@@ -114,6 +115,18 @@ def register_flow_tools(server, *, profile: str | Path, allow_write: bool = Fals
                                         'next_suggestion': inspect(reference, 'next', profile=selected_profile)['suggestion']},
                       'agent_session': 'not started'}
         return redact_workspace(result)
+
+    @server.tool(name='flow_packet', structured_output=True)
+    def flow_packet(reference: str, kind: Literal['resume', 'handoff'] = 'resume',
+                    role: str | None = None, expected_heads: dict[str, str] | None = None,
+                    pr_links: list[str] | None = None, scope: str | None = None,
+                    tests: list[str] | None = None, findings: list[str] | None = None,
+                    limitations: list[str] | None = None, max_chars: int = 8000) -> dict[str, object]:
+        """Prepare a bounded local resume or selected-role handoff packet; no session starts and nothing is sent or published."""
+        return build_packet(reference, profile=current_profile(), kind=kind, role=role,
+                            expected_heads=expected_heads, pr_links=pr_links, scope=scope,
+                            tests=tests, findings=findings, limitations=limitations,
+                            include_paths=disclose_paths, max_chars=max_chars)
 
     if not allow_write:
         return

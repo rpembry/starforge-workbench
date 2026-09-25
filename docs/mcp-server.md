@@ -35,7 +35,7 @@ Set `WB_MCP_FLOW_PROFILE` in the **server process environment** to the absolute
 path of one private FLOW profile to expose read-only `flow_*` tools. The client
 cannot select a profile or filesystem root. Reads include bounded work-item
 pages, task views/history, an operation-status lookup, and a local resume
-summary. `next` only suggests work. Raw document blocks, full context files,
+summary or handoff packet through `flow_packet`. `next` only suggests work. Raw document blocks, full context files,
 and private code paths are not returned by default. A configured profile is an
 intentional disclosure to the connected model; choose the MCP host and model
 accordingly. `WB_MCP_FLOW_DISCLOSE_PATHS=1` deliberately includes configured

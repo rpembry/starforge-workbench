@@ -47,6 +47,9 @@
 !/docs/*.md
 !/docs/images/
 !/docs/images/starforge-dashboard-simulated.png
+!/skills/
+!/skills/**/
+!/skills/**/SKILL.md
 !/deploy/
 !/deploy/*.py
 !/deploy/*.sh
