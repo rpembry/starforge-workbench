@@ -149,7 +149,7 @@ uv run pytest -q
 bin/ai-workbench --dry-run up
 ```
 
-The example manifest contains illustrative directories. Copy it to the Git-ignored `config/workbench.yaml`, adjust paths and enabled contexts, and inspect provider executable discovery before launching anything. Start one context at a time. The launcher falls back to the example when no personal manifest exists.
+The example manifest contains illustrative directories. Copy it to the private XDG configuration location, such as `~/.config/starforge-ai-workbench/workbench.yaml`, adjust paths and enabled contexts, and inspect provider executable discovery before launching anything. An ignored checkout-local `config/workbench.yaml` remains useful while adapting the project. Start one context at a time. The launcher uses an explicit `--manifest` first, then the private XDG manifest, then a checkout-local manifest, and only then the public example.
 
 See [local API setup and adaptation notes](docs/adapting.md) for credential creation, running the service, and deployment assumptions.
 
