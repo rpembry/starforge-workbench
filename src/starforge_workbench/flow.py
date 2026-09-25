@@ -133,7 +133,7 @@ def init_profile(root: str | Path, *, profile: str | Path | None = None,
         raise ValueError('Shared/network filesystem is unsupported for the single-writer FLOW profile')
     subprocess.run(['git', '-c', 'init.templateDir=/dev/null', 'init', '-q', '-b', 'flow-history', str(root)],
                    check=True, timeout=10)
-    (root / '.gitignore').write_text('*\n!/work/\n!/work/**/\n!/work/**/TASKS.md\n!/work/**/CONTEXT.md\n!/work/**/SPEC.md\n!/work/**/PLAN.md\n', encoding='utf-8')
+    (root / '.gitignore').write_text('*\n!/.gitignore\n!/work/\n!/work/**/\n!/work/**/TASKS.md\n!/work/**/CONTEXT.md\n!/work/**/SPEC.md\n!/work/**/PLAN.md\n', encoding='utf-8')
     (root / '.gitignore').chmod(0o600)
     _atomic_json(path, {'version': 1, 'root': str(root), 'github_hosts': hosts,
                         'github_repositories': repos, 'jira_sites': sites})
