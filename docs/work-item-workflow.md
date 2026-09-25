@@ -4,8 +4,8 @@ FLOW is a staged local workflow described by [the design record](adr-flow-work-i
 The tracker retains the issue; a deliberately created private metadata repository
 holds the human-authored local queue. Implementation of registry, transactions,
 commands and code workspace preparation is tracked in #110, #111, #112 and #119.
-This guide describes their agreed contract, not commands available in the
-current release.
+The local registry and checkpoint layer are implemented in the first stacked
+changes. Task commands and code workspace preparation follow in later changes.
 
 The initial local registry uses `ai-workbench work init --root PATH` to select a
 new private metadata Git repository, with `--github-host`, `--github-repo`, and
@@ -74,3 +74,21 @@ Kit checklists and arbitrary Markdown remain read-only until a person previews
 and explicitly adopts them. Filename case is not a format discriminator.
 Do not place private paths or runtime IDs in tracked documents. Metadata Git
 history stays local until a separate private backup is deliberately chosen.
+
+The metadata repository stays on its retained `flow-history` branch. A task
+mutation returns the actual checkpoint and a `publication: pending` marker;
+that marker means any later Workbench API event still needs publication. The
+host-local operation journal beside the profile makes retries with the same
+operation ID idempotent after a successful Git commit. If Git or a hook fails,
+the authored document and journal remain for inspection. Resolve the cause,
+then retry the same operation and expected version; do not reset, clean, or
+rebase the metadata repository to hide a failed checkpoint. A changed target,
+unexpected staged file, or conflicting Git history requires manual review.
+
+Local commits are not off-device backups. For a deliberate private backup,
+inspect the repository and use `git bundle create PATH flow-history` to write a
+bundle to a chosen protected destination. Restore into a separate directory
+with `git clone PATH RESTORE_DIRECTORY`, inspect `flow-history` and the private
+profile/registry separately, then point a new profile at the restored root.
+The bundle contains committed metadata, not the host-local profile, registry,
+or pending operation journal; back those up separately with restricted access.
