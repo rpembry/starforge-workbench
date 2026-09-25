@@ -190,3 +190,68 @@ def test_failed_atomic_replace_does_not_claim_completion(workspace, monkeypatch)
         expected_revision=before['revision'], expected_hash=before['document_hash'],
         proposed=proposal, operation='add', actor='Example Operator')
     assert retried['checkpoint'] != 'UNBORN'
+
+
+def test_missing_identity_and_dirty_target_require_reconciliation(workspace):
+    profile, root = workspace
+    target = root / 'work/github/github.com/example-org/example-repo/issue-42/TASKS.md'
+    original = target.read_text()
+    target.write_text(original.replace('FLOW work-item:', 'wrong identity:'))
+    with pytest.raises(ValueError, match='identity differs'):
+        snapshot(SOURCE, profile=profile)
+    target.write_text(original)
+    change(profile, lambda text: text + '\n## P1\n\n- [ ] Task\n  - **ID**: task-01\n')
+    committed = snapshot(SOURCE, profile=profile)
+    target.write_text(committed['document'].replace('Task\n', 'Edited task\n'))
+    dirty = snapshot(SOURCE, profile=profile)
+    with pytest.raises(ValueError, match='uncheckpointed edits'):
+        mutate_document(SOURCE, profile=profile, operation_id='update-01',
+            expected_revision=dirty['revision'], expected_hash=dirty['document_hash'],
+            proposed=dirty['document'].replace('Edited task', 'Another edit'),
+            operation='update', task_id='task-01', actor='Example Operator')
+    assert target.read_text() == dirty['document']
+
+
+def test_signing_failure_retains_authored_bytes_without_success(workspace):
+    profile, root = workspace
+    git = ['git', '-C', str(root)]
+    subprocess.run(git + ['config', 'commit.gpgsign', 'true'], check=True)
+    subprocess.run(git + ['config', 'gpg.program', '/bin/false'], check=True)
+    with pytest.raises(ValueError, match='Git commit failed'):
+        change(profile, lambda text: text + '\n## P1\n\n- [ ] Task\n  - **ID**: task-01\n')
+    assert snapshot(SOURCE, profile=profile)['revision'] == 'UNBORN'
+    assert 'task-01' in snapshot(SOURCE, profile=profile)['document']
+
+
+def test_code_branch_squash_does_not_erase_metadata_history(workspace, tmp_path):
+    profile, metadata = workspace
+    change(profile, lambda text: text + '\n## P1\n\n- [ ] Capture regression\n  - **ID**: task-01\n')
+    before = snapshot(SOURCE, profile=profile)
+    completed = mutate_document(SOURCE, profile=profile, operation_id='complete-01',
+        expected_revision=before['revision'], expected_hash=before['document_hash'],
+        proposed=before['document'].split('\n## P1')[0] + '\n', operation='complete',
+        task_id='task-01', actor='Example Operator', evidence='reviewed')
+    code = tmp_path / 'code'
+    subprocess.run(['git', 'init', '-q', '-b', 'main', str(code)], check=True)
+    for key, value in [('user.name', 'Example Operator'), ('user.email', 'operator@example.com')]:
+        subprocess.run(['git', '-C', str(code), 'config', key, value], check=True)
+    (code / 'README.md').write_text('base\n')
+    subprocess.run(['git', '-C', str(code), 'add', 'README.md'], check=True)
+    subprocess.run(['git', '-C', str(code), 'commit', '-qm', 'Base'], check=True)
+    subprocess.run(['git', '-C', str(code), 'switch', '-qc', 'feature'], check=True)
+    (code / 'temporary.txt').write_text('short lived\n')
+    subprocess.run(['git', '-C', str(code), 'add', 'temporary.txt'], check=True)
+    subprocess.run(['git', '-C', str(code), 'commit', '-qm', 'Add temporary file'], check=True)
+    (code / 'temporary.txt').unlink()
+    (code / 'README.md').write_text('final\n')
+    subprocess.run(['git', '-C', str(code), 'add', '-u'], check=True)
+    subprocess.run(['git', '-C', str(code), 'commit', '-qm', 'Finish feature'], check=True)
+    subprocess.run(['git', '-C', str(code), 'switch', '-q', 'main'], check=True)
+    subprocess.run(['git', '-C', str(code), 'merge', '--squash', 'feature'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(code), 'commit', '-qm', 'Squashed feature'], check=True)
+    assert not (code / 'temporary.txt').exists()
+    subprocess.run(['git', '-C', str(metadata), 'gc', '--prune=now'], check=True)
+    saved = subprocess.run(['git', '-C', str(metadata), 'show',
+        completed['before_revision'] + ':work/github/github.com/example-org/example-repo/issue-42/TASKS.md'],
+        capture_output=True, text=True, check=True).stdout
+    assert 'Capture regression' in saved
