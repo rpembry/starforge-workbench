@@ -19,16 +19,11 @@ working directory, publish an update, or send a handoff. Private repository
 paths are withheld unless `--include-paths` is deliberately chosen; the MCP
 server has its separate `WB_MCP_FLOW_DISCLOSE_PATHS` gate.
 
-For a manual user-scoped Codex trial, copy only a selected skill directory from
-a pinned checkout or release into the host's documented user skill directory
-(currently `~/.agents/skills` for supported Codex versions). Check for a
-same-name destination first: an existing directory may contain user edits and
-must not be overwritten. Repeat installation is a no-op only when file bytes
-match; otherwise review the difference. Remove only the exact copied skill
-after checking for edits. A repository-scoped trial can use `.agents/skills`
-inside a deliberately selected synthetic project. The shared preview/update/
-remove tooling and clean-client discovery verification belong to #122. Merely
-checking these source files into Workbench does not make them visible in an
+Use the explicit [skill installation and diagnostic](skills-install.md) commands
+to select a pinned source and a user or repository scope. The installer
+preserves unrelated configuration and user-edited skill files. Clean-client
+discovery and MCP tool availability still need their own live verification.
+Checking these source files into Workbench does not make them visible in an
 already running tab, another host/container, or every subagent.
 
 Fixture tests verify packet bounds, CLI/MCP parity on a temporary profile,
