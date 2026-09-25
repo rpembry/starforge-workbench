@@ -9,7 +9,7 @@ import re
 from uuid import uuid4
 
 from .flow import load_profile
-from .flow_history import _item, _run, mutate_document, operation_state, snapshot
+from .flow_history import _item, _run, mutate_document, operation_state, revision, snapshot
 from .flow_markdown import add_field, parse, replace_task
 
 
@@ -20,6 +20,8 @@ def _read(reference: str, profile=None):
 
 def _history(reference: str, profile=None, limit: int = 200) -> list[dict]:
     path, config = load_profile(profile)
+    if revision(Path(config['root'])) == 'UNBORN':
+        return []
     item, _, relative = _item(Path(config['root']), path, config, reference)
     output = _run(Path(config['root']), 'log', f'--max-count={limit}', '--format=%H%x00%B%x00',
                   '--', relative).stdout
