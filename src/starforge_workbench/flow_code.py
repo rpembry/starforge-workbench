@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+from copy import deepcopy
 import fcntl
 import hashlib
 import json
@@ -61,7 +62,20 @@ def _git(root: Path, *args: str, check=True) -> subprocess.CompletedProcess:
 @contextlib.contextmanager
 def _repo_lock(path: Path):
     identity = hashlib.sha256(str(path.resolve(strict=False)).encode()).hexdigest()
-    lock = Path('/tmp') / f'starforge-flow-repo-{os.getuid()}-{identity}.lock'
+    runtime = os.environ.get('XDG_RUNTIME_DIR')
+    if runtime:
+        base = Path(runtime)
+        _private(base, directory=True)
+    else:
+        base = Path.home() / '.local' / 'state'
+        base.mkdir(parents=True, exist_ok=True, mode=0o700)
+    private = base / 'starforge-ai-workbench'
+    private.mkdir(mode=0o700, exist_ok=True)
+    _private(private, directory=True)
+    locks = private / 'flow-repo-locks'
+    locks.mkdir(mode=0o700, exist_ok=True)
+    _private(locks, directory=True)
+    lock = locks / f'{identity}.lock'
     fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         if os.fstat(fd).st_uid != os.getuid() or os.fstat(fd).st_mode & 0o077:
@@ -184,30 +198,36 @@ def adopt(reference: str, *, name: str, worktree: str | Path, profile=None) -> d
     selected = _absolute(worktree)
     with _writer_lock(path):
         data = _store(path)
-        binding = data['bindings'].get(work_id, {}).get(name)
+        binding = deepcopy(data['bindings'].get(work_id, {}).get(name))
         if not binding:
             raise ValueError('Bind this repository before adopting an existing worktree')
         if binding.get('relation'):
             raise ValueError('This binding already has a recorded worktree; inspect it first')
-        repo = Path(binding['repository'])
-        with _repo_lock(repo):
-            if not selected.is_dir() or selected.is_symlink():
-                raise ValueError('Selected worktree is missing or unsafe')
-            if _worktrees(repo).get(str(selected.resolve())) != binding['branch']:
-                raise ValueError('Selected path is not a worktree on the bound branch')
-            head = _head(selected)
-            base = _git(repo, 'rev-parse', '--verify', f'{binding["base_ref"]}^{{commit}}').stdout.strip()
-            ancestor = _git(repo, 'merge-base', '--is-ancestor', base, head, check=False).returncode == 0
-            binding['relation'] = {'worktree': str(selected), 'branch': binding['branch'],
+    repo = Path(binding['repository'])
+    with _repo_lock(repo):
+        if not selected.is_dir() or selected.is_symlink():
+            raise ValueError('Selected worktree is missing or unsafe')
+        if _worktrees(repo).get(str(selected.resolve())) != binding['branch']:
+            raise ValueError('Selected path is not a worktree on the bound branch')
+        head = _head(selected)
+        base = _git(repo, 'rev-parse', '--verify', f'{binding["base_ref"]}^{{commit}}').stdout.strip()
+        ancestor = _git(repo, 'merge-base', '--is-ancestor', base, head, check=False).returncode == 0
+        dirty = _dirty(selected)
+        with _writer_lock(path):
+            data = _store(path)
+            current = data['bindings'].get(work_id, {}).get(name)
+            if current != binding:
+                raise ValueError('FLOW binding changed during adoption; inspect it again')
+            current['relation'] = {'worktree': str(selected), 'branch': binding['branch'],
                 'starting_commit': None, 'selected_base_commit': base, 'base_is_ancestor': ancestor,
                 'head': head}
-            binding['pending'] = None
+            current['pending'] = None
             _atomic_json(_store_path(path), data)
-            return {'status': 'adopted', 'work_item_id': work_id, 'name': name,
-                    'worktree': str(selected), 'branch': binding['branch'], 'head': head,
-                    'selected_base_commit': base, 'base_is_ancestor': ancestor,
-                    'actual_starting_commit': 'unknown', 'dirty': _dirty(selected),
-                    'ownership': 'unknown', 'remote_freshness': 'unknown'}
+        return {'status': 'adopted', 'work_item_id': work_id, 'name': name,
+                'worktree': str(selected), 'branch': binding['branch'], 'head': head,
+                'selected_base_commit': base, 'base_is_ancestor': ancestor,
+                'actual_starting_commit': 'unknown', 'dirty': dirty,
+                'ownership': 'unknown', 'remote_freshness': 'unknown'}
 
 
 def _one(binding: dict, work_id: str, *, create: bool, persist_pending=None) -> dict:
@@ -294,23 +314,39 @@ def workspace(reference: str, *, profile=None, create: bool = False) -> dict:
     work_id = _item_id(reference, path, config)
     with _writer_lock(path):
         data = _store(path)
-        bindings = data['bindings'].get(work_id, {})
-        if not bindings:
+        names = sorted(data['bindings'].get(work_id, {}))
+        if not names:
             raise ValueError('No explicit repository binding; use work bind before preparation')
-        results = []
-        for name, binding in sorted(bindings.items()):
-            try:
-                result = _one(binding, work_id, create=create,
-                              persist_pending=lambda: _atomic_json(_store_path(path), data))
-                if result['status'] in {'created', 'recovered'}:
-                    binding['relation'] = {'worktree': result['worktree'], 'branch': result['branch'],
+    results = []
+    for name in names:
+        try:
+            with _writer_lock(path):
+                binding = deepcopy(_store(path)['bindings'][work_id][name])
+            def persist_pending() -> None:
+                with _writer_lock(path):
+                    latest = _store(path)
+                    current = latest['bindings'][work_id][name]
+                    if (current.get('relation') or current.get('pending') or
+                            {key: value for key, value in current.items() if key not in {'relation', 'pending'}} !=
+                            {key: value for key, value in binding.items() if key not in {'relation', 'pending'}}):
+                        raise ValueError('FLOW binding changed during preparation; retry after inspection')
+                    current['pending'] = binding['pending']
+                    _atomic_json(_store_path(path), latest)
+            result = _one(binding, work_id, create=create, persist_pending=persist_pending)
+            if result['status'] in {'created', 'recovered'}:
+                with _writer_lock(path):
+                    latest = _store(path)
+                    current = latest['bindings'][work_id][name]
+                    if current.get('relation') or current.get('pending') != binding.get('pending'):
+                        raise ValueError('FLOW relation changed during preparation; inspect existing worktree')
+                    current['relation'] = {'worktree': result['worktree'], 'branch': result['branch'],
                         'starting_commit': result['starting_commit'], 'head': result['head']}
-                    binding['pending'] = None
-                    _atomic_json(_store_path(path), data)
-                results.append(result)
-            except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                results.append({'status': 'error', 'name': name, 'reason': str(exc),
-                                'next_action': 'Inspect this repository and retry; successful siblings remain intact'})
-        return {'work_item_id': work_id, 'repositories': results, 'local_context': _summary(reference, path),
-                'linked_prs': 'unavailable without tracker enrichment', 'agent_session': 'not started',
-                'next_authorized_step': 'Review the local task suggestion and workspace state before coding'}
+                    current['pending'] = None
+                    _atomic_json(_store_path(path), latest)
+            results.append(result)
+        except (OSError, ValueError, subprocess.SubprocessError, KeyError) as exc:
+            results.append({'status': 'error', 'name': name, 'reason': str(exc),
+                            'next_action': 'Inspect this repository and retry; successful siblings remain intact'})
+    return {'work_item_id': work_id, 'repositories': results, 'local_context': _summary(reference, path),
+            'linked_prs': 'unavailable without tracker enrichment', 'agent_session': 'not started',
+            'next_authorized_step': 'Review the local task suggestion and workspace state before coding'}

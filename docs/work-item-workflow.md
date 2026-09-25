@@ -114,8 +114,10 @@ verified existing worktree deliberately, use `work adopt REFERENCE --name NAME
 --worktree ABSOLUTE_PATH`; this records the selected branch and current HEAD,
 but labels its actual original starting commit and active ownership unknown.
 
-Preparation uses host-local locks, records a pending base before a Git worktree
-write, and preserves successful sibling repositories if another fails. Retry
+Preparation uses repository locks in a private per-user state directory and
+holds the profile lock only for short registry updates, so a slow authorized
+clone does not block unrelated FLOW writes. It records a pending base before a
+Git worktree write and preserves successful sibling repositories if another fails. Retry
 after inspecting an error; it can recover a matching interrupted worktree
 without deleting user files. It suppresses Git hooks and rejects checkout
 filters, since a checkout may otherwise execute local programs. It does not

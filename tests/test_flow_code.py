@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import subprocess
+import threading
 
 import pytest
 
@@ -28,6 +29,9 @@ def repository(path):
 @pytest.fixture
 def flow(tmp_path, monkeypatch):
     monkeypatch.setattr('starforge_workbench.flow._inside_checkout', lambda root: False)
+    runtime = tmp_path / 'runtime'
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setenv('XDG_RUNTIME_DIR', str(runtime))
     profile = tmp_path / 'private' / 'profile.json'
     init_profile(tmp_path / 'metadata', profile=profile)
     open_item(SOURCE, profile=profile)
@@ -64,6 +68,10 @@ def test_new_branch_uses_explicit_base_and_resume_preserves_dirty_state(flow):
     assert (worktree / 'README.md').read_text() == 'local edit\n'
     assert git(repo, 'rev-parse', 'HEAD') == unrelated
     assert len([path for path in root.iterdir() if path.is_dir()]) == 1
+    lock_dir = home / 'runtime/starforge-ai-workbench/flow-repo-locks'
+    assert lock_dir.is_dir()
+    assert lock_dir.stat().st_mode & 0o077 == 0
+    assert len(list(lock_dir.glob('*.lock'))) == 1
 
 
 def test_two_repositories_partial_failure_then_retry(flow):
@@ -197,3 +205,32 @@ def test_cli_prepare_and_read_only_lookup(flow, capsys):
     assert main(['work', '--profile', str(profile), 'prepare', SOURCE]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result['repositories'][0]['status'] == 'created'
+
+
+def test_slow_clone_does_not_hold_profile_writer_lock(flow, monkeypatch):
+    profile, home = flow
+    repo = home / 'missing-clone'
+    root = home / 'worktrees'
+    root.mkdir()
+    bind(SOURCE, name='api', repository=repo, worktree_root=root, base_ref='main',
+         remote='https://example.invalid/example-repo.git', allow_remote_read=True, profile=profile)
+    from starforge_workbench import flow_code
+    original_run = flow_code.subprocess.run
+    clone_started = threading.Event()
+    release_clone = threading.Event()
+    def delayed_clone(argv, *args, **kwargs):
+        if len(argv) > 4 and argv[0] == 'git' and 'clone' in argv:
+            clone_started.set()
+            assert release_clone.wait(5)
+            repository(repo)
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        return original_run(argv, *args, **kwargs)
+    monkeypatch.setattr(flow_code.subprocess, 'run', delayed_clone)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        prepared = pool.submit(workspace, SOURCE, profile=profile, create=True)
+        assert clone_started.wait(5)
+        other = pool.submit(open_item,
+            'https://github.com/example-org/example-repo/issues/43', profile=profile)
+        assert other.result(timeout=2)['status'] == 'created'
+        release_clone.set()
+        assert prepared.result(timeout=8)['repositories'][0]['status'] == 'created'
