@@ -4,8 +4,8 @@ FLOW is a staged local workflow described by [the design record](adr-flow-work-i
 The tracker retains the issue; a deliberately created private metadata repository
 holds the human-authored local queue. Implementation of registry, transactions,
 commands and code workspace preparation is tracked in #110, #111, #112 and #119.
-The local registry, checkpoint layer, and task commands are implemented in the
-first stacked changes. Code workspace preparation follows separately.
+The local registry, checkpoint layer, task commands, and explicit local code
+workspace preparation are implemented in separate stacked changes.
 
 The initial local registry uses `ai-workbench work init --root PATH` to select a
 new private metadata Git repository, with `--github-host`, `--github-repo`, and
@@ -89,6 +89,42 @@ Kit checklists and arbitrary Markdown remain read-only until a person previews
 and explicitly adopts them. Filename case is not a format discriminator.
 Do not place private paths or runtime IDs in tracked documents. Metadata Git
 history stays local until a separate private backup is deliberately chosen.
+
+## Local code workspace preparation
+
+Use `ai-workbench work bind REFERENCE --name NAME --repository ABSOLUTE_CLONE
+--worktree-root ABSOLUTE_DIR --base-ref REF` to record a verified local mapping
+outside the metadata repository. The worktree root must exist. Each item may
+have multiple named repository bindings. The chosen base ref is resolved to an
+exact commit before a new branch is created, regardless of the invoking
+checkout's current branch. The default new branch is `flow/<work-item-id>/<name>`;
+`--branch` selects another explicit name. A missing local clone can be created
+only from a configured HTTPS `--remote` when the binding has
+`--allow-remote-read`; normal local resume performs no fetch and labels remote
+freshness unknown. There is no default remote push.
+
+`ai-workbench work prepare REFERENCE` reuses a recorded worktree or creates
+only missing local branches/worktrees. `work resume` reads the recorded context
+without creating one. The bounded result includes per-repository branch, HEAD,
+starting commit, dirty/divergence state, a local task summary, and the next
+human-directed step. Linked PR enrichment and an agent session are marked
+unavailable rather than inferred. If a matching branch or worktree predates
+the relation, preparation stops with an ownership warning. To associate a
+verified existing worktree deliberately, use `work adopt REFERENCE --name NAME
+--worktree ABSOLUTE_PATH`; this records the selected branch and current HEAD,
+but labels its actual original starting commit and active ownership unknown.
+
+Preparation uses repository locks in a private per-user state directory and
+holds the profile lock only for short registry updates, so a slow authorized
+clone does not block unrelated FLOW writes. It records a pending base before a
+Git worktree write and preserves successful sibling repositories if another fails. Retry
+after inspecting an error; it can recover a matching interrupted worktree
+without deleting user files. It suppresses Git hooks and rejects checkout
+filters, since a checkout may otherwise execute local programs. It does not
+install dependencies, run setup scripts or services, start agents, restore an
+autonomous queue, push, open PRs, change trackers, or deploy. Worktree paths,
+clone locations and recovery state live in a protected local sidecar beside the
+FLOW profile, never in `TASKS.md`.
 
 The metadata repository stays on its retained `flow-history` branch. A task
 mutation returns the actual checkpoint and a `publication: pending` marker;

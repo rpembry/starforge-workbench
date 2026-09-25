@@ -325,6 +325,21 @@ def main(argv=None) -> int:
     open_parser.add_argument('--dry-run', action='store_true')
     show_parser = sub.add_parser('show'); show_parser.add_argument('reference')
     sub.add_parser('list')
+    bind_parser = sub.add_parser('bind')
+    bind_parser.add_argument('reference')
+    bind_parser.add_argument('--name', required=True)
+    bind_parser.add_argument('--repository', type=Path, required=True)
+    bind_parser.add_argument('--worktree-root', type=Path, required=True)
+    bind_parser.add_argument('--base-ref', required=True)
+    bind_parser.add_argument('--branch')
+    bind_parser.add_argument('--remote')
+    bind_parser.add_argument('--allow-remote-read', action='store_true')
+    for command in ('prepare', 'resume'):
+        sub.add_parser(command).add_argument('reference')
+    adopt_parser = sub.add_parser('adopt')
+    adopt_parser.add_argument('reference')
+    adopt_parser.add_argument('--name', required=True)
+    adopt_parser.add_argument('--worktree', type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == 'init':
@@ -335,6 +350,18 @@ def main(argv=None) -> int:
             result = open_item(args.reference, profile=args.profile, dry_run=args.dry_run, link_to=args.link_to)
         elif args.command == 'show':
             result = show(args.reference, profile=args.profile)
+        elif args.command == 'bind':
+            from .flow_code import bind
+            result = bind(args.reference, name=args.name, repository=args.repository,
+                          worktree_root=args.worktree_root, base_ref=args.base_ref,
+                          branch=args.branch, remote=args.remote,
+                          allow_remote_read=args.allow_remote_read, profile=args.profile)
+        elif args.command in {'prepare', 'resume'}:
+            from .flow_code import workspace
+            result = workspace(args.reference, profile=args.profile, create=args.command == 'prepare')
+        elif args.command == 'adopt':
+            from .flow_code import adopt
+            result = adopt(args.reference, name=args.name, worktree=args.worktree, profile=args.profile)
         else:
             result = list_items(profile=args.profile)
         print(json.dumps(result, ensure_ascii=False, indent=2))
