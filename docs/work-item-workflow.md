@@ -1,0 +1,65 @@
+# Local work-item workflow
+
+FLOW is a staged local workflow described by [the design record](adr-flow-work-items.md).
+The tracker retains the issue; a deliberately created private metadata repository
+holds the human-authored local queue. Implementation of registry, transactions,
+commands and code workspace preparation is tracked in #110, #111, #112 and #119.
+This guide describes their agreed contract, not commands available in the
+current release.
+
+## Small item
+
+```markdown
+# Tasks
+
+<!-- FLOW work-item: wi-example-42 -->
+<!-- Source: https://github.com/example-org/example-repo/issues/42 -->
+
+## P2
+
+- [ ] Fix the heading typo
+```
+
+This manual task is readable without metadata. Before a tool changes or links
+it, the tool previews an explicit `**ID**` insertion. Opening the metadata
+workspace never clones a code repository or starts an agent.
+
+## Substantial item
+
+```markdown
+# Tasks
+
+<!-- FLOW work-item: wi-example-43 -->
+<!-- Source: https://github.com/example-org/example-repo/issues/43 -->
+
+## P1
+
+- [ ] Add a parser regression test
+  - **ID**: parser-regression-01
+  - **Details**: Cover multiline input and preserve unknown fields.
+  - **Files**: `tests/test_parser.py`
+  - **Acceptance**: The test fails before the repair and passes after it.
+
+- [ ] Repair parsing
+  - **ID**: parser-repair-02
+  - **Blocked by**: parser-regression-01
+  - **Acceptance**: Relevant tests pass and the result is reviewed.
+```
+
+Adding either generated task must return an actual metadata commit. A material
+acceptance change is checkpointed before an explicit completion removes the
+current block. Completion records outcome, actor and evidence; cancel and
+supersede record different outcomes and do not satisfy a dependent task. If a
+blocker disappears without successful evidence, the dependent task stays
+unresolved. An empty queue retains the header and identity preamble.
+
+`CONTEXT.md` can say what was decided, the next step and a handoff. `SPEC.md`
+and `PLAN.md` are useful only when the work merits them. A review handoff
+reports the exact code revision separately from the task document. A fresh
+session reads the bounded local context; it need not replay a transcript.
+
+Manual `[x]` and deletion are reconciliation signals. Foreign `TODO.md`, Spec
+Kit checklists and arbitrary Markdown remain read-only until a person previews
+and explicitly adopts them. Filename case is not a format discriminator.
+Do not place private paths or runtime IDs in tracked documents. Metadata Git
+history stays local until a separate private backup is deliberately chosen.
