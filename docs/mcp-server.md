@@ -10,6 +10,11 @@ The tools read bounded Workbench records, create only proposals or attributed
 accomplishments, and return a standup report. They cannot accept, complete, or
 execute work.
 
+`workbench_capabilities` reports only this running stdio server's implemented
+tool families and package version. Discover exact schemas through the MCP host.
+It does not establish client-side skill discovery or API health. See
+[agent-interface.md](agent-interface.md) for interface routing and current gaps.
+
 The server instructions tell connected agents to treat an unsupported Workbench
 (`aiw`) operation as a possible MCP capability gap. An agent should consider
 creating a GitHub feature request for future support; if it lacks GitHub access,

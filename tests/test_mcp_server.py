@@ -31,6 +31,16 @@ def test_server_instructions_explain_unsupported_operation_fallback():
     assert 'GitHub feature request' in instructions
     assert 'GitHub access is unavailable' in instructions
     assert 'notify the user' in instructions
+    assert 'uncertain write' in instructions
+
+
+def test_capabilities_report_only_running_server_support():
+    result = invoke(build_server(), 'workbench_capabilities')
+    assert result['transport'] == 'stdio'
+    assert result['evidence'] == 'running-server'
+    assert result['flow'] == 'unavailable'
+    assert result['client_skill_discovery'] == 'unknown'
+    assert result['api_health'] == 'not_checked'
 
 
 def test_read_and_append_tools_use_bounded_api_contracts():
