@@ -7,7 +7,7 @@ import threading
 import pytest
 
 from starforge_workbench.flow import init_profile, open_item
-from starforge_workbench.flow_code import adopt, bind, workspace
+from starforge_workbench.flow_code import MissingBindingError, adopt, bind, workspace
 
 SOURCE = 'https://github.com/example-org/example-repo/issues/42'
 
@@ -119,7 +119,7 @@ def test_interrupted_registry_write_recovers_worktree(flow, monkeypatch):
 
 def test_unrecorded_branch_and_missing_binding_fail_closed(flow):
     profile, home = flow
-    with pytest.raises(ValueError, match='No explicit repository binding'):
+    with pytest.raises(MissingBindingError, match='No explicit repository binding'):
         workspace(SOURCE, profile=profile, create=True)
     repo = home / 'code'
     repository(repo)

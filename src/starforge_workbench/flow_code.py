@@ -16,6 +16,10 @@ from .flow import _atomic_json, _find, _private, _registry, _writer_lock, load_p
 from .flow_tasks import inspect
 
 
+class MissingBindingError(ValueError):
+    """The work item exists, but has no explicit code repository binding."""
+
+
 def _store_path(profile: Path) -> Path:
     return profile.with_suffix('.code.json')
 
@@ -316,7 +320,7 @@ def workspace(reference: str, *, profile=None, create: bool = False) -> dict:
         data = _store(path)
         names = sorted(data['bindings'].get(work_id, {}))
         if not names:
-            raise ValueError('No explicit repository binding; use work bind before preparation')
+            raise MissingBindingError('No explicit repository binding; use work bind before preparation')
     results = []
     for name in names:
         try:
