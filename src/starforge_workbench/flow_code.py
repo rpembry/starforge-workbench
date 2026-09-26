@@ -16,6 +16,10 @@ from .flow import _atomic_json, _find, _private, _registry, _writer_lock, load_p
 from .flow_tasks import inspect
 
 
+class MissingBindingError(ValueError):
+    """The work item exists, but has no explicit code repository binding."""
+
+
 def _store_path(profile: Path) -> Path:
     return profile.with_suffix('.code.json')
 
@@ -237,7 +241,7 @@ def _one(binding: dict, work_id: str, *, create: bool, persist_pending=None) -> 
     branch = binding['branch']
     target = root / f'{work_id}-{name}'
     relation = binding.get('relation')
-    with _repo_lock(repo):
+    with (_repo_lock(repo) if create else contextlib.nullcontext()):
         if relation:
             recorded = Path(relation['worktree'])
             if not recorded.is_dir() or recorded.is_symlink():
@@ -312,15 +316,15 @@ def _one(binding: dict, work_id: str, *, create: bool, persist_pending=None) -> 
 def workspace(reference: str, *, profile=None, create: bool = False) -> dict:
     path, config = load_profile(profile)
     work_id = _item_id(reference, path, config)
-    with _writer_lock(path):
+    with (_writer_lock(path) if create else contextlib.nullcontext()):
         data = _store(path)
         names = sorted(data['bindings'].get(work_id, {}))
         if not names:
-            raise ValueError('No explicit repository binding; use work bind before preparation')
+            raise MissingBindingError('No explicit repository binding; use work bind before preparation')
     results = []
     for name in names:
         try:
-            with _writer_lock(path):
+            with (_writer_lock(path) if create else contextlib.nullcontext()):
                 binding = deepcopy(_store(path)['bindings'][work_id][name])
             def persist_pending() -> None:
                 with _writer_lock(path):

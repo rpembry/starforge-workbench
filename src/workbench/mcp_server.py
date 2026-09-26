@@ -8,6 +8,7 @@ from uuid import uuid4
 from mcp.server.mcpserver import MCPServer
 
 from .client import client
+from .flow_mcp import register_flow_tools
 
 TABLES = frozenset({'actions', 'artifacts', 'collectors', 'events', 'import_batches',
                     'import_records', 'objectives', 'runs'})
@@ -47,8 +48,13 @@ def _contexts(path: Path) -> list[dict[str, object]]:
 
 
 def build_server(api_factory=client, manifest_path=_manifest_path, context_loader=_contexts,
-                 restore=None) -> MCPServer:
+                 restore=None, flow_profile=None, flow_write=None,
+                 flow_prepare=None, flow_disclose_paths=None) -> MCPServer:
     """Build a server with injectable dependencies for isolated tests."""
+    selected_flow_profile = flow_profile or os.environ.get('WB_MCP_FLOW_PROFILE')
+    selected_flow_write = flow_write if flow_write is not None else os.environ.get('WB_MCP_FLOW_WRITE') == '1'
+    selected_flow_prepare = flow_prepare if flow_prepare is not None else os.environ.get('WB_MCP_FLOW_PREPARE') == '1'
+    selected_flow_paths = flow_disclose_paths if flow_disclose_paths is not None else os.environ.get('WB_MCP_FLOW_DISCLOSE_PATHS') == '1'
     server = MCPServer(name='starforge-workbench', title='Starforge Workbench',
                        description='Local tools for Workbench state and deliberate launcher restoration.',
                        instructions=('This local stdio server uses the configured Workbench operator credential. '
@@ -79,8 +85,10 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
             'transport': 'stdio',
             'evidence': 'running-server',
             'tool_families': ['configured-contexts', 'browser-desired-state',
-                              'bounded-worklog', 'standup', 'opt-in-session-restore'],
-            'flow': 'unavailable',
+                              'bounded-worklog', 'standup', 'session-restore-preview',
+                              *(['opt-in-session-restore'] if os.environ.get('WB_MCP_ALLOW_RESTORE') == '1' else [])],
+            'flow': ('local-read-write' if selected_flow_profile and selected_flow_write else
+                     'local-read' if selected_flow_profile else 'unavailable'),
             'client_skill_discovery': 'unknown',
             'api_health': 'not_checked',
         }
@@ -145,6 +153,10 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
             restore(context, dry_run)
         return {'context': context, 'dry_run': dry_run, 'status': 'previewed' if dry_run else 'restore_requested'}
 
+    if selected_flow_profile:
+        register_flow_tools(server, profile=selected_flow_profile, allow_write=selected_flow_write,
+                            allow_prepare=selected_flow_write and selected_flow_prepare,
+                            disclose_paths=selected_flow_paths)
     return server
 
 

@@ -36,6 +36,12 @@ def test_lossless_parser_preserves_foreign_content_and_crlf():
     assert doc.text == raw
 
 
+def test_next_and_history_before_first_checkpoint(workspace):
+    profile, _ = workspace
+    assert inspect(SOURCE, 'next', profile=profile)['suggestion'] is None
+    assert inspect(SOURCE, 'history', profile=profile)['entries'] == []
+
+
 def test_add_edit_block_complete_and_history(workspace):
     profile, root = workspace
     added = mutate(SOURCE, 'add', profile=profile, title='Cover Unicode', acceptance='Review passes',
