@@ -20,7 +20,8 @@ from .models import (ActionIn, ActionPatch, ArtifactIn, EventIn, ObjectiveIn,
                      ProviderAttentionIn, ProviderGenerationIn, RegisteredSessionIn,
                      InstructionClaimIn, InstructionIn, InstructionLeaseIn,
                      InstructionResultIn, InstructionPreviewIn,
-                     WorkItemProjectionIn, WorkItemActionLinkIn, WorkItemReconcileIn)
+                     WorkItemProjectionIn, WorkItemActionLinkIn, WorkItemReconcileIn,
+                     WorkItemEvidenceIn)
 from .repository import Problem, SQLiteRepository
 from .response_preview import ResponsePreviewHub
 from .settings import load_settings
@@ -358,6 +359,10 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
                               who=Depends(operator)):
         return repository.reconcile_work_item_action(work_item_id, action_id,
                                                      body.model_dump(mode='json'), who.name)
+
+    @app.post('/api/flow/work-items/{work_item_id}/evidence')
+    def link_flow_evidence(work_item_id: str, body: WorkItemEvidenceIn, who=Depends(operator)):
+        return repository.link_evidence_commit(work_item_id, body.model_dump(mode='json'), who.name)
 
     @app.post('/api/imports', status_code=201)
     def import_batch(body: ImportBatch, who=Depends(operator)):
