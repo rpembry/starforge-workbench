@@ -154,6 +154,22 @@ class WorkItemReconcileIn(WorkItemActionLinkIn):
         return value
 
 
+class WorkItemEvidenceIn(Model):
+    operation_id: FlowOperationId
+    work_item_version: Annotated[int, Field(ge=1)]
+    repository_url: Annotated[str, Field(min_length=1, max_length=500)]
+    commit_sha: Annotated[str, Field(pattern=r'^[a-f0-9]{40,64}$')]
+
+    @field_validator('repository_url')
+    @classmethod
+    def safe_repository(cls, value):
+        parsed = urlsplit(value)
+        if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or
+                parsed.query or parsed.fragment or parsed.port):
+            raise ValueError('Evidence repository needs a plain HTTPS URL')
+        return value
+
+
 class EventIn(Model):
     kind: Literal['observation', 'accomplishment', 'run_observation', 'decision'] = 'observation'
     summary: Text
