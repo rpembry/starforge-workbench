@@ -143,17 +143,42 @@ def test_explicit_operator_reconciliation_preserves_action_and_audits_scope(api)
                 if e['summary'] == 'FLOW revised definition accepted by operator']) == 1
 
 
+def test_exact_code_commit_evidence_is_reported_not_verified_or_completed(api):
+    accepted = action(api, title='Still active', status='accepted')
+    api.post('/api/flow/work-items', json=publication())
+    evidence = {'operation_id': 'evidence-one', 'work_item_version': 1,
+                'repository_url': 'https://github.com/example/repo', 'commit_sha': 'a' * 40}
+    path = f'/api/flow/work-items/{WORK_ITEM}/evidence'
+    api.headers['Authorization'] = 'Bearer ' + COLLECTOR
+    assert api.post(path, json=evidence).status_code == 403
+    api.headers['Authorization'] = 'Bearer ' + OPERATOR
+    first = api.post(path, json=evidence)
+    assert first.status_code == 200, first.text
+    assert first.json()['evidence_verification'].startswith('caller_reported')
+    assert api.post(path, json=evidence).json() == first.json()
+    assert api.post(path, json={**evidence, 'commit_sha': 'b' * 40}).status_code == 409
+    assert api.post(path, json={**evidence, 'operation_id': 'evidence-two'}).json()['status'] == 'existing'
+    assert api.post(path, json={**evidence, 'operation_id': 'evidence-three',
+                                'repository_url': 'javascript:alert(1)'}).status_code == 422
+    projection = api.get('/api/flow/work-items/' + WORK_ITEM).json()
+    assert len(projection['evidence_commits']) == 1
+    assert projection['evidence_commits'][0]['provenance'] == 'operator_reported'
+    assert api.get('/api/actions/' + accepted['id']).json()['status'] == 'accepted'
+    assert not api.get('/api/reports/accomplishments').json()['accomplishments']
+
+
 def test_version_eight_upgrade_keeps_existing_actions(api, repo):
     existing = action(api, title='Existing committed work', status='accepted')
     with repo.connection() as db:
+        db.execute('DROP TABLE flow_evidence_commits')
         db.execute('DROP TABLE flow_publication_ops')
         db.execute('DROP TABLE flow_action_links')
         db.execute('DROP TABLE flow_work_items')
-        db.execute('DELETE FROM schema_migrations WHERE version IN (9,10)')
+        db.execute('DELETE FROM schema_migrations WHERE version IN (9,10,11)')
         db.commit()
     upgraded = SQLiteRepository(repo.path)
     assert upgraded.get('actions', existing['id'])['status'] == 'accepted'
     assert upgraded.list_work_items() == []
     with upgraded.connection() as db:
         assert [row[0] for row in db.execute(
-            'SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 11))
+            'SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 12))

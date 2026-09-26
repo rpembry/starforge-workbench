@@ -41,6 +41,9 @@ def _view(db, work_item_id: str) -> dict:
     item['actions'] = [{**dict(link),
                         'definition_drift': link['linked_document_revision'] != item['document_revision']}
                        for link in links]
+    item['evidence_commits'] = [dict(row) for row in db.execute('''SELECT repository_url,commit_sha,
+        linked_at,linked_by,provenance FROM flow_evidence_commits WHERE work_item_id=?
+        ORDER BY linked_at,repository_url,commit_sha''', (work_item_id,))]
     item['authority'] = 'projection only; action status and source tracker state are separate'
     return item
 
@@ -73,6 +76,31 @@ def linked_action_context(db) -> dict[str, list[dict]]:
             'freshness': 'last_published_only',
         })
     return result
+
+
+def link_evidence_commit(repo, work_item_id: str, data: dict, principal: str) -> dict:
+    """Exact caller-reported code evidence; not a verification or completion event."""
+    data = dict(data)
+    operation_id = data.pop('operation_id')
+    request_hash = _request_hash('evidence', {'work_item_id': work_item_id, **data})
+    with repo.connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        prior = _replay(db, operation_id, request_hash)
+        if prior is not None:
+            return prior
+        projection = _view(db, work_item_id)
+        if projection['version'] != data['work_item_version']:
+            raise Problem(409, 'version_conflict', 'Read the latest FLOW projection before linking evidence')
+        cursor = db.execute('''INSERT OR IGNORE INTO flow_evidence_commits
+            (work_item_id,repository_url,commit_sha,linked_at,linked_by,provenance)
+            VALUES (?,?,?,?,?,?)''', (work_item_id, data['repository_url'], data['commit_sha'],
+                                     now(), principal, 'operator_reported'))
+        result = {'status': 'linked' if cursor.rowcount else 'existing',
+                  'projection': _view(db, work_item_id), 'action_changed': False,
+                  'evidence_verification': 'caller_reported; commit existence and contents not checked'}
+        _remember(db, operation_id, request_hash, result)
+        db.commit()
+        return result
 
 
 def publish_work_item(repo, data: dict, principal: str) -> dict:
