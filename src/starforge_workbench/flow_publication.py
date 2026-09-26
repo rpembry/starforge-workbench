@@ -79,7 +79,8 @@ def replay(operation_id: str, transport, *, profile=None) -> dict:
         if not entry:
             raise ValueError('Unknown FLOW publication operation')
         if entry['status'] == 'published':
-            return {'operation_id': operation_id, 'status': 'published', 'response': entry['response']}
+            return {'operation_id': operation_id, 'status': 'published',
+                    'response': entry['response'], 'reason': None}
         if entry['status'] == 'reconciliation_needed':
             return {'operation_id': operation_id, 'status': 'reconciliation_needed',
                     'reason': entry['reason']}
