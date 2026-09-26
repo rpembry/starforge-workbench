@@ -33,6 +33,7 @@ def _view(db, work_item_id: str) -> dict:
         raise Problem(404, 'not_found', 'FLOW work item projection does not exist')
     item = dict(row)
     item['task_ids'] = json.loads(item['task_ids'])
+    item['task_summaries'] = json.loads(item['task_summaries'])
     links = db.execute('''SELECT l.action_id,l.linked_document_revision,l.linked_action_version,
         l.linked_at,l.linked_by,a.status AS action_status,a.version AS action_version
         FROM flow_action_links l JOIN actions a ON a.id=l.action_id
@@ -88,6 +89,7 @@ def publish_work_item(repo, data: dict, principal: str) -> dict:
                               (work_item_id,)).fetchone()
         expected = data.get('expected_version')
         task_ids = json.dumps(data['task_ids'], ensure_ascii=False, separators=(',', ':'))
+        summaries = json.dumps(data['task_summaries'], ensure_ascii=False, separators=(',', ':'))
         if existing:
             if existing['source_ref'] != data['source_ref']:
                 raise Problem(409, 'identity_conflict', 'FLOW source identity cannot change silently')
@@ -95,11 +97,11 @@ def publish_work_item(repo, data: dict, principal: str) -> dict:
                 raise Problem(409, 'version_conflict', 'Read the current FLOW projection before publishing')
             changed = (existing['document_revision'] != data['document_revision'] or
                        existing['document_hash'] != data['document_hash'] or
-                       existing['task_ids'] != task_ids)
+                       existing['task_ids'] != task_ids or existing['task_summaries'] != summaries)
             if changed:
-                db.execute('''UPDATE flow_work_items SET document_revision=?,document_hash=?,task_ids=?,
+                db.execute('''UPDATE flow_work_items SET document_revision=?,document_hash=?,task_ids=?,task_summaries=?,
                     version=?,updated_at=?,updated_by=? WHERE work_item_id=?''',
-                    (data['document_revision'], data['document_hash'], task_ids,
+                    (data['document_revision'], data['document_hash'], task_ids, summaries,
                      existing['version'] + 1, now(), principal, work_item_id))
             status = 'updated' if changed else 'unchanged'
         else:
@@ -109,10 +111,10 @@ def publish_work_item(repo, data: dict, principal: str) -> dict:
                           (data['source_ref'],)).fetchone():
                 raise Problem(409, 'identity_conflict', 'FLOW source already belongs to another work item')
             db.execute('''INSERT INTO flow_work_items
-                (work_item_id,source_ref,document_revision,document_hash,task_ids,projection_state,
-                 version,updated_at,updated_by) VALUES (?,?,?,?,?,?,?,?,?)''',
+                (work_item_id,source_ref,document_revision,document_hash,task_ids,task_summaries,projection_state,
+                 version,updated_at,updated_by) VALUES (?,?,?,?,?,?,?,?,?,?)''',
                 (work_item_id, data['source_ref'], data['document_revision'], data['document_hash'],
-                 task_ids, 'proposed', 1, now(), principal))
+                 task_ids, summaries, 'proposed', 1, now(), principal))
             status = 'created'
         result = {'status': status, 'projection': _view(db, work_item_id),
                   'publication': 'projection_only', 'source_tracker_status': 'not_changed'}
