@@ -34,6 +34,10 @@ def report(repo,kind,current=None,zone=DEFAULT_ZONE):
         events=[dict(r) for r in db.execute("SELECT * FROM events WHERE kind='accomplishment' ORDER BY occurred_at,id")]
         metadata={r['target_id']:json.loads(r['metadata']) for r in db.execute("SELECT target_id,metadata FROM import_records WHERE target_resource='events'")}
         actions=[dict(r) for r in db.execute("SELECT * FROM actions WHERE status IN ('accepted','in_progress','waiting','approval_needed') ORDER BY CASE status WHEN 'in_progress' THEN 0 ELSE 1 END,priority,updated_at DESC")]
+        from .flow_relations import linked_action_context
+        links = linked_action_context(db)
+        for action in actions:
+            action['flow_links'] = links.get(action['id'], [])
     start,end=standup_window(current, zone)
     if kind=='standup':
         events=[e for e in events if start<=event_time(e,metadata,zone)<=end]

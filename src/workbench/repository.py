@@ -692,6 +692,10 @@ class SQLiteRepository:
     def dashboard(self):
         with self.connection() as db:
             actions = [dict(r) for r in db.execute('SELECT * FROM actions ORDER BY priority, due_date IS NULL, due_date, created_at')]
+            from .flow_relations import linked_action_context
+            links = linked_action_context(db)
+            for action in actions:
+                action['flow_links'] = links.get(action['id'], [])
             runs = [dict(r) for r in db.execute('SELECT * FROM runs ORDER BY heartbeat_at DESC')]
             from datetime import datetime, timezone
             current = datetime.now(timezone.utc)

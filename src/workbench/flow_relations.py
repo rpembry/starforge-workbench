@@ -57,6 +57,23 @@ def list_work_items(repo, limit: int, offset: int) -> list[dict]:
         return [_view(db, identity) for identity in ids]
 
 
+def linked_action_context(db) -> dict[str, list[dict]]:
+    """Exact, minimized references; neither a task nor a completion claim."""
+    rows = db.execute('''SELECT l.action_id,w.work_item_id,w.source_ref,w.document_revision,
+        w.updated_at,l.linked_document_revision
+        FROM flow_action_links l JOIN flow_work_items w ON w.work_item_id=l.work_item_id
+        ORDER BY w.work_item_id''').fetchall()
+    result: dict[str, list[dict]] = {}
+    for row in rows:
+        result.setdefault(row['action_id'], []).append({
+            'work_item_id': row['work_item_id'], 'source_ref': row['source_ref'],
+            'published_revision': row['document_revision'], 'published_at': row['updated_at'],
+            'definition_drift': row['document_revision'] != row['linked_document_revision'],
+            'freshness': 'last_published_only',
+        })
+    return result
+
+
 def publish_work_item(repo, data: dict, principal: str) -> dict:
     data = dict(data)
     operation_id = data.pop('operation_id')
