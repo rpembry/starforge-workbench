@@ -1,5 +1,6 @@
 """Local stdio MCP server for the authenticated Starforge Workbench API."""
 import os
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -10,6 +11,13 @@ from .client import client
 
 TABLES = frozenset({'actions', 'artifacts', 'collectors', 'events', 'import_batches',
                     'import_records', 'objectives', 'runs'})
+
+
+def _release_version() -> str:
+    try:
+        return version('starforge-ai-workbench')
+    except PackageNotFoundError:
+        return 'unknown'
 
 
 def _manifest_path() -> Path:
@@ -45,7 +53,11 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
                        description='Local tools for Workbench state and deliberate launcher restoration.',
                        instructions=('This local stdio server uses the configured Workbench operator credential. '
                                      'Observations and proposals do not prove task completion. Session restoration '
-                                     'is disabled by default and requires an explicit local opt-in. When a requested '
+                                     'is disabled by default and requires an explicit local opt-in. Prefer an available, '
+                                     'correctly scoped typed tool. A denied operation, stale revision, or uncertain write '
+                                     'must not be retried through a shell or another interface without reconciliation. '
+                                     'A documented CLI equivalent is useful when MCP is unavailable and the request is '
+                                     'authorized. When a requested '
                                      'Starforge Workbench (aiw) operation is not directly supported by this MCP '
                                      'server, consider creating a GitHub feature request to add the capability. If '
                                      'GitHub access is unavailable, notify the user of the capability gap and suggest '
@@ -58,6 +70,20 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
             response = api.request(method, path, json=payload)
             response.raise_for_status()
             return response.json()
+
+    @server.tool(name='workbench_capabilities', structured_output=True)
+    def workbench_capabilities() -> dict[str, object]:
+        """Report this running stdio server's release and implemented tool families; no profile, client-installation, or remote-service claim."""
+        return {
+            'server_version': _release_version(),
+            'transport': 'stdio',
+            'evidence': 'running-server',
+            'tool_families': ['configured-contexts', 'browser-desired-state',
+                              'bounded-worklog', 'standup', 'opt-in-session-restore'],
+            'flow': 'unavailable',
+            'client_skill_discovery': 'unknown',
+            'api_health': 'not_checked',
+        }
 
     @server.tool(name='list_contexts', structured_output=True)
     def list_contexts() -> list[dict[str, object]]:
