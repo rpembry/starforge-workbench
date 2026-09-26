@@ -117,22 +117,13 @@ def replay(operation_id: str, transport, *, profile=None) -> dict:
 
 
 class APITransport:
-    """Caller-supplied endpoint and bearer token; neither is stored in the outbox."""
-    def __init__(self, base_url: str, token: str):
-        from urllib.parse import urlsplit
-        parts = urlsplit(base_url)
-        if parts.scheme != 'https' or not parts.hostname or parts.username or parts.password:
-            raise ValueError('FLOW publication needs a plain HTTPS API origin')
-        if not token:
-            raise ValueError('FLOW publication needs an operator token')
-        self.base_url = base_url.rstrip('/')
-        self.token = token
+    """Reuse Workbench's existing operator client and private credentials file."""
+    def __init__(self, api_url=None, credentials_file=None):
+        from workbench.client import client
+        self.api = client(api_url, credentials_file, role='operator')
 
     def _request(self, method: str, path: str, payload=None):
-        import httpx
-        with httpx.Client(timeout=10, follow_redirects=False) as client:
-            response = client.request(method, self.base_url + path,
-                                      headers={'Authorization': 'Bearer ' + self.token}, json=payload)
+        response = self.api.request(method, path, json=payload)
         if response.status_code == 404 and method == 'GET':
             return None
         response.raise_for_status()
@@ -144,10 +135,12 @@ class APITransport:
     def publish(self, payload: dict):
         return self._request('POST', '/api/flow/work-items', payload)
 
+    def close(self):
+        self.api.close()
+
 
 def main(argv=None) -> None:
     import argparse
-    import os
     parser = argparse.ArgumentParser(description='Explicit FLOW projection publication')
     parser.add_argument('--profile')
     sub = parser.add_subparsers(dest='command', required=True)
@@ -157,14 +150,18 @@ def main(argv=None) -> None:
     capture.add_argument('--expected-version', type=int)
     send = sub.add_parser('replay')
     send.add_argument('operation_id')
-    send.add_argument('--api-url', required=True)
+    send.add_argument('--api-url')
+    send.add_argument('--credentials-file')
     args = parser.parse_args(argv)
     if args.command == 'queue':
         result = queue(args.reference, profile=args.profile,
                        operation_id=args.operation_id, expected_version=args.expected_version)
     else:
-        result = replay(args.operation_id, APITransport(args.api_url, os.environ.get('WB_API_TOKEN', '')),
-                        profile=args.profile)
+        transport = APITransport(args.api_url, args.credentials_file)
+        try:
+            result = replay(args.operation_id, transport, profile=args.profile)
+        finally:
+            transport.close()
     print(json.dumps(result, indent=2))
 
 
