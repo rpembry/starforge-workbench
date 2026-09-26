@@ -96,6 +96,26 @@ def test_exact_links_versions_and_identity_guards(api):
         operation_id='publish-bad-url', source_ref='https://user:secret@example.com/plan')).status_code == 422
 
 
+def test_exact_relations_enrich_existing_commitment_without_double_counting(api):
+    accepted = action(api, title='One commitment', status='accepted')
+    assert len(api.get('/api/reports/todo').json()['plan']) == 1
+    api.post('/api/flow/work-items', json=publication())
+    api.post(f'/api/flow/work-items/{WORK_ITEM}/actions/{accepted["id"]}/link',
+             json={'operation_id': 'link-report', 'work_item_version': 1,
+                   'action_version': accepted['version']})
+    report = api.get('/api/reports/todo').json()
+    assert len(report['plan']) == 1
+    assert report['plan'][0]['flow_links'][0]['work_item_id'] == WORK_ITEM
+    assert report['plan'][0]['flow_links'][0]['freshness'] == 'last_published_only'
+    dashboard = api.get('/api/dashboard').json()
+    assert len(dashboard['next']) == 1
+    assert dashboard['next'][0]['flow_links'][0]['definition_drift'] is False
+    api.post('/api/flow/work-items', json=publication(
+        operation_id='publish-report-update', expected_version=1,
+        document_revision='d' * 40, document_hash='e' * 64))
+    assert api.get('/api/reports/todo').json()['plan'][0]['flow_links'][0]['definition_drift'] is True
+
+
 def test_version_eight_upgrade_keeps_existing_actions(api, repo):
     existing = action(api, title='Existing committed work', status='accepted')
     with repo.connection() as db:
