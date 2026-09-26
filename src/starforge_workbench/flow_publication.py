@@ -48,9 +48,15 @@ def queue(reference: str, *, profile=None, operation_id: str | None = None,
     if len(task_ids) != len(set(task_ids)) or len(task_ids) > 100:
         raise ValueError('FLOW task IDs must be unique and limited to 100')
     operation_id = operation_id or 'publish-' + uuid4().hex
+    summaries = ([{'task_id': task.task_id, 'title': task.title[:120],
+                   'blocked': bool(task.fields.get('Blocked') or task.fields.get('Blocked by')),
+                   'review_pending': bool(task.fields.get('Review'))}
+                  for task in document.tasks if task.task_id]
+                 if config.get('publish_task_summaries', False) else [])
     payload = {'operation_id': operation_id, 'work_item_id': item['id'],
                'source_ref': item['source'], 'document_revision': snap['revision'],
                'document_hash': snap['document_hash'], 'task_ids': task_ids,
+               'task_summaries': summaries,
                'expected_version': expected_version}
     signature = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
     with _writer_lock(path):
@@ -64,6 +70,16 @@ def queue(reference: str, *, profile=None, operation_id: str | None = None,
                                               'status': 'publication_pending'}
         _atomic_json(_path(path), state)
     return {'operation_id': operation_id, 'status': 'publication_pending', 'payload': payload}
+
+
+def set_summary_disclosure(*, profile=None, enabled: bool) -> dict:
+    """Set a private per-profile opt-in; it does not publish or change existing projections."""
+    path, config = load_profile(profile)
+    with _writer_lock(path):
+        path, config = load_profile(path)
+        config['publish_task_summaries'] = enabled
+        _atomic_json(path, config)
+    return {'publish_task_summaries': enabled, 'publication': 'not_changed'}
 
 
 def replay(operation_id: str, transport, *, profile=None) -> dict:
@@ -153,10 +169,14 @@ def main(argv=None) -> None:
     send.add_argument('operation_id')
     send.add_argument('--api-url')
     send.add_argument('--credentials-file')
+    disclosure = sub.add_parser('summary-disclosure')
+    disclosure.add_argument('choice', choices=['enable', 'disable'])
     args = parser.parse_args(argv)
     if args.command == 'queue':
         result = queue(args.reference, profile=args.profile,
                        operation_id=args.operation_id, expected_version=args.expected_version)
+    elif args.command == 'summary-disclosure':
+        result = set_summary_disclosure(profile=args.profile, enabled=args.choice == 'enable')
     else:
         transport = APITransport(args.api_url, args.credentials_file)
         try:

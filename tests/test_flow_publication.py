@@ -63,3 +63,16 @@ def test_stale_version_needs_reconciliation(profile):
     assert result['status'] == 'reconciliation_needed'
     assert result['reason'] == 'version_conflict'
     assert transport.calls == 0
+
+
+def test_task_summary_disclosure_is_profile_opt_in(profile):
+    from starforge_workbench.flow_publication import set_summary_disclosure
+    private = queue(SOURCE, profile=profile, operation_id='summary-private')
+    assert private['payload']['task_summaries'] == []
+    set_summary_disclosure(profile=profile, enabled=True)
+    visible = queue(SOURCE, profile=profile, operation_id='summary-visible')
+    assert visible['payload']['task_summaries'][0]['title'] == 'Review'
+    assert set(visible['payload']['task_summaries'][0]) == {
+        'task_id', 'title', 'blocked', 'review_pending'}
+    set_summary_disclosure(profile=profile, enabled=False)
+    assert queue(SOURCE, profile=profile, operation_id='summary-hidden')['payload']['task_summaries'] == []

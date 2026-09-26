@@ -28,3 +28,18 @@ def test_flow_page_is_read_only_escapes_content_and_keeps_states_separate(api, r
 
 def test_flow_empty_page_is_truthful(api):
     assert 'Local work may exist' in api.get('/flow').text
+
+
+def test_opt_in_summary_renders_blocker_safely(api):
+    body = publication(task_ids=['step-one'], task_summaries=[{
+        'task_id': 'step-one', 'title': '<img src=x onerror=alert(1)>',
+        'blocked': True, 'review_pending': True}])
+    assert api.post('/api/flow/work-items', json=body).status_code == 201
+    html = api.get('/flow').text
+    assert '&lt;img' in html and '<img src=x' not in html
+    assert 'blocked' in html and 'review pending' in html
+    assert api.post('/api/flow/work-items', json=publication(
+        operation_id='bad-summary', work_item_id='wi-' + 'd' * 32,
+        source_ref='https://example.org/work-items/another', task_ids=[],
+        task_summaries=[{'task_id': 'step-one', 'title': 'Unknown',
+                         'blocked': False, 'review_pending': False}])).status_code == 422
