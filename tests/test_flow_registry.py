@@ -1,6 +1,8 @@
+import subprocess
+
 import pytest
 
-from starforge_workbench.flow import init_profile, list_items, open_item, show
+from starforge_workbench.flow import _inside_checkout, init_profile, list_items, open_item, show
 
 
 @pytest.fixture(autouse=True)
@@ -18,6 +20,31 @@ def configured(tmp_path):
                                       'https://code.example.com/other/example-repo'],
                  jira_sites={'demo': 'https://jira.example.com', 'second': 'https://other.example.com'})
     return profile, root
+
+
+def test_invalid_ancestor_git_marker_does_not_block_private_profile(tmp_path):
+    (tmp_path / '.git').mkdir()
+    assert not _inside_checkout(tmp_path / 'private' / 'metadata')
+
+
+def test_real_checkout_and_symlink_marker_block_private_profile(tmp_path):
+    checkout = tmp_path / 'checkout'
+    subprocess.run(['git', '-c', 'init.templateDir=/dev/null', 'init', '-q', str(checkout)], check=True)
+    assert _inside_checkout(checkout / 'private' / 'metadata')
+    linked = tmp_path / 'linked'
+    linked.mkdir()
+    (linked / '.git').symlink_to(tmp_path / 'missing')
+    assert _inside_checkout(linked / 'metadata')
+
+
+def test_uncertain_git_probe_blocks_private_profile(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired('git', 10)
+
+    monkeypatch.setattr('starforge_workbench.flow.subprocess.run', timeout)
+    assert _inside_checkout(tmp_path / 'metadata')
 
 
 def test_preview_and_lookup_create_no_workspace(tmp_path):
