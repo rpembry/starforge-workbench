@@ -57,3 +57,45 @@ def test_stale_source_and_nested_content_block_adoption(fixture):
         apply(SOURCE, selected, profile=profile,
               expected_source_hash=plan['source_hash'], expected_revision=plan['target_revision'],
               expected_target_hash=plan['target_hash'])
+
+
+def test_interrupted_multi_row_adoption_repreviews_without_duplicate(fixture, monkeypatch):
+    import starforge_workbench.flow_migration as migration
+    profile, selected = fixture
+    selected.write_text('# Checklist\n- [ ] First\n- [ ] Second\n')
+    first = preview(SOURCE, selected, profile=profile)
+    real_mutate = migration.mutate
+    calls = [0]
+
+    def interrupted(*args, **kwargs):
+        calls[0] += 1
+        if calls[0] == 2:
+            raise OSError('synthetic interruption before second checkpoint')
+        return real_mutate(*args, **kwargs)
+
+    monkeypatch.setattr(migration, 'mutate', interrupted)
+    with pytest.raises(OSError, match='synthetic interruption'):
+        apply(SOURCE, selected, profile=profile,
+              expected_source_hash=first['source_hash'], expected_revision=first['target_revision'],
+              expected_target_hash=first['target_hash'])
+    assert len(inspect(SOURCE, 'list', profile=profile)['tasks']) == 1
+    with pytest.raises(ValueError, match='changed since preview'):
+        apply(SOURCE, selected, profile=profile,
+              expected_source_hash=first['source_hash'], expected_revision=first['target_revision'],
+              expected_target_hash=first['target_hash'])
+    monkeypatch.setattr(migration, 'mutate', real_mutate)
+    resumed = preview(SOURCE, selected, profile=profile)
+    result = apply(SOURCE, selected, profile=profile,
+                   expected_source_hash=resumed['source_hash'], expected_revision=resumed['target_revision'],
+                   expected_target_hash=resumed['target_hash'])
+    assert len(inspect(SOURCE, 'list', profile=profile)['tasks']) == 2
+    assert [entry['task_id'] for entry in result['imported']] == [
+        entry['proposed_task_id'] for entry in first['entries']]
+
+
+def test_selected_symlink_is_rejected(fixture, tmp_path):
+    profile, selected = fixture
+    alias = tmp_path / 'TASKS.md'
+    alias.symlink_to(selected)
+    with pytest.raises(ValueError, match='nonsymlink'):
+        preview(SOURCE, alias, profile=profile)
