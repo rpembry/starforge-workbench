@@ -15,7 +15,8 @@ from starforge_workbench.flow_code import MissingBindingError, workspace
 from starforge_workbench.flow_history import operation_state, snapshot
 from starforge_workbench.flow_packets import build_packet
 from starforge_workbench.flow_migration import apply as apply_migration, preview as preview_migration
-from starforge_workbench.flow_source import draft_update, preview_requirements, record, status
+from starforge_workbench.flow_source import (draft_update, move_apply, move_preview,
+                                               preview_requirements, record, status)
 from starforge_workbench.flow_tasks import inspect, mutate
 
 
@@ -164,6 +165,29 @@ def register_flow_tools(server, *, profile: str | Path, allow_write: bool = Fals
     if not allow_write:
         return
 
+    @server.tool(name='flow_source_move_preview', structured_output=True)
+    def flow_source_move_preview(reference: str, candidate: dict) -> dict[str, object]:
+        """Preview a caller-verified URL transfer using the same immutable provider identity."""
+        expire_previews()
+        result = move_preview(reference, candidate, profile=current_profile())
+        token = uuid4().hex
+        previews[token] = {'kind': 'source_move', 'created_at': monotonic(),
+                           'reference': reference, 'candidate': candidate,
+                           'registry_hash': result['registry_hash']}
+        return {**result, 'preview_token': token}
+
+    @server.tool(name='flow_source_move_apply', structured_output=True)
+    def flow_source_move_apply(preview_token: str) -> dict[str, object]:
+        """Apply only an exact verified alias preview; no issue move or tracker write."""
+        expire_previews()
+        saved = previews.get(preview_token)
+        if not saved or saved.get('kind') != 'source_move':
+            raise ValueError('Missing or expired source alias preview')
+        result = move_apply(saved['reference'], saved['candidate'],
+                            expected_registry_hash=saved['registry_hash'], profile=current_profile())
+        del previews[preview_token]
+        return result
+
     @server.tool(name='flow_migration_preview', structured_output=True)
     def flow_migration_preview(reference: str, source_file: str) -> dict[str, object]:
         """Preview one selected TODO/TASKS/Spec Kit Markdown file; no recursive discovery or write."""
@@ -252,8 +276,8 @@ def register_flow_tools(server, *, profile: str | Path, allow_write: bool = Fals
     def flow_task_apply(preview_token: str) -> dict[str, object]:
         """Apply only the exact previewed local edit after an authorized request; no server action or tracker status changes."""
         expire_previews()
-        if previews.get(preview_token, {}).get('kind') == 'migration':
-            raise ValueError('Use flow_migration_apply for a migration preview')
+        if previews.get(preview_token, {}).get('kind') in {'migration', 'source_move'}:
+            raise ValueError('Use the matching apply tool for this preview')
         if preview_token in completed:
             completed.move_to_end(preview_token)
             return completed[preview_token]
