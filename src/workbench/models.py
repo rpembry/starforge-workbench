@@ -1,6 +1,7 @@
 """JSON contracts; collectors propose/observe, authenticated operators commit."""
 from datetime import datetime, timezone
 from enum import StrEnum
+import re
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
@@ -96,6 +97,7 @@ class WorkItemProjectionIn(Model):
     document_revision: FlowRevision
     document_hash: FlowHash
     task_ids: Annotated[list[FlowTaskId], Field(max_length=100)] = Field(default_factory=list)
+    task_summaries: Annotated[list[dict], Field(max_length=100)] = Field(default_factory=list)
     expected_version: Annotated[int, Field(ge=1)] | None = None
 
     @field_validator('source_ref')
@@ -113,6 +115,25 @@ class WorkItemProjectionIn(Model):
         if len(value) != len(set(value)):
             raise ValueError('Task IDs must be unique')
         return value
+
+    @field_validator('task_summaries')
+    @classmethod
+    def bounded_summaries(cls, value):
+        for row in value:
+            if (set(row) != {'task_id', 'title', 'blocked', 'review_pending'} or
+                not isinstance(row['task_id'], str) or not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', row['task_id']) or
+                not isinstance(row['title'], str) or not 1 <= len(row['title']) <= 120 or
+                any(char in row['title'] for char in '\r\n\x00') or
+                type(row['blocked']) is not bool or type(row['review_pending']) is not bool):
+                raise ValueError('Only bounded task ID, title, blocked, and review flags may be published')
+        return value
+
+    @model_validator(mode='after')
+    def summary_ids_match(self):
+        if (len(self.task_summaries) != len({row['task_id'] for row in self.task_summaries}) or
+                any(row['task_id'] not in self.task_ids for row in self.task_summaries)):
+            raise ValueError('Task summaries must be unique and refer to published task IDs')
+        return self
 
 
 class WorkItemActionLinkIn(Model):
