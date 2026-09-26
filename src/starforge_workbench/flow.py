@@ -340,6 +340,18 @@ def main(argv=None) -> int:
     adopt_parser.add_argument('reference')
     adopt_parser.add_argument('--name', required=True)
     adopt_parser.add_argument('--worktree', type=Path, required=True)
+    packet_parser = sub.add_parser('packet')
+    packet_parser.add_argument('reference')
+    packet_parser.add_argument('--kind', choices=['resume', 'handoff'], default='resume')
+    packet_parser.add_argument('--role')
+    packet_parser.add_argument('--expected-head', action='append', default=[])
+    packet_parser.add_argument('--pr-link', action='append', default=[])
+    packet_parser.add_argument('--scope')
+    packet_parser.add_argument('--test', action='append', default=[])
+    packet_parser.add_argument('--finding', action='append', default=[])
+    packet_parser.add_argument('--limitation', action='append', default=[])
+    packet_parser.add_argument('--include-paths', action='store_true')
+    packet_parser.add_argument('--max-chars', type=int, default=8000)
     args = parser.parse_args(argv)
     try:
         if args.command == 'init':
@@ -362,6 +374,16 @@ def main(argv=None) -> int:
         elif args.command == 'adopt':
             from .flow_code import adopt
             result = adopt(args.reference, name=args.name, worktree=args.worktree, profile=args.profile)
+        elif args.command == 'packet':
+            from .flow_packets import build_packet
+            pairs = [item.split('=', 1) for item in args.expected_head]
+            if any(len(pair) != 2 for pair in pairs) or len({pair[0] for pair in pairs}) != len(pairs):
+                raise ValueError('Use each --expected-head NAME=SHA once')
+            expected = dict(pairs)
+            result = build_packet(args.reference, profile=args.profile, kind=args.kind, role=args.role,
+                                  expected_heads=expected, pr_links=args.pr_link, scope=args.scope,
+                                  tests=args.test, findings=args.finding, limitations=args.limitation,
+                                  include_paths=args.include_paths, max_chars=args.max_chars)
         else:
             result = list_items(profile=args.profile)
         print(json.dumps(result, ensure_ascii=False, indent=2))
