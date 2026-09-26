@@ -121,6 +121,18 @@ class WorkItemActionLinkIn(Model):
     action_version: Annotated[int, Field(ge=1)]
 
 
+class WorkItemReconcileIn(WorkItemActionLinkIn):
+    decision: Literal['accept_revised_definition']
+    reason: Annotated[str, Field(min_length=1, max_length=500)]
+
+    @field_validator('reason')
+    @classmethod
+    def concise_reason(cls, value):
+        if not value.strip() or any(char in value for char in '\r\n\x00'):
+            raise ValueError('Use a concise single-line review reason')
+        return value
+
+
 class EventIn(Model):
     kind: Literal['observation', 'accomplishment', 'run_observation', 'decision'] = 'observation'
     summary: Text

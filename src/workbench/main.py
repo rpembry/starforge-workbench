@@ -20,7 +20,7 @@ from .models import (ActionIn, ActionPatch, ArtifactIn, EventIn, ObjectiveIn,
                      ProviderAttentionIn, ProviderGenerationIn, RegisteredSessionIn,
                      InstructionClaimIn, InstructionIn, InstructionLeaseIn,
                      InstructionResultIn, InstructionPreviewIn,
-                     WorkItemProjectionIn, WorkItemActionLinkIn)
+                     WorkItemProjectionIn, WorkItemActionLinkIn, WorkItemReconcileIn)
 from .repository import Problem, SQLiteRepository
 from .response_preview import ResponsePreviewHub
 from .settings import load_settings
@@ -352,6 +352,12 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
                          who=Depends(operator)):
         return repository.link_work_item_action(work_item_id, action_id,
                                                 body.model_dump(mode='json'), who.name)
+
+    @app.post('/api/flow/work-items/{work_item_id}/actions/{action_id}/reconcile')
+    def reconcile_flow_action(work_item_id: str, action_id: str, body: WorkItemReconcileIn,
+                              who=Depends(operator)):
+        return repository.reconcile_work_item_action(work_item_id, action_id,
+                                                     body.model_dump(mode='json'), who.name)
 
     @app.post('/api/imports', status_code=201)
     def import_batch(body: ImportBatch, who=Depends(operator)):

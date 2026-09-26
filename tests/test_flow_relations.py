@@ -116,6 +116,33 @@ def test_exact_relations_enrich_existing_commitment_without_double_counting(api)
     assert api.get('/api/reports/todo').json()['plan'][0]['flow_links'][0]['definition_drift'] is True
 
 
+def test_explicit_operator_reconciliation_preserves_action_and_audits_scope(api):
+    accepted = action(api, title='Review', status='accepted')
+    api.post('/api/flow/work-items', json=publication())
+    path = f'/api/flow/work-items/{WORK_ITEM}/actions/{accepted["id"]}'
+    api.post(path + '/link', json={'operation_id': 'link-review', 'work_item_version': 1,
+                                   'action_version': accepted['version']})
+    api.post('/api/flow/work-items', json=publication(
+        operation_id='publish-review', expected_version=1,
+        document_revision='e' * 40, document_hash='f' * 64))
+    body = {'operation_id': 'review-scope', 'work_item_version': 2,
+            'action_version': accepted['version'], 'decision': 'accept_revised_definition',
+            'reason': 'Reviewed changed task definition'}
+    api.headers['Authorization'] = 'Bearer ' + COLLECTOR
+    assert api.post(path + '/reconcile', json=body).status_code == 403
+    api.headers['Authorization'] = 'Bearer ' + OPERATOR
+    assert api.post(path + '/reconcile', json={**body, 'work_item_version': 1}).status_code == 409
+    result = api.post(path + '/reconcile', json=body)
+    assert result.status_code == 200, result.text
+    assert result.json()['projection']['actions'][0]['definition_drift'] is False
+    assert api.post(path + '/reconcile', json=body).json() == result.json()
+    assert api.post(path + '/reconcile', json={**body, 'reason': 'different'}).status_code == 409
+    current = api.get('/api/actions/' + accepted['id']).json()
+    assert current['version'] == accepted['version'] and current['status'] == 'accepted'
+    assert len([e for e in api.get('/api/events').json()['items']
+                if e['summary'] == 'FLOW revised definition accepted by operator']) == 1
+
+
 def test_version_eight_upgrade_keeps_existing_actions(api, repo):
     existing = action(api, title='Existing committed work', status='accepted')
     with repo.connection() as db:

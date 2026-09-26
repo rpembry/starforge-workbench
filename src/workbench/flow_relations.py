@@ -155,3 +155,44 @@ def link_work_item_action(repo, work_item_id: str, action_id: str,
         _remember(db, operation_id, request_hash, result)
         db.commit()
         return result
+
+
+def reconcile_work_item_action(repo, work_item_id: str, action_id: str,
+                               data: dict, principal: str) -> dict:
+    """Record an explicit operator scope review; never transition action state."""
+    data = dict(data)
+    operation_id = data.pop('operation_id')
+    request_hash = _request_hash('reconcile', {'work_item_id': work_item_id,
+                                               'action_id': action_id, **data})
+    with repo.connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        prior = _replay(db, operation_id, request_hash)
+        if prior is not None:
+            return prior
+        projection = _view(db, work_item_id)
+        action = repo._get(db, 'actions', action_id)
+        if projection['version'] != data['work_item_version'] or action['version'] != data['action_version']:
+            raise Problem(409, 'version_conflict', 'Read the current projection and action before reviewing scope')
+        link = db.execute('SELECT * FROM flow_action_links WHERE work_item_id=? AND action_id=?',
+                          (work_item_id, action_id)).fetchone()
+        if not link:
+            raise Problem(404, 'not_found', 'Exact FLOW action link does not exist')
+        if action['status'] not in {'accepted', 'in_progress', 'waiting', 'approval_needed'}:
+            raise Problem(409, 'incompatible_action', 'Only live accepted commitments can review revised scope')
+        if not any(row['action_id'] == action_id and row['definition_drift'] for row in projection['actions']):
+            raise Problem(409, 'no_definition_drift', 'There is no revised definition to review')
+        stamp = now()
+        db.execute('''UPDATE flow_action_links SET linked_document_revision=?,linked_action_version=?,
+            linked_at=?,linked_by=? WHERE work_item_id=? AND action_id=?''',
+            (projection['document_revision'], action['version'], stamp, principal, work_item_id, action_id))
+        repo.audit(db, action_id, 'FLOW revised definition accepted by operator', principal,
+                   json.dumps({'work_item_id': work_item_id,
+                               'previous_revision': link['linked_document_revision'],
+                               'reviewed_revision': projection['document_revision'],
+                               'reason': data['reason']}))
+        result = {'status': 'scope_reviewed', 'projection': _view(db, work_item_id),
+                  'action_changed': False, 'action_status': action['status'],
+                  'source_tracker_status': 'not_changed'}
+        _remember(db, operation_id, request_hash, result)
+        db.commit()
+        return result
