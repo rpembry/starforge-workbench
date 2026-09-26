@@ -11,11 +11,15 @@ import pytest
 
 from starforge_workbench import docker_worker as w
 
+# Docker profiles require a non-root UID/GID even when tests run as root.
+TEST_UID = os.getuid() or 1000
+TEST_GID = os.getgid() or 1000
+
 
 def profile():
     return dict(backend='docker', repository_strategy='per-task-worktree',
                 image=os.environ.get('WB_TEST_DOCKER_IMAGE', 'example.invalid/test@sha256:'+'a'*64),
-                toolchain='test-shell', user=os.getuid(), group=os.getgid(), cpus=1,
+                toolchain='test-shell', user=TEST_UID, group=TEST_GID, cpus=1,
                 memory_mb=64, pids_limit=32, timeout_seconds=15, network='none',
                 mounts=[dict(source='worktree', target='/workspace', read_only=False)])
 
@@ -45,6 +49,7 @@ def test_command_bounds_and_stderr():
 
 
 @pytest.mark.parametrize('name', ['../secret', '/etc/passwd', '.git', 'x/.git/config', 'a\x00b'])
+@pytest.mark.skipif(os.getuid() == 0, reason='Worker rejects root caller before validating artifact paths')
 def test_reject_artifact_escape_before_runtime(name, repo, state):
     with pytest.raises(w.WorkerError, match='Artifact paths'):
         w.run_worker(profile(), repo, 'HEAD', state, 'synthetic', ['true'], [name])
@@ -57,7 +62,7 @@ def test_security_arguments():
              container_name='swb-test', argv=['sh', '-c', 'true'])
     argv = w.create_argv(['docker'], r, p)
     for flag, value in [('--pull', 'never'), ('--network', 'none'), ('--cap-drop', 'ALL'), ('--security-opt', 'no-new-privileges'),
-                        ('--restart', 'no'), ('--memory-swap', '64m'), ('--user', f'{os.getuid()}:{os.getgid()}')]:
+                        ('--restart', 'no'), ('--memory-swap', '64m'), ('--user', f'{TEST_UID}:{TEST_GID}')]:
         assert argv[argv.index(flag)+1] == value
     assert '--read-only' in argv and '--privileged' not in argv
     assert not any('/var/run' in arg or '/home/' in arg for arg in argv)

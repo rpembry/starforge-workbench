@@ -98,7 +98,11 @@ def test_browser_write_csrf_and_completion(access):
     assert api.get('/assets/htmx.min.js').status_code == 200
 
 
-def test_cloudflare_client_is_origin_bound_and_uses_distinct_roles(tmp_path):
+def test_cloudflare_client_is_origin_bound_and_uses_distinct_roles(tmp_path, monkeypatch):
+    # This test only constructs a client; ambient sandbox SOCKS proxies should
+    # not require optional proxy dependencies or affect credential assertions.
+    for name in ('ALL_PROXY', 'HTTPS_PROXY', 'HTTP_PROXY', 'all_proxy', 'https_proxy', 'http_proxy'):
+        monkeypatch.delenv(name, raising=False)
     p=tmp_path/'client.json'
     p.write_text(json.dumps({'url':'https://workbench.example.com', 'auth_type':'cloudflare',
         'operator':{'client_id':'operator.access','client_secret':'fixture-operator'},

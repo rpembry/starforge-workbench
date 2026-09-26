@@ -97,8 +97,12 @@ def test_cleanup_uses_only_the_owned_fixture_socket(tmp_path):
 
 def test_successful_cleanup_removes_only_same_owned_stale_socket_inode(tmp_path):
     owned = target(tmp_path)
-    server = socket.socket(socket.AF_UNIX)
-    server.bind(str(owned.socket))
+    try:
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(owned.socket))
+    except PermissionError:
+        owned.close()
+        pytest.skip('This sandbox does not permit Unix-domain socket creation')
     inode = owned.socket.stat().st_ino
     run = Mock(return_value=SimpleNamespace(returncode=0))
     cleanup_fixture_server(owned, run=run)
