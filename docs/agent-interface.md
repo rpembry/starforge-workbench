@@ -30,7 +30,7 @@ healthy, or that a local profile is authorized. Check those separately.
 | Worklog and standup | API client / `wb-api`; central API | `worklog_query`, `worklog_append`, `standup_report` | GUIDE everyday skills (#123) | Read records; append proposal or attributed accomplishment to server | Configured API credential; fixture-tested MCP. Append cannot accept/complete actions. |
 | Configured launcher sessions | launcher CLI `list/status/doctor/up`; private manifest | `list_contexts`, `restore_session` | GUIDE session skill (#123) | Context listing or opt-in headless restore | Manifest required. Live restoration disabled by default; CLI and MCP have distinct gates. No automatic binding change. |
 | Browser desired state | central browser API | `browser_workspace_list/add/remove` | GUIDE browser skill (#123) | Server-side desired Chrome workspace records | API available; fixture-tested MCP. Removing an entry does not close an open tab. |
-| Diagnostics | launcher `doctor`, service/API inspection | `workbench_capabilities` only | GUIDE diagnosis (#123) | Read-only local/server observations | Running server version is known; client skill discovery and API health remain unknown unless checked. Lifecycle work remains #95/#96/#104. |
+| Diagnostics | launcher `doctor`, `ai-workbench skills doctor`, service/API inspection | `workbench_capabilities` only | GUIDE diagnosis (#123) | Read-only local/server observations | Installed source and running server version are distinct; client skill discovery and API health remain unknown unless checked. Lifecycle work remains #95/#96/#104. |
 
 Profile roots and code repository bindings are local private configuration; the
 central API stores actions, events, runs and reports. These are different stores.

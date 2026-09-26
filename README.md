@@ -188,3 +188,4 @@ See [human-directed agent coordination](docs/multi-agent-coordination.md) for ho
 
 The local work-item workflow and its authority boundaries are described in [the FLOW guide](docs/work-item-workflow.md).
 The portable capture, resume, handoff, and closeout procedures are in [FLOW workflow skills](docs/flow-skills.md).
+For explicit cross-repository use, see [skill installation and diagnostics](docs/skills-install.md).
