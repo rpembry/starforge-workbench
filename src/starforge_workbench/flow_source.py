@@ -6,6 +6,7 @@ No provider credentials, raw descriptions, or tracker writes are stored here.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -124,6 +125,45 @@ def status(reference: str, *, profile=None, error: str | None = None) -> dict:
     return {'work_item_id': item['id'], 'source': cached,
             'freshness': 'cached; verify against provider' if cached else 'unverified',
             'read_error': error, 'source_issue_changed': False}
+
+
+def move_preview(reference: str, candidate: dict, *, profile=None) -> dict:
+    """Propose a canonical URL alias only when the immutable provider identity agrees."""
+    path, item = _identity(reference, profile)
+    cached = _load(path)['items'].get(item['id'])
+    if not cached:
+        raise SourceError('Read and record the original provider identity first')
+    _, config = load_profile(path)
+    proposed = resolve(candidate['canonical_url'], config)['canonical']
+    key = ':'.join((candidate['provider'], candidate['provider_site'], candidate['immutable_id']))
+    if key != cached['identity']:
+        raise SourceError('Provider immutable identity differs; do not alias unrelated issues')
+    registry = _registry(path)
+    owner = _find(registry, proposed)
+    if owner and owner['id'] != item['id']:
+        raise SourceError('Candidate URL belongs to another work item')
+    fingerprint = hashlib.sha256(json.dumps(registry, sort_keys=True).encode()).hexdigest()
+    return {'status': 'alias_preview', 'work_item_id': item['id'],
+            'existing_source': item['source'], 'proposed_alias': proposed,
+            'verified_identity': key, 'registry_hash': fingerprint,
+            'already_linked': owner is not None, 'source_tracker_status': 'not_changed'}
+
+
+def move_apply(reference: str, candidate: dict, *, expected_registry_hash: str, profile=None) -> dict:
+    """Operator-directed local alias; no workspace move or tracker mutation."""
+    path, item = _identity(reference, profile)
+    with _writer_lock(path):
+        preview = move_preview(reference, candidate, profile=path)
+        if preview['registry_hash'] != expected_registry_hash:
+            raise SourceError('Registry changed since alias preview; inspect before retrying')
+        if preview['already_linked']:
+            return {'status': 'existing', 'work_item_id': item['id'], 'alias': preview['proposed_alias']}
+        registry = _registry(path)
+        selected = next(row for row in registry['items'] if row['id'] == item['id'])
+        selected['aliases'].append(preview['proposed_alias'])
+        _atomic_json(path.with_suffix('.registry.json'), registry)
+    return {'status': 'linked', 'work_item_id': item['id'],
+            'alias': preview['proposed_alias'], 'source_tracker_status': 'not_changed'}
 
 
 def preview_requirements(reference: str, requirements: list[str], *, profile=None) -> dict:
