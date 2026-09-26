@@ -89,7 +89,21 @@ def _git(root: Path, *args: str) -> str:
 
 
 def _inside_checkout(root: Path) -> bool:
-    return any((parent / '.git').exists() for parent in (root, *root.parents))
+    for parent in (root, *root.parents):
+        marker = parent / '.git'
+        if marker.is_symlink():
+            return True  # Do not trust a linked marker, including a broken link.
+        if not marker.exists():
+            continue
+        try:
+            result = subprocess.run(['git', '-C', str(parent), 'rev-parse', '--show-toplevel'],
+                                    capture_output=True, text=True, timeout=10, check=False,
+                                    env={**os.environ, 'GIT_CONFIG_NOSYSTEM': '1'})
+        except (OSError, subprocess.TimeoutExpired):
+            return True  # Probe uncertainty must not weaken the checkout guard.
+        if result.returncode == 0 and Path(result.stdout.strip()).resolve() == parent.resolve():
+            return True
+    return False
 
 
 def init_profile(root: str | Path, *, profile: str | Path | None = None,
