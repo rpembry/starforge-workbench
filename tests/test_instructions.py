@@ -373,13 +373,13 @@ def test_upgrade_from_version_seven_preserves_registered_sessions(api, repo):
         db.execute('DROP TABLE flow_work_items')
         db.execute('DROP TABLE instruction_audit')
         db.execute('DROP TABLE instructions')
-        db.execute('DELETE FROM schema_migrations WHERE version IN (8,9)')
+        db.execute('DELETE FROM schema_migrations WHERE version IN (8,9,10)')
         db.commit()
     upgraded = SQLiteRepository(repo.path)
     assert upgraded.get_registered_session(SESSION_ID)['display_name'] == 'Synthetic OpenCode'
     with upgraded.connection() as db:
         assert [row[0] for row in db.execute(
-            'SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 10))
+            'SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 11))
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='instructions'").fetchone()
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='instruction_audit'").fetchone()
 
