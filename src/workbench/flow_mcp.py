@@ -14,6 +14,7 @@ from starforge_workbench.flow import list_items, load_profile, open_item, show
 from starforge_workbench.flow_code import MissingBindingError, workspace
 from starforge_workbench.flow_history import operation_state, snapshot
 from starforge_workbench.flow_packets import build_packet
+from starforge_workbench.flow_migration import apply as apply_migration, preview as preview_migration
 from starforge_workbench.flow_source import draft_update, preview_requirements, record, status
 from starforge_workbench.flow_tasks import inspect, mutate
 
@@ -163,6 +164,37 @@ def register_flow_tools(server, *, profile: str | Path, allow_write: bool = Fals
     if not allow_write:
         return
 
+    @server.tool(name='flow_migration_preview', structured_output=True)
+    def flow_migration_preview(reference: str, source_file: str) -> dict[str, object]:
+        """Preview one selected TODO/TASKS/Spec Kit Markdown file; no recursive discovery or write."""
+        if len(source_file) > 1000:
+            raise ValueError('Selected path is too long')
+        expire_previews()
+        if len(previews) >= PENDING_PREVIEW_LIMIT:
+            raise ValueError('Too many pending previews')
+        result = preview_migration(reference, source_file, profile=current_profile())
+        token = uuid4().hex
+        previews[token] = {'kind': 'migration', 'created_at': monotonic(),
+                           'reference': reference, 'source_file': source_file,
+                           'source_hash': result['source_hash'],
+                           'target_revision': result['target_revision'],
+                           'target_hash': result['target_hash']}
+        return _bounded({**result, 'preview_token': token})
+
+    @server.tool(name='flow_migration_apply', structured_output=True)
+    def flow_migration_apply(preview_token: str) -> dict[str, object]:
+        """Adopt active top-level rows from the exact preview after an authorized request."""
+        expire_previews()
+        saved = previews.get(preview_token)
+        if not saved or saved.get('kind') != 'migration':
+            raise ValueError('Missing or expired migration preview')
+        result = apply_migration(saved['reference'], saved['source_file'],
+                                 expected_source_hash=saved['source_hash'],
+                                 expected_revision=saved['target_revision'],
+                                 expected_target_hash=saved['target_hash'], profile=current_profile())
+        del previews[preview_token]
+        return result
+
     @server.tool(name='flow_source_record', structured_output=True)
     def flow_source_record(reference: str, snapshot: dict) -> dict[str, object]:
         """Store only the selected provider's structured issue identity/status; never raw conversations."""
@@ -220,6 +252,8 @@ def register_flow_tools(server, *, profile: str | Path, allow_write: bool = Fals
     def flow_task_apply(preview_token: str) -> dict[str, object]:
         """Apply only the exact previewed local edit after an authorized request; no server action or tracker status changes."""
         expire_previews()
+        if previews.get(preview_token, {}).get('kind') == 'migration':
+            raise ValueError('Use flow_migration_apply for a migration preview')
         if preview_token in completed:
             completed.move_to_end(preview_token)
             return completed[preview_token]
