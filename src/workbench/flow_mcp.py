@@ -14,6 +14,7 @@ from starforge_workbench.flow import list_items, load_profile, open_item, show
 from starforge_workbench.flow_code import MissingBindingError, workspace
 from starforge_workbench.flow_history import operation_state, snapshot
 from starforge_workbench.flow_packets import build_packet
+from starforge_workbench.flow_source import draft_update, preview_requirements, record, status
 from starforge_workbench.flow_tasks import inspect, mutate
 
 
@@ -138,8 +139,34 @@ def register_flow_tools(server, *, profile: str | Path, allow_write: bool = Fals
                             tests=tests, findings=findings, limitations=limitations,
                             include_paths=disclose_paths, max_chars=max_chars)
 
+    @server.tool(name='flow_source_status', structured_output=True)
+    def flow_source_status(reference: str) -> dict[str, object]:
+        """Read the private last-known selected source identity and freshness; no provider lookup."""
+        return status(reference, profile=current_profile())
+
+    @server.tool(name='flow_source_requirements_preview', structured_output=True)
+    def flow_source_requirements_preview(reference: str, requirements: list[str]) -> dict[str, object]:
+        """Preview caller-selected untrusted requirements; nothing is imported as accepted work."""
+        return preview_requirements(reference, requirements, profile=current_profile())
+
+    @server.tool(name='flow_tracker_update_draft', structured_output=True)
+    def flow_tracker_update_draft(reference: str, outcomes: list[str], tests: list[str],
+                                  commits: list[str], prs: list[str], limitations: list[str],
+                                  review: Literal['unknown', 'pending', 'complete'] = 'unknown',
+                                  merged: Literal['unknown', 'pending', 'complete'] = 'unknown',
+                                  deployed: Literal['unknown', 'pending', 'complete'] = 'unknown') -> dict[str, object]:
+        """Build a copyable update for the exact source issue; never write to Jira or GitHub."""
+        return draft_update(reference, profile=current_profile(), outcomes=outcomes, tests=tests,
+                            commits=commits, prs=prs, limitations=limitations,
+                            review=review, merged=merged, deployed=deployed)
+
     if not allow_write:
         return
+
+    @server.tool(name='flow_source_record', structured_output=True)
+    def flow_source_record(reference: str, snapshot: dict) -> dict[str, object]:
+        """Store only the selected provider's structured issue identity/status; never raw conversations."""
+        return record(reference, snapshot, profile=current_profile())
 
     @server.tool(name='flow_item_open', structured_output=True)
     def flow_item_open(reference: str, dry_run: bool = True) -> dict[str, object]:

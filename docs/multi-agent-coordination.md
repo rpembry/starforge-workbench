@@ -93,3 +93,9 @@ uv run python -m starforge_workbench.flow_publication --profile /private/profile
 ```
 
 The command prints the actual operation ID from `queue`. The replay uses the existing private Workbench operator client configuration (or `--credentials-file`). Keep credentials outside Git and shell history. The private `.publications.json` outbox persists next to the profile, outside the metadata repository. `publication_pending` means the API did not confirm the outcome; replay the same ID. `reconciliation_needed` means inspect the current projection and local revision, then deliberately queue a new operation with the current `--expected-version` if appropriate. No task or action is completed by this projection. A new local checkpoint requires a new operation; already queued bytes are never silently replaced.
+
+### Selected tracker context and draft handoff
+
+Use an existing authenticated GitHub/Jira tool to read a deliberately selected issue. The local FLOW source adapter accepts structured issue identity, status, title, and provider timestamps through `flow_source_record` when FLOW MCP writes are enabled. It stores only this minimized observation in a private profile-side cache. Provider descriptions, comments, and credentials are excluded. `flow_source_status` reports the last-known value; an unavailable or forbidden provider read does not alter local tasks or imply issue completion. Use `flow_source_requirements_preview` to review a bounded proposed breakdown, then deliberately add tasks through normal FLOW commands.
+
+`flow_tracker_update_draft` generates a copyable comment for the selected issue from explicitly supplied outcomes, test evidence, exact commits, PR links, and limitations. It leaves review, merge, and deployment unknown unless supplied separately. Copy and publish it through an authorized tracker tool only after reviewing the target and exact text. The FLOW tool never writes to Jira or GitHub.
