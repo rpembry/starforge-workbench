@@ -82,3 +82,14 @@ Workbench does not currently assign tasks to models, run the review loop automat
 The planned direction is to record enough structured evidence to compare workflows on real work: task type, assigned role and provider, plan, implementation and test results, review findings, findings accepted or rejected, human corrections, elapsed time, cost where available, and final outcome. That history could support recommendations such as using one model for Terraform implementation, another for security review, and another for repository-wide investigation.
 
 Later routing may adapt between tasks or in real time as evidence changes. A task could begin with the default route, add an investigator after unexpected cross-system effects appear, switch implementers after repeated failed checks, or request an independent review when risk rises. Any such behavior should remain observable, bounded by explicit policy and budget, and subordinate to human authority. Provider reputation or model self-confidence is not enough; routing changes should be explainable from task evidence and reversible by the operator.
+
+### Optional FLOW projection publication
+
+The local FLOW metadata Git repository remains authoritative for authored task definitions. After a checkpoint, an operator may queue only the allowlisted identity, source URL, revision, document hash, and task IDs:
+
+```sh
+uv run python -m starforge_workbench.flow_publication --profile /private/profile.json queue 'https://github.com/example/repo/issues/42'
+WB_API_TOKEN="$(your-local-token-helper)" uv run python -m starforge_workbench.flow_publication --profile /private/profile.json replay publish-OPERATION-ID --api-url https://workbench.example.com
+```
+
+The command prints the actual operation ID from `queue`. Keep credentials outside Git and shell history. The private `.publications.json` outbox persists next to the profile, outside the metadata repository. `publication_pending` means the API did not confirm the outcome; replay the same ID. `reconciliation_needed` means inspect the current projection and local revision, then deliberately queue a new operation with the current `--expected-version` if appropriate. No task or action is completed by this projection. A new local checkpoint requires a new operation; already queued bytes are never silently replaced.
