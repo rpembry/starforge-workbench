@@ -89,7 +89,7 @@ The local FLOW metadata Git repository remains authoritative for authored task d
 
 ```sh
 uv run python -m starforge_workbench.flow_publication --profile /private/profile.json queue 'https://github.com/example/repo/issues/42'
-WB_API_TOKEN="$(your-local-token-helper)" uv run python -m starforge_workbench.flow_publication --profile /private/profile.json replay publish-OPERATION-ID --api-url https://workbench.example.com
+uv run python -m starforge_workbench.flow_publication --profile /private/profile.json replay publish-OPERATION-ID --api-url https://workbench.example.com
 ```
 
-The command prints the actual operation ID from `queue`. Keep credentials outside Git and shell history. The private `.publications.json` outbox persists next to the profile, outside the metadata repository. `publication_pending` means the API did not confirm the outcome; replay the same ID. `reconciliation_needed` means inspect the current projection and local revision, then deliberately queue a new operation with the current `--expected-version` if appropriate. No task or action is completed by this projection. A new local checkpoint requires a new operation; already queued bytes are never silently replaced.
+The command prints the actual operation ID from `queue`. The replay uses the existing private Workbench operator client configuration (or `--credentials-file`). Keep credentials outside Git and shell history. The private `.publications.json` outbox persists next to the profile, outside the metadata repository. `publication_pending` means the API did not confirm the outcome; replay the same ID. `reconciliation_needed` means inspect the current projection and local revision, then deliberately queue a new operation with the current `--expected-version` if appropriate. No task or action is completed by this projection. A new local checkpoint requires a new operation; already queued bytes are never silently replaced.
