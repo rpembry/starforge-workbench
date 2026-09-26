@@ -455,6 +455,18 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     def everyday_guide(request: Request):
         return templates.TemplateResponse(request=request, name='guide.html', context={})
 
+    @app.get('/flow', response_class=HTMLResponse, dependencies=[Depends(operator)])
+    def flow_view(request: Request, offset: int = Query(0, ge=0)):
+        from urllib.parse import urlsplit
+        items = repository.list_work_items(limit=25, offset=offset)
+        for item in items:
+            parsed = urlsplit(item['source_ref'])
+            item['safe_source_url'] = (item['source_ref'] if parsed.scheme == 'https' and
+                parsed.hostname and not parsed.username and not parsed.password and
+                not parsed.query and not parsed.fragment and not parsed.port else None)
+        return templates.TemplateResponse(request=request, name='flow.html', context={
+            'items': items, 'offset': offset, 'has_more': len(items) == 25})
+
     @app.get('/assets/workbench-logo.png')
     def workbench_logo():
         return FileResponse(Path(__file__).with_name('static')/'workbench-logo.png', media_type='image/png')
