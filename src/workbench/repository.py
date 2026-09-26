@@ -1,4 +1,5 @@
 """SQLite repository boundary. Only the service opens the database."""
+from __future__ import annotations
 import json
 import hashlib
 import hmac
@@ -24,6 +25,10 @@ class Repository(Protocol):
     def create(self, resource: str, data: dict, principal: str) -> dict: ...
     def patch(self, resource: str, identity: str, data: dict, principal: str) -> dict: ...
     def link_run(self, action_id: str, run_id: str, data: dict, principal: str) -> dict: ...
+    def publish_work_item(self, data: dict, principal: str) -> dict: ...
+    def link_work_item_action(self, work_item_id: str, action_id: str, data: dict, principal: str) -> dict: ...
+    def get_work_item(self, work_item_id: str) -> dict: ...
+    def list_work_items(self, limit: int = 100, offset: int = 0) -> list[dict]: ...
 
 
 TABLES = {'objectives', 'actions', 'runs', 'events', 'artifacts', 'collectors', 'registered_sessions', 'import_batches', 'import_records'}
@@ -68,14 +73,14 @@ class SQLiteRepository:
                 db.execute('INSERT INTO schema_migrations VALUES (?, ?)', (1, now()))
                 db.commit()
             versions = [r[0] for r in db.execute('SELECT version FROM schema_migrations ORDER BY version')]
-            supported = [list(range(1, version + 1)) for version in range(1, 9)]
+            supported = [list(range(1, version + 1)) for version in range(1, 10)]
             if versions not in supported:
                 raise RuntimeError('Unsupported database schema version')
             for version, filename in [(2, '002_collectors.sql'), (3, '003_imports.sql'),
                                       (4, '004_provider_attention.sql'),
                                       (5, '005_provider_attention_incidents.sql'),
                                        (6, '006_report_suggestions.sql'), (7, '007_registered_sessions.sql'),
-                                       (8, '008_instructions.sql')]:
+                                       (8, '008_instructions.sql'), (9, '009_flow_relations.sql')]:
                 if version not in versions:
                     migration = Path(__file__).with_name('migrations')/filename
                     db.executescript('BEGIN IMMEDIATE;\n'+migration.read_text())
@@ -235,6 +240,22 @@ class SQLiteRepository:
             self.insert(db, 'events', event)
             db.commit()
             return {'changed': True, 'action': action, 'run': linked, 'audit_event': event}
+
+    def publish_work_item(self, data, principal):
+        from .flow_relations import publish_work_item
+        return publish_work_item(self, data, principal)
+
+    def link_work_item_action(self, work_item_id, action_id, data, principal):
+        from .flow_relations import link_work_item_action
+        return link_work_item_action(self, work_item_id, action_id, data, principal)
+
+    def get_work_item(self, work_item_id):
+        from .flow_relations import get_work_item
+        return get_work_item(self, work_item_id)
+
+    def list_work_items(self, limit=100, offset=0):
+        from .flow_relations import list_work_items
+        return list_work_items(self, limit, offset)
 
     def import_batch(self, data, principal):
         from .legacy import apply_batch

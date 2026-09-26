@@ -143,3 +143,24 @@ with `git clone PATH RESTORE_DIRECTORY`, inspect `flow-history` and the private
 profile/registry separately, then point a new profile at the restored root.
 The bundle contains committed metadata, not the host-local profile, registry,
 or pending operation journal; back those up separately with restricted access.
+
+## Optional central relation projection
+
+An authenticated operator can deliberately publish a small projection with
+`POST /api/flow/work-items`: stable work-item ID, plain HTTPS source reference,
+document commit revision and hash, selected task IDs, operation ID, and the
+expected projection version for updates. The source reference must identify one
+work item; a second ID for the same source conflicts. The API stores no task
+text, local paths, or document body. This endpoint does not accept or complete
+an action, change a source tracker, or clear the local `publication: pending`
+marker by itself. Automated publication and offline replay are future work.
+
+`GET /api/flow/work-items` and `GET /api/flow/work-items/{id}` expose the
+projection to authenticated operators. To relate an existing action, post its
+exact ID to `/api/flow/work-items/{id}/actions/{action_id}/link` with an
+operation ID and current work-item and action versions. The action retains its
+original source attribution, status, scope and version. A later published
+document revision marks the link as `definition_drift`; a repeat link then
+requires deliberate reconciliation. A retry with the same operation ID and
+identical request returns its original result. Changed content under that ID
+conflicts. Version conflicts require rereading both records.
