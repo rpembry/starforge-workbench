@@ -6,7 +6,8 @@ import pytest
 
 from starforge_workbench.flow import init_profile, open_item
 from starforge_workbench.flow_source import (SourceError, draft_update, normalize_github,
-                                               normalize_jira, preview_requirements, record, status)
+                                               normalize_jira, move_apply, move_preview,
+                                               preview_requirements, record, status)
 from starforge_workbench.flow_tasks import mutate
 
 GITHUB = 'https://github.com/example-org/example/issues/42'
@@ -81,3 +82,19 @@ def test_requirements_preview_and_update_are_pure(profile):
     assert drafted['tracker_write'] is False and 'deployed: unknown' in drafted['text']
     assert status(GITHUB, profile=profile)['source']['status'] == 'open'
     assert 'Implementation complete' not in json.dumps(status(GITHUB, profile=profile))
+
+
+def test_verified_move_requires_same_identity_and_explicit_preview(profile):
+    record(GITHUB, issue(GITHUB, 'github', 'issue-id:42'), profile=profile)
+    moved = 'https://github.com/example-org/renamed/issues/42'
+    candidate = issue(moved, 'github', 'issue-id:42')
+    with pytest.raises(SourceError, match='identity differs'):
+        move_preview(GITHUB, issue(moved, 'github', 'issue-id:99'), profile=profile)
+    plan = move_preview(GITHUB, candidate, profile=profile)
+    assert plan['status'] == 'alias_preview'
+    with pytest.raises(SourceError, match='Canonical URL differs'):
+        record(GITHUB, candidate, profile=profile)
+    with pytest.raises(SourceError, match='changed since'):
+        move_apply(GITHUB, candidate, expected_registry_hash='0' * 64, profile=profile)
+    assert move_apply(GITHUB, candidate, expected_registry_hash=plan['registry_hash'], profile=profile)['status'] == 'linked'
+    assert record(GITHUB, candidate, profile=profile)['canonical_url'] == moved
