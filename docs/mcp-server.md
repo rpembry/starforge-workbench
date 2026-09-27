@@ -54,6 +54,13 @@ write requests still need actual authorization. `WB_MCP_FLOW_PREPARE=1` in
 addition registers explicit local code-workspace preparation, including a
 read-only remote clone only when the private binding already permits it.
 
+For task `add` and `update`, `flow_task_preview` also accepts `blocked_by` (a
+list of same-item task IDs) and `parent_task_id` (an active same-item task ID).
+Pass `blocked_by: []` to clear dependencies or `clear_parent: true` to remove
+the organizational parent on update. Parentage does not gate `next`; explicit
+dependencies do. Task reads and packets expose both relationships. No parent
+or child is automatically completed.
+
 These flags do not configure a Codex client, initialize a FLOW profile, launch
 a provider, link an action, publish to the API, or change a source tracker.
 Central action linking/publication belongs to #113; source enrichment to #114.

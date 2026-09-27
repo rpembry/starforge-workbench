@@ -236,14 +236,21 @@ def register_flow_tools(server, *, profile: str | Path, allow_write: bool = Fals
                           expected_revision: str, expected_hash: str,
                           task_id: str | None = None, title: str | None = None,
                           details: str | None = None, acceptance: str | None = None,
+                          blocked_by: list[str] | None = None,
+                          parent_task_id: str | None = None, clear_parent: bool = False,
                           reason: str | None = None, evidence: str = '', priority: Literal['P0', 'P1', 'P2', 'P3'] = 'P2',
                           from_revision: str | None = None) -> dict[str, object]:
         """Preview an exact authorized TASKS.md edit; this token is bound to the target, content, operation ID and expected revision/hash."""
         if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', operation_id) or len(operation_id) > 120:
             raise ValueError('Use a bounded stable kebab-case operation ID')
-        for value in (reference, task_id, title, details, acceptance, reason, evidence, from_revision):
+        for value in (reference, task_id, title, details, acceptance, parent_task_id,
+                      reason, evidence, from_revision):
             if value is not None and len(value) > 1000:
                 raise ValueError('FLOW MCP text is too large; use the local CLI for deliberate larger edits')
+        if blocked_by is not None and (len(blocked_by) > 32 or
+                                       any(not isinstance(value, str) or len(value) > 120
+                                           for value in blocked_by)):
+            raise ValueError('FLOW MCP dependencies exceed the 32-ID or 120-character limit')
         expire_previews()
         if len(previews) >= PENDING_PREVIEW_LIMIT:
             raise ValueError('Too many pending previews; restart this MCP server after reconciliation')
@@ -253,6 +260,8 @@ def register_flow_tools(server, *, profile: str | Path, allow_write: bool = Fals
         request = dict(reference=reference, command=command, operation_id=operation_id,
                        expected_revision=expected_revision, expected_hash=expected_hash,
                        task_id=task_id, title=title, details=details, acceptance=acceptance,
+                       blocked_by=blocked_by, parent_task_id=parent_task_id,
+                       clear_parent=clear_parent,
                        reason=reason, evidence=evidence, priority=priority,
                        from_revision=from_revision, actor='MCP caller (authorization not independently verified)')
         result = mutate(reference, command, profile=current_profile(), preview=True,

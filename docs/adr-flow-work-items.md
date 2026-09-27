@@ -21,8 +21,8 @@ The first line is `# Tasks`. An identity preamble names the canonical source
 URL and stable Workbench work-item ID; it is a pointer, not a copy of remote
 status or title. Optional `## P0` through `## P3` sections contain ordinary
 top-level `- [ ]` tasks. Generated tasks carry a never-reused nested `**ID**`.
-Supported fields are `Details`, `Acceptance`, `Files`, `Blocked by`, and
-`Blocked`; all other Markdown and metadata remain byte-preserved by local edits.
+Supported fields are `Details`, `Acceptance`, `Files`, `Parent task`, `Blocked by`,
+and `Blocked`; all other Markdown and metadata remain byte-preserved by local edits.
 Tiny manual tasks may omit metadata and stay readable. Assigning an ID requires
 an explicit, previewed edit before linking or mutation. Do not infer identity
 from line number, current title, or path. A task identity is the work-item ID
@@ -33,6 +33,10 @@ ID is **unknown**, not proof of completion. Only recorded successful completion
 evidence unblocks it; canceled, superseded, manually checked, or missing tasks
 need reconciliation. `Blocked` is a descriptive external constraint. `[x]` in
 a manual or foreign checklist is a claimed result, never deletion permission.
+`Parent task` is an optional organizational link to an active task in the same
+item. It does not imply a dependency or complete its parent automatically.
+Parent cycles and removal of a parent with active children are rejected; use
+explicit `Blocked by` IDs when a phase gate must wait for child outcomes.
 Completion removes a task from the active file only after its current complete
 definition is reachable in committed metadata history and an explicit outcome
 with evidence is recorded. Cancellation and supersession have distinct outcomes.

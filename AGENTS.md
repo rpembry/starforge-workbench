@@ -10,6 +10,7 @@ Read README.md and docs/adapting.md, then inspect current source and tests; docu
 - Use synthetic data and isolated test state. Never commit private manifests, credentials, transcripts, databases, machine inventories, or real deployment configuration.
 - Keep observation, proposal, accepted work, process presence, activity, and completion semantics separate. Missing collector evidence means unknown visibility.
 - For deliberate FLOW capture, resume, handoff, or closeout, use the relevant `skills/aiw-flow-*/SKILL.md` procedure and [agent interface contract](docs/agent-interface.md). A read-only question or brainstorm does not create a task; a selected skill does not authorize a write.
+- For multi-step FLOW work, distinguish parent grouping from `Blocked by` readiness. Numbered titles and parent links do not gate `next`; verify explicit dependency IDs and completion evidence before calling a phase ready.
 - Local configuration belongs outside Git. Preserve the default-deny ignore policy and third-party license notices.
 - Run `uv run pytest -q` and `git diff --check`; report environmental skips. Desktop integration tests are explicit opt-in checks.
 

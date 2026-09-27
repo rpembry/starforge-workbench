@@ -98,7 +98,7 @@ def parse(text: str, *, validate_dependencies: bool = True) -> Document:
         for line in block.splitlines()[1:]:
             match = FIELD.fullmatch(line)
             if match:
-                if match.group(1) in fields and match.group(1) in {'ID', 'Blocked by'}:
+                if match.group(1) in fields and match.group(1) in {'ID', 'Blocked by', 'Parent task'}:
                     raise ValueError(f'Duplicate task field: {match.group(1)}')
                 fields[match.group(1)] = match.group(2)
         task_id = fields.get('ID')
@@ -130,6 +130,24 @@ def parse(text: str, *, validate_dependencies: bool = True) -> Document:
             visited.add(task_id)
         for task_id in edges:
             visit(task_id)
+        if any('Parent task' in task.fields and not task.task_id for task in tasks):
+            raise ValueError('FLOW parent link requires an explicit task ID')
+        parents = {task.task_id: task.fields['Parent task'] for task in tasks
+                   if 'Parent task' in task.fields}
+        for task_id, parent_id in parents.items():
+            if not ID.fullmatch(parent_id):
+                raise ValueError('Malformed FLOW parent task ID')
+            if parent_id not in by_id:
+                raise ValueError('FLOW parent task must remain active in the same work item')
+            seen = {task_id}
+            current = parent_id
+            while current in parents:
+                if current in seen:
+                    raise ValueError('FLOW parent cycle needs reconciliation')
+                seen.add(current)
+                current = parents[current]
+            if current in seen:
+                raise ValueError('FLOW parent cycle needs reconciliation')
     return Document(text, newline, tasks, sections)
 
 
@@ -151,3 +169,10 @@ def add_field(task: Task, name: str, value: str, newline: str) -> str:
         insert += 1
     lines.insert(insert, f'  - **{name}**: {value}{newline}')
     return ''.join(lines)
+
+
+def remove_field(task: Task, name: str) -> str:
+    """Remove one known metadata field without rewriting the rest of a task block."""
+    prefix = f'  - **{name}**: '
+    return ''.join(line for line in task.block.splitlines(keepends=True)
+                   if not line.startswith(prefix))
