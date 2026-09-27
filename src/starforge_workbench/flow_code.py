@@ -109,7 +109,9 @@ def bind(reference: str, *, name: str, repository: str | Path, worktree_root: st
         raise ValueError('Code repository must be separate from FLOW metadata history')
     if worktrees == repo or worktrees.is_relative_to(repo) or repo.is_relative_to(worktrees):
         raise ValueError('Code clone and worktree root must be separate directories')
-    chosen_branch = branch or f'flow/{work_id}/{name}'
+    if not branch:
+        raise ValueError('Select an explicit project-appropriate branch; FLOW does not name source branches')
+    chosen_branch = branch
     if _git(repo, 'check-ref-format', '--branch', chosen_branch, check=False).returncode if repo.exists() else not re.fullmatch(r'[A-Za-z0-9_./-]+', chosen_branch):
         raise ValueError('Invalid work branch name')
     if remote:

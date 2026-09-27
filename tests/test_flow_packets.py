@@ -73,7 +73,7 @@ def test_handoff_reports_stale_head_and_keeps_unverified_findings(flow):
     worktrees = home / 'worktrees'
     worktrees.mkdir()
     bind(SOURCE, name='api', repository=repo, worktree_root=worktrees,
-         base_ref='main', profile=profile)
+         base_ref='main', branch='issue-42-api', profile=profile)
     prepared = workspace(SOURCE, profile=profile, create=True)['repositories'][0]
     old_head = prepared['head']
     packet = build_packet(SOURCE, profile=profile, kind='handoff', role='reviewer',
