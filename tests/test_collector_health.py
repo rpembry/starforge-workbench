@@ -157,6 +157,58 @@ def test_registration_rotates_for_process_generation_and_unsafe_binding_is_unkno
     assert payloads[0]['id'] != payloads[2]['id']
 
 
+def test_registration_advances_after_accepted_response_is_lost(tmp_path):
+    cwd = tmp_path/'checkout'; cwd.mkdir()
+    manifest = tmp_path/'manifest.yaml'
+    manifest.write_text(f'''contexts:
+- id: fixture
+  title: Fixture agent
+  cwd: {cwd}
+  provider: codex
+  enabled: true
+''')
+    launcher = tmp_path/'launcher'; launcher.mkdir(mode=0o700)
+    (launcher/'sessions').mkdir(mode=0o700)
+    state_path = tmp_path/'state'/'registrations.json'
+    first_run = {'id': 'run-one', 'source_id': 'a'*64, 'context': 'fixture',
+                 'provider': 'codex', 'action_id': None, 'last_activity_at': None}
+    second_run = {**first_run, 'id': 'run-two', 'source_id': 'b'*64}
+    accepted = []
+    seen = {}
+    lost_responses = {1, 3}  # First publication and replacement stop both commit remotely.
+
+    def handle(request):
+        payload = json.loads(request.read())
+        if payload['observation_sequence'] <= seen.get(payload['id'], 0):
+            return httpx.Response(409, json={'code': 'observation_sequence'})
+        seen[payload['id']] = payload['observation_sequence']
+        accepted.append(payload)
+        if len(accepted) in lost_responses:
+            raise httpx.ReadTimeout('response lost after commit', request=request)
+        return httpx.Response(201, json={})
+
+    with httpx.Client(transport=httpx.MockTransport(handle), base_url='https://fixture.example') as api:
+        with pytest.raises(httpx.ReadTimeout):
+            publish_registered_sessions(api, manifest, [], [first_run], 'fixture:launcher',
+                                        state_path, launcher)
+        assert publish_registered_sessions(api, manifest, [], [first_run], 'fixture:launcher',
+                                           state_path, launcher) == 1
+        assert accepted[0]['id'] == accepted[1]['id']
+        assert [item['observation_sequence'] for item in accepted[:2]] == [1, 2]
+        assert json.loads(state_path.read_text())['contexts']['fixture']['sequence'] == 2
+
+        # A lost response while stopping the old generation must also leave a
+        # durable sequence reservation for its next retry.
+        with pytest.raises(httpx.ReadTimeout):
+            publish_registered_sessions(api, manifest, [], [second_run], 'fixture:launcher',
+                                        state_path, launcher)
+        assert publish_registered_sessions(api, manifest, [], [second_run], 'fixture:launcher',
+                                           state_path, launcher) == 1
+    assert [item['observation_sequence'] for item in accepted[2:4]] == [3, 4]
+    assert accepted[2]['id'] == accepted[3]['id'] == accepted[0]['id']
+    assert accepted[4]['id'] != accepted[0]['id']
+
+
 def test_cycle_heartbeats_owned_collector_before_registration(tmp_path):
     cwd = tmp_path/'checkout'; cwd.mkdir()
     manifest = tmp_path/'manifest.yaml'
