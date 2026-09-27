@@ -1,3 +1,4 @@
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,6 +82,50 @@ def test_malformed_timestamp_cannot_starve_same_or_later_files_after_restart(tmp
     assert problem['path']==str(sessions/'a.jsonl') and problem['offset']==0
     assert 'invalid-timestamp-do-not-emit' not in json.dumps(state)
     assert path.stat().st_mode & 0o777==0o600
+
+
+def test_complete_oversize_record_is_quarantined_without_starving_later_answers(tmp_path, monkeypatch):
+    from workbench.codex_observer import atomic_state
+    monkeypatch.setattr('workbench.codex_observer.MAX_LINE', 256)
+    sessions=tmp_path/'sessions';sessions.mkdir();path=sessions/'fixture.jsonl'
+    oversized=(json.dumps({'type':'compacted','payload':'x'*500})+'\n').encode()
+    path.write_bytes(oversized+record('Added a later answer.'))
+    calls=[]
+    def accept(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(201,json={})
+    state={}
+    with httpx.Client(transport=httpx.MockTransport(accept),base_url='https://fixture.example') as api:
+        first=observe(api,sessions,state,'2026-09-01T00:00:00Z',set())
+        assert first['submitted']==1 and first['malformed']==1
+        problem=next(iter(state['_problems'].values()))
+        assert problem['offset']==0 and problem['sha256']==hashlib.sha256(oversized).hexdigest()
+        assert next(value for value in state.values() if isinstance(value,dict) and 'offset' in value)['offset']==path.stat().st_size
+        snapshot=tmp_path/'cursors.json';atomic_state(snapshot,state)
+        state=json.loads(snapshot.read_text())
+        with path.open('ab') as stream:stream.write(record('Verified another answer.','2026-09-12T11:00:00Z'))
+        again=observe(api,sessions,state,'2026-09-01T00:00:00Z',set())
+        assert again['submitted']==1 and again['malformed']==1
+    assert len(calls)==2 and all('compacted' not in item['summary'] for item in calls)
+
+
+def test_incomplete_oversize_record_remains_replayable(tmp_path, monkeypatch):
+    monkeypatch.setattr('workbench.codex_observer.MAX_LINE', 256)
+    path=tmp_path/'fixture.jsonl'
+    path.write_bytes(b'{"type":"compacted","payload":"'+b'x'*500)
+    state={};calls=[]
+    def accept(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(201,json={})
+    with httpx.Client(transport=httpx.MockTransport(accept),base_url='https://fixture.example') as api:
+        first=observe(api,tmp_path,state,'2026-09-01T00:00:00Z',set())
+        assert first['submitted']==0 and first['malformed']==1
+        cursor=next(value for value in state.values() if isinstance(value,dict) and 'offset' in value)
+        assert cursor['offset']==0
+        with path.open('ab') as stream:stream.write(b'"}\n'+record('Added after completion.'))
+        second=observe(api,tmp_path,state,'2026-09-01T00:00:00Z',set())
+        assert second['submitted']==1 and cursor['offset']==path.stat().st_size
+    assert len(calls)==1
 
 
 def test_file_and_delivery_failures_do_not_starve_unaffected_files(tmp_path):

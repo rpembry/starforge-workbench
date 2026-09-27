@@ -38,12 +38,12 @@ def bootstrap(snapshot):
     return row[0],hashes
 
 
-def record_problem(state, path, cursor, reason, line=b''):
+def record_problem(state, path, cursor, reason, line=b'', digest=None):
     # Keep a replayable local reference, never the response text or exception value.
     identity=f'{path}:{cursor["identity"]}:{cursor["offset"]}:{reason}'
     key=hashlib.sha256(identity.encode()).hexdigest()
     state.setdefault('_problems',{})[key]=dict(path=str(path),identity=cursor['identity'],
-        offset=cursor['offset'],reason=reason,sha256=hashlib.sha256(line).hexdigest())
+        offset=cursor['offset'],reason=reason,sha256=digest or hashlib.sha256(line).hexdigest())
 
 
 def observe(api, sessions, state, cutoff, known, parser=None):
@@ -84,8 +84,19 @@ def observe_file(api,path,state,key,cutoff_time,known,counts,parser):
             if not line:
                 break
             if len(line)>MAX_LINE:
-                record_problem(state,path,cursor,'oversize_record',line)
-                break  # Retain this file's cursor; unrelated files still proceed.
+                digest=hashlib.sha256(line)
+                complete=line.endswith(b'\n')
+                while not complete:
+                    chunk=stream.readline(64*1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    complete=chunk.endswith(b'\n')
+                record_problem(state,path,cursor,'oversize_record',digest=digest.hexdigest())
+                if not complete:
+                    break  # An incomplete record remains replayable after append.
+                cursor['offset']=stream.tell()  # Quarantine this record, then keep scanning.
+                continue
             if not line.endswith(b'\n'):
                 break
             try:
