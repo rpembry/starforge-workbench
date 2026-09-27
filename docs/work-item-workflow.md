@@ -93,12 +93,15 @@ history stays local until a separate private backup is deliberately chosen.
 ## Local code workspace preparation
 
 Use `ai-workbench work bind REFERENCE --name NAME --repository ABSOLUTE_CLONE
---worktree-root ABSOLUTE_DIR --base-ref REF` to record a verified local mapping
+--worktree-root ABSOLUTE_DIR --base-ref REF --branch PROJECT_BRANCH` to record a verified local mapping
 outside the metadata repository. The worktree root must exist. Each item may
 have multiple named repository bindings. The chosen base ref is resolved to an
 exact commit before a new branch is created, regardless of the invoking
-checkout's current branch. The default new branch is `flow/<work-item-id>/<name>`;
-`--branch` selects another explicit name. A missing local clone can be created
+checkout's current branch. `--branch` is required so the user can select a name
+that follows the source project's conventions. FLOW identifiers and task files
+belong only in the private metadata repository, not in source branches, commits,
+pull requests, or tracker updates. Existing bindings retain their recorded branch;
+there is no automatic rename. A missing local clone can be created
 only from a configured HTTPS `--remote` when the binding has
 `--allow-remote-read`; normal local resume performs no fetch and labels remote
 freshness unknown. There is no default remote push.

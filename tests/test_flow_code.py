@@ -53,9 +53,12 @@ def test_new_branch_uses_explicit_base_and_resume_preserves_dirty_state(flow):
     hook.chmod(0o700)
     root = home / 'worktrees'
     root.mkdir()
-    bind(SOURCE, name='api', repository=repo, worktree_root=root, base_ref='main', profile=profile)
+    bind(SOURCE, name='api', repository=repo, worktree_root=root, base_ref='main',
+         branch='issue-42-api', profile=profile)
     prepared = workspace(SOURCE, profile=profile, create=True)['repositories'][0]
     assert prepared['status'] == 'created'
+    assert prepared['branch'] == 'issue-42-api'
+    assert git(repo, 'branch', '--list', 'flow/*') == ''
     assert prepared['head'] == base != unrelated
     assert prepared['starting_commit'] == base
     assert not marker.exists()
@@ -74,6 +77,20 @@ def test_new_branch_uses_explicit_base_and_resume_preserves_dirty_state(flow):
     assert len(list(lock_dir.glob('*.lock'))) == 1
 
 
+def test_binding_requires_project_branch_without_touching_source(flow):
+    profile, home = flow
+    repo = home / 'code'
+    repository(repo)
+    root = home / 'worktrees'
+    root.mkdir()
+    with pytest.raises(ValueError, match='explicit project-appropriate branch'):
+        bind(SOURCE, name='api', repository=repo, worktree_root=root,
+             base_ref='main', profile=profile)
+    assert git(repo, 'branch', '--list') == '* main'
+    assert not (profile.with_suffix('.code.json')).exists()
+    assert not list(root.iterdir())
+
+
 def test_two_repositories_partial_failure_then_retry(flow):
     profile, home = flow
     first, second = home / 'first', home / 'second'
@@ -81,8 +98,10 @@ def test_two_repositories_partial_failure_then_retry(flow):
     repository(second)
     root = home / 'worktrees'
     root.mkdir()
-    bind(SOURCE, name='first', repository=first, worktree_root=root, base_ref='main', profile=profile)
-    bind(SOURCE, name='second', repository=second, worktree_root=root, base_ref='release', profile=profile)
+    bind(SOURCE, name='first', repository=first, worktree_root=root, base_ref='main',
+         branch='issue-42-first', profile=profile)
+    bind(SOURCE, name='second', repository=second, worktree_root=root, base_ref='release',
+         branch='issue-42-second', profile=profile)
     initial = workspace(SOURCE, profile=profile, create=True)['repositories']
     assert [row['status'] for row in initial] == ['created', 'error']
     git(second, 'branch', 'release', 'main')
@@ -97,7 +116,8 @@ def test_interrupted_registry_write_recovers_worktree(flow, monkeypatch):
     repository(repo)
     root = home / 'worktrees'
     root.mkdir()
-    bind(SOURCE, name='api', repository=repo, worktree_root=root, base_ref='main', profile=profile)
+    bind(SOURCE, name='api', repository=repo, worktree_root=root, base_ref='main',
+         branch='issue-42-api', profile=profile)
     from starforge_workbench import flow_code
     real_write = flow_code._atomic_json
     writes = 0
@@ -126,7 +146,7 @@ def test_unrecorded_branch_and_missing_binding_fail_closed(flow):
     root = home / 'worktrees'
     root.mkdir()
     binding = bind(SOURCE, name='api', repository=repo, worktree_root=root,
-                   base_ref='main', profile=profile)['binding']
+                   base_ref='main', branch='issue-42-api', profile=profile)['binding']
     git(repo, 'branch', binding['branch'], 'main')
     result = workspace(SOURCE, profile=profile, create=True)['repositories'][0]
     assert result['status'] == 'error'
@@ -140,7 +160,8 @@ def test_simultaneous_prepare_creates_only_one_worktree(flow):
     repository(repo)
     root = home / 'worktrees'
     root.mkdir()
-    bind(SOURCE, name='api', repository=repo, worktree_root=root, base_ref='main', profile=profile)
+    bind(SOURCE, name='api', repository=repo, worktree_root=root, base_ref='main',
+         branch='issue-42-api', profile=profile)
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(workspace, SOURCE, profile=profile, create=True) for _ in range(2)]
         outcomes = []
@@ -162,7 +183,8 @@ def test_tracked_filter_is_refused_before_worktree_creation(flow):
     git(repo, 'commit', '-qm', 'Declare filter')
     root = home / 'worktrees'
     root.mkdir()
-    bind(SOURCE, name='api', repository=repo, worktree_root=root, base_ref='main', profile=profile)
+    bind(SOURCE, name='api', repository=repo, worktree_root=root, base_ref='main',
+         branch='issue-42-api', profile=profile)
     result = workspace(SOURCE, profile=profile, create=True)['repositories'][0]
     assert result['status'] == 'error'
     assert 'filter attributes' in result['reason']
@@ -176,7 +198,7 @@ def test_explicit_adoption_reuses_dirty_existing_worktree(flow):
     root = home / 'worktrees'
     root.mkdir()
     binding = bind(SOURCE, name='api', repository=repo, worktree_root=root,
-                   base_ref='main', profile=profile)['binding']
+                   base_ref='main', branch='issue-42-api', profile=profile)['binding']
     existing = root / 'existing-review'
     git(repo, 'worktree', 'add', '-b', binding['branch'], str(existing), 'main')
     (existing / 'README.md').write_text('authored edit\n')
@@ -201,7 +223,8 @@ def test_cli_prepare_and_read_only_lookup(flow, capsys):
     assert main(['work', '--profile', str(profile), 'show', SOURCE]) == 0
     capsys.readouterr()
     assert not list(root.iterdir())
-    bind(SOURCE, name='api', repository=repo, worktree_root=root, base_ref='main', profile=profile)
+    bind(SOURCE, name='api', repository=repo, worktree_root=root, base_ref='main',
+         branch='issue-42-api', profile=profile)
     assert main(['work', '--profile', str(profile), 'prepare', SOURCE]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result['repositories'][0]['status'] == 'created'
@@ -213,7 +236,8 @@ def test_slow_clone_does_not_hold_profile_writer_lock(flow, monkeypatch):
     root = home / 'worktrees'
     root.mkdir()
     bind(SOURCE, name='api', repository=repo, worktree_root=root, base_ref='main',
-         remote='https://example.invalid/example-repo.git', allow_remote_read=True, profile=profile)
+         branch='issue-42-api', remote='https://example.invalid/example-repo.git',
+         allow_remote_read=True, profile=profile)
     from starforge_workbench import flow_code
     original_run = flow_code.subprocess.run
     clone_started = threading.Event()
