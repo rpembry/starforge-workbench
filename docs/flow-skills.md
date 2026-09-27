@@ -7,6 +7,10 @@ operations exposed by `ai-workbench work/tasks` and, when explicitly configured,
 `wb-mcp`. Natural-language requests can select a relevant installed skill;
 using the skill does not authorize a write. The portable instructions do not
 depend on a particular provider, role ranking, or automatic agent handoff.
+FLOW task files and identifiers stay in a separate private metadata profile,
+not in an external project's source repository, tracker, or PR. A small request
+can be completed without creating a FLOW item. Publishing external-project
+metadata to a central Workbench is a separate deliberate choice.
 
 The deterministic `ai-workbench work packet ISSUE` command (or `flow_packet` MCP
 tool) prepares a bounded **read-only** resume packet. Add `--kind handoff --role
