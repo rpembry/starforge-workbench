@@ -305,8 +305,9 @@ def _render_text(command: str, result: dict) -> str:
             lines.append(f"{indent}{task['priority']} [{task['task_id'] or 'no ID'}] {task['title']}")
             if task['unresolved_dependencies']:
                 lines.append(indent + '  Waiting for: ' + ', '.join(task['unresolved_dependencies']))
-            for child in by_parent.get(task['task_id'], []):
-                render(child, depth + 1)
+            if task['task_id'] is not None:
+                for child in by_parent.get(task['task_id'], []):
+                    render(child, depth + 1)
         for task in by_parent.get(None, []):
             render(task, 0)
         if not result['tasks']:

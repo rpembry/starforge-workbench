@@ -218,6 +218,14 @@ def test_parent_hierarchy_is_organizational_and_keeps_parent_active(workspace, c
            evidence='Phase no longer owns active children', operation_id='complete-parent')
 
 
+def test_text_list_includes_manual_task_without_id(workspace, capsys):
+    profile, root = workspace
+    target = root / 'work/github/github.com/example-org/example-repo/issue-42/TASKS.md'
+    target.write_text(target.read_text() + '\n## P2\n\n- [ ] Manual note without an ID\n')
+    assert main(['--profile', str(profile), '--format', 'text', 'list', SOURCE]) == 0
+    assert 'P2 [no ID] Manual note without an ID' in capsys.readouterr().out
+
+
 def test_canceled_dependency_remains_unresolved_and_cli_sets_relations(workspace, capsys):
     profile, _ = workspace
     phase = mutate(SOURCE, 'add', profile=profile, title='Phase', operation_id='phase')
