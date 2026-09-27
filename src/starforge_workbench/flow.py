@@ -345,7 +345,7 @@ def main(argv=None) -> int:
     bind_parser.add_argument('--repository', type=Path, required=True)
     bind_parser.add_argument('--worktree-root', type=Path, required=True)
     bind_parser.add_argument('--base-ref', required=True)
-    bind_parser.add_argument('--branch')
+    bind_parser.add_argument('--branch', required=True)
     bind_parser.add_argument('--remote')
     bind_parser.add_argument('--allow-remote-read', action='store_true')
     for command in ('prepare', 'resume'):
