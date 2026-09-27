@@ -94,7 +94,9 @@ def build_packet(reference: str, *, profile=None, kind: str = 'resume', role: st
     tasks = []
     truncated_fields = 0
     for row in task_view['tasks'][:30]:
-        selected = {key: row[key] for key in ('task_id', 'priority', 'checked_claim')}
+        selected = {key: row[key] for key in ('task_id', 'priority', 'checked_claim', 'parent_task_id')}
+        selected['child_task_ids'] = row['child_task_ids'][:12]
+        truncated_fields += max(0, len(row['child_task_ids']) - 12)
         selected['title'] = row['title'][:300]
         truncated_fields += int(len(row['title']) > 300)
         selected['unresolved_dependencies'] = row['unresolved_dependencies'][:12]

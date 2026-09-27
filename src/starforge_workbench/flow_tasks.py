@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from .flow import load_profile
 from .flow_history import _item, _run, mutate_document, operation_state, revision, snapshot
-from .flow_markdown import add_field, parse, replace_task
+from .flow_markdown import ID, add_field, parse, remove_field, replace_task
 
 
 def _read(reference: str, profile=None):
@@ -68,12 +68,19 @@ def inspect(reference: str, command: str, *, task_id: str | None = None, profile
                 'dirty_target': committed.returncode == 0 and committed.stdout != target.read_text(encoding='utf-8'),
                 'next_action': 'Review the exact document and history; choose an explicit repair. No outcome is inferred.'}
     entries = []
-    completed = (_completed(reference, profile) -
-                 {task.task_id for task in document.tasks if task.task_id}) if command == 'next' else set()
+    completed = _completed(reference, profile) - {task.task_id for task in document.tasks if task.task_id}
+    children: dict[str, list[str]] = {}
+    for task in document.tasks:
+        parent = task.fields.get('Parent task')
+        if parent and task.task_id:
+            children.setdefault(parent, []).append(task.task_id)
     for task in document.tasks:
         missing = [dep.strip() for dep in task.fields.get('Blocked by', '').split(',') if dep.strip() and dep.strip() not in completed]
         entries.append({'task_id': task.task_id, 'title': task.title, 'priority': task.section,
-                        'checked_claim': task.checked, 'fields': task.fields, 'unresolved_dependencies': missing})
+                        'checked_claim': task.checked, 'fields': task.fields,
+                        'parent_task_id': task.fields.get('Parent task'),
+                        'child_task_ids': children.get(task.task_id, []),
+                        'unresolved_dependencies': missing})
     if command == 'show':
         active = next((task for task in document.tasks if task.task_id == task_id), None)
         if active:
@@ -118,16 +125,49 @@ def _single_line(value: str | None, name: str) -> None:
         raise ValueError(f'{name} must be nonempty single-line text')
 
 
+def _relation_field(task, block: str, name: str, value: str | None, newline: str) -> str:
+    changed = type(task)(task.start, task.end, task.section, task.title,
+                         task.checked, task.task_id, task.fields, block)
+    return add_field(changed, name, value, newline) if value else remove_field(changed, name)
+
+
+def _validate_relations(document, task_id: str, blocked_by: list[str] | None,
+                        parent_task_id: str | None, completed: set[str]) -> None:
+    active = {task.task_id for task in document.tasks if task.task_id}
+    if blocked_by is not None:
+        if (not isinstance(blocked_by, list) or len(blocked_by) > 32 or
+                any(not isinstance(dep, str) or len(dep) > 120 or
+                    not ID.fullmatch(dep) for dep in blocked_by)):
+            raise ValueError('Blocked-by IDs must be a list of up to 32 valid task IDs')
+        if len(set(blocked_by)) != len(blocked_by):
+            raise ValueError('Duplicate FLOW dependency ID')
+        if task_id in blocked_by:
+            raise ValueError('A FLOW task cannot depend on itself')
+        if any(dep not in active | completed for dep in blocked_by):
+            raise ValueError('FLOW dependency must identify a task in this work item with a known active or completed outcome')
+    if parent_task_id is not None:
+        if (not isinstance(parent_task_id, str) or len(parent_task_id) > 120 or
+                not ID.fullmatch(parent_task_id) or parent_task_id == task_id or
+                parent_task_id not in active):
+            raise ValueError('FLOW parent must identify another active task in this work item')
+
+
 def mutate(reference: str, command: str, *, profile=None, task_id: str | None = None,
            title: str | None = None, details: str | None = None, acceptance: str | None = None,
+           blocked_by: list[str] | None = None, parent_task_id: str | None = None,
+           clear_parent: bool = False,
            reason: str | None = None, evidence: str = '', priority: str = 'P2',
            from_revision: str | None = None, actor: str = 'local operator',
            operation_id: str | None = None, expected_revision: str | None = None,
            expected_hash: str | None = None, preview: bool = False,
            checkpoint_pending: bool = False) -> dict:
     operation_id = operation_id or 'operation-' + uuid4().hex
-    client_hash = hashlib.sha256(json.dumps([command, task_id, title, details, acceptance,
-        reason, evidence, priority, from_revision, actor], ensure_ascii=False).encode()).hexdigest()
+    client_args = [command, task_id, title, details, acceptance,
+                   reason, evidence, priority, from_revision, actor]
+    # Preserve replay hashes for operations created before task relations existed.
+    if blocked_by is not None or parent_task_id is not None or clear_parent:
+        client_args.extend([blocked_by, parent_task_id, clear_parent])
+    client_hash = hashlib.sha256(json.dumps(client_args, ensure_ascii=False).encode()).hexdigest()
     prior = operation_state(reference, operation_id, profile=profile)
     if prior:
         if prior['operation'] != command or prior.get('client_hash') != client_hash:
@@ -142,6 +182,12 @@ def mutate(reference: str, command: str, *, profile=None, task_id: str | None = 
                 task_id=prior['task_id'], evidence=evidence or reason or '',
                 checkpoint_pending=checkpoint_pending, client_hash=client_hash)
     state, document = _read(reference, profile)
+    if command not in {'add', 'update'} and (blocked_by is not None or parent_task_id is not None or clear_parent):
+        raise ValueError('Task relationships can only be changed through add or update')
+    if clear_parent and parent_task_id is not None:
+        raise ValueError('Set or clear the parent task, not both')
+    if command == 'add' and clear_parent:
+        raise ValueError('A new task has no parent to clear')
     for name, value in [('title', title), ('details', details), ('acceptance', acceptance),
                         ('reason', reason), ('evidence', evidence)]:
         if value:
@@ -158,8 +204,14 @@ def mutate(reference: str, command: str, *, profile=None, task_id: str | None = 
         if not title or not title.strip():
             raise ValueError('Add needs a single-line title')
         generated_id = 'task-' + hashlib.sha256((state['work_item_id'] + operation_id).encode()).hexdigest()[:16]
+        _validate_relations(document, generated_id, blocked_by, parent_task_id,
+                            _completed(reference, profile) if blocked_by else set())
         newline = document.newline
         block = f'- [ ] {title}{newline}  - **ID**: {generated_id}{newline}'
+        if parent_task_id:
+            block += f'  - **Parent task**: {parent_task_id}{newline}'
+        if blocked_by:
+            block += f'  - **Blocked by**: {", ".join(blocked_by)}{newline}'
         if details:
             block += f'  - **Details**: {details}{newline}'
         if acceptance:
@@ -195,6 +247,8 @@ def mutate(reference: str, command: str, *, profile=None, task_id: str | None = 
         else:
             selected = document.selected(task_id or '')
             if command == 'update':
+                _validate_relations(document, selected.task_id, blocked_by, parent_task_id,
+                                    _completed(reference, profile) if blocked_by else set())
                 block = selected.block
                 if title is not None:
                     if not title.strip() or '\n' in title or '\r' in title:
@@ -206,6 +260,12 @@ def mutate(reference: str, command: str, *, profile=None, task_id: str | None = 
                         changed = type(selected)(selected.start, selected.end, selected.section, selected.title,
                                                  selected.checked, selected.task_id, selected.fields, block)
                         block = add_field(changed, name, value, document.newline)
+                if parent_task_id is not None or clear_parent:
+                    block = _relation_field(selected, block, 'Parent task',
+                                            None if clear_parent else parent_task_id, document.newline)
+                if blocked_by is not None:
+                    block = _relation_field(selected, block, 'Blocked by',
+                                            ', '.join(blocked_by), document.newline)
                 proposed = replace_task(document, selected, block)
             elif command == 'block':
                 if not reason:
@@ -237,10 +297,19 @@ def _render_text(command: str, result: dict) -> str:
     revision = result.get('revision') or result.get('after_revision')
     lines = [f'Revision: {revision}'] if revision else []
     if command == 'list':
+        by_parent: dict[str | None, list[dict]] = {}
         for task in result['tasks']:
-            lines.append(f"{task['priority']} [{task['task_id'] or 'no ID'}] {task['title']}")
+            by_parent.setdefault(task['parent_task_id'], []).append(task)
+        def render(task: dict, depth: int) -> None:
+            indent = '  ' * depth
+            lines.append(f"{indent}{task['priority']} [{task['task_id'] or 'no ID'}] {task['title']}")
             if task['unresolved_dependencies']:
-                lines.append('  Waiting for: ' + ', '.join(task['unresolved_dependencies']))
+                lines.append(indent + '  Waiting for: ' + ', '.join(task['unresolved_dependencies']))
+            if task['task_id'] is not None:
+                for child in by_parent.get(task['task_id'], []):
+                    render(child, depth + 1)
+        for task in by_parent.get(None, []):
+            render(task, 0)
         if not result['tasks']:
             lines.append('No active tasks.')
     elif command == 'show':
@@ -306,8 +375,12 @@ def main(argv=None) -> int:
         if name in {'update', 'add'}:
             item.add_argument('--details')
             item.add_argument('--acceptance')
+            item.add_argument('--blocked-by', action='append')
+            item.add_argument('--parent-task-id')
         if name == 'update':
             item.add_argument('--title')
+            item.add_argument('--clear-blocked-by', action='store_true')
+            item.add_argument('--clear-parent', action='store_true')
         if name in {'block', 'cancel', 'supersede'}:
             item.add_argument('--reason', required=True)
         if name == 'complete':
@@ -322,9 +395,14 @@ def main(argv=None) -> int:
             result = inspect(args.reference, args.command, task_id=getattr(args, 'task_id', None), profile=args.profile)
         else:
             values = vars(args)
-            options = {key: values[key] for key in ('task_id', 'title', 'details', 'acceptance', 'reason',
+            options = {key: values[key] for key in ('task_id', 'title', 'details', 'acceptance',
+                'blocked_by', 'parent_task_id', 'clear_parent', 'reason',
                 'evidence', 'priority', 'from_revision', 'actor', 'operation_id', 'expected_revision',
                 'expected_hash', 'preview', 'checkpoint_pending') if key in values}
+            if values.get('clear_blocked_by'):
+                if values.get('blocked_by'):
+                    raise ValueError('Set or clear dependencies, not both')
+                options['blocked_by'] = []
             result = mutate(args.reference, args.command, profile=args.profile, **options)
         if args.format == 'text':
             print(_render_text(args.command, result))

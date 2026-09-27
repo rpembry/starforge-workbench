@@ -96,6 +96,41 @@ def test_stale_preview_oversized_text_and_wrong_profile_are_denied(profile, tmp_
     assert call(foreign, 'flow_items').is_error
 
 
+def test_mcp_previews_parent_and_dependencies_through_apply(profile):
+    parent = mutate(SOURCE, 'add', profile=profile, title='Synthetic phase',
+                    operation_id='phase-01')['task_id']
+    prerequisite = mutate(SOURCE, 'add', profile=profile, title='Stage input',
+                          operation_id='stage-01')['task_id']
+    server = build_server(flow_profile=profile, flow_write=True)
+    state = inspect(SOURCE, 'list', profile=profile)
+    args = {'reference': SOURCE, 'command': 'add', 'operation_id': 'mcp-child',
+            'expected_revision': state['revision'], 'expected_hash': state['document_hash'],
+            'title': 'Validate input', 'priority': 'P1',
+            'parent_task_id': parent, 'blocked_by': [prerequisite]}
+    preview = call(server, 'flow_task_preview', args).structured_content
+    assert 'Parent task' in preview['change_preview']
+    assert 'Blocked by' in preview['change_preview']
+    applied = call(server, 'flow_task_apply', {'preview_token': preview['preview_token']}).structured_content
+    assert call(server, 'flow_task_apply', {'preview_token': preview['preview_token']}).structured_content == applied
+    child = applied['task_id']
+    selected = call(server, 'flow_task_read', {'reference': SOURCE, 'view': 'show',
+                                               'task_id': child}).structured_content['task']
+    assert selected['parent_task_id'] == parent
+    assert selected['unresolved_dependencies'] == [prerequisite]
+    assert call(server, 'flow_task_read', {'reference': SOURCE, 'view': 'next'}).structured_content[
+        'suggestion']['task_id'] != child
+    state = inspect(SOURCE, 'list', profile=profile)
+    clear = call(server, 'flow_task_preview', {
+        'reference': SOURCE, 'command': 'update', 'operation_id': 'mcp-clear-child',
+        'expected_revision': state['revision'], 'expected_hash': state['document_hash'],
+        'task_id': child, 'blocked_by': [], 'clear_parent': True}).structured_content
+    call(server, 'flow_task_apply', {'preview_token': clear['preview_token']})
+    selected = call(server, 'flow_task_read', {'reference': SOURCE, 'view': 'show',
+                                               'task_id': child}).structured_content['task']
+    assert selected['parent_task_id'] is None
+    assert selected['unresolved_dependencies'] == []
+
+
 def test_resume_only_handles_typed_missing_binding(profile, monkeypatch):
     server = build_server(flow_profile=profile)
     assert call(server, 'flow_resume_context', {'reference': SOURCE}).structured_content[

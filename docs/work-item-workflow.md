@@ -79,6 +79,35 @@ supersede record different outcomes and do not satisfy a dependent task. If a
 blocker disappears without successful evidence, the dependent task stays
 unresolved. An empty queue retains the header and identity preamble.
 
+## Task relationships
+
+Use `--parent-task-id ID` on `tasks add` or `tasks update` to place a task under
+an active task in the same work item. `--clear-parent` removes that link on
+update. The `Parent task` field organizes the local view; it never makes a
+child ready or completes the parent. A parent with active children cannot be
+removed through complete, cancel or supersede until its children leave the
+active queue or are deliberately reparented. Cancellation remains distinct
+from completion, and completing the parent always requires its own evidence.
+
+Use repeated `--blocked-by ID` arguments to record prerequisites when adding
+or updating a task. `--clear-blocked-by` removes all dependencies on update.
+The same `blocked_by` list, `parent_task_id`, and `clear_parent` arguments are
+available through `flow_task_preview`/`flow_task_apply`; an empty `blocked_by`
+list clears dependencies. Preview and apply use the same revision, document
+hash, operation ID and checkpoint rules as other task edits. Newly set IDs must
+refer to active tasks or tasks with recorded completion in the same work item;
+unknown or canceled IDs are rejected. Existing manually authored unknown IDs
+remain unresolved, never satisfied by absence. Cycles and self-links are
+rejected. A dependency is satisfied only by recorded completion; reopening the
+prerequisite blocks the dependent task again.
+
+`tasks list --format text` indents active children, while JSON task reads and
+bounded packets expose parent and active-child IDs. `next` still suggests the
+highest-priority unblocked task; parentage alone does not affect readiness. For
+a phase gate, add explicit dependencies on the required child IDs. These local
+relationships never create source-tracker subtasks or publish private task
+structure to the central API.
+
 `CONTEXT.md` can say what was decided, the next step and a handoff. `SPEC.md`
 and `PLAN.md` are useful only when the work merits them. A review handoff
 reports the exact code revision separately from the task document. A fresh

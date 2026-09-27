@@ -109,6 +109,23 @@ def test_packet_preserves_blocked_work_and_reports_omissions(flow):
         build_packet(SOURCE, profile=profile, pr_links=['https://user:secret@example.com/pull/1'])
 
 
+def test_packet_exposes_hierarchy_and_dependency_readiness(flow):
+    profile, _ = flow
+    phase = mutate(SOURCE, 'add', profile=profile, title='Phase gate',
+                   operation_id='phase-gate')['task_id']
+    prerequisite = mutate(SOURCE, 'add', profile=profile, title='Prepare fixture',
+                          operation_id='prepare-fixture')['task_id']
+    child = mutate(SOURCE, 'add', profile=profile, title='Validate fixture',
+                   operation_id='validate-fixture', priority='P1',
+                   parent_task_id=phase, blocked_by=[prerequisite])['task_id']
+    packet = build_packet(SOURCE, profile=profile)
+    rows = {row['task_id']: row for row in packet['tasks']}
+    assert rows[phase]['child_task_ids'] == [child]
+    assert rows[child]['parent_task_id'] == phase
+    assert rows[child]['unresolved_dependencies'] == [prerequisite]
+    assert packet['next_suggestion']['task_id'] != child
+
+
 def test_packet_distinguishes_changed_scope_terminal_outcomes_and_dirty_document(flow):
     profile, home = flow
     first = mutate(SOURCE, 'add', profile=profile, title='Initial scope', operation_id='add-01')
