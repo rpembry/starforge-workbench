@@ -108,6 +108,20 @@ a phase gate, add explicit dependencies on the required child IDs. These local
 relationships never create source-tracker subtasks or publish private task
 structure to the central API.
 
+## Source issue status
+
+FLOW's local capture, read, preparation, and task checkpoint commands do not
+change Jira or another source tracker. A read-only resume or `next` suggestion
+does not start work. When an agent is separately authorized to carry out work
+on a linked issue, it follows the operator's project-specific status workflow
+at work start and handoff through the source tracker's own interface. That
+requires reading the issue's current status and available transitions;
+requirements and completion evidence still govern the choice. A local FLOW
+completion, commit, or PR does not automatically close a source issue or imply
+deployment. Agents must not copy private FLOW task IDs or breakdowns into the
+source tracker. This guidance also applies to one-step work without FLOW;
+FLOW itself has no universal status mapping or automatic synchronization.
+
 `CONTEXT.md` can say what was decided, the next step and a handoff. `SPEC.md`
 and `PLAN.md` are useful only when the work merits them. A review handoff
 reports the exact code revision separately from the task document. A fresh
