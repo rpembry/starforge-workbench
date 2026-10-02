@@ -247,3 +247,38 @@ def test_x11_pwa_window_and_process_identity_fixture(setup, tmp_path, monkeypatc
     owner.joinpath('cmdline').write_bytes(b'synthetic-app\0--profile-directory=Profile 1\0--app-id=synthetic-app-id\0')
     assert desktop.observe(favorite, entry)[0] == 'absent'
     assert X11Desktop({'XDG_SESSION_TYPE': 'wayland', 'DISPLAY': ':99'}, proc).observe(favorite, entry)[0] == 'unavailable'
+
+
+def test_single_field_chrome_cmdline_cannot_prove_pwa_absence(setup, tmp_path, monkeypatch):
+    restore, _, _, applications, favorites = setup
+    favorite = favorites[1]
+    entry = resolve_entry(favorite, [applications])
+    proc = tmp_path / 'proc'
+    owner = proc / '100'
+    owner.mkdir(parents=True)
+    owner.joinpath('exe').symlink_to(entry['executable'])
+    owner.joinpath('cmdline').write_bytes(
+        b'/tmp/synthetic-app --profile-directory="Profile 2" --app-id=synthetic-app-id\0')
+    calls = []
+    monkeypatch.setattr('starforge_workbench.favorite_apps.shutil.which', lambda _: '/usr/bin/synthetic-tool')
+
+    def run(args, **kwargs):
+        calls.append(args[0])
+        return SimpleNamespace(stdout='')
+
+    monkeypatch.setattr('starforge_workbench.favorite_apps.subprocess.run', run)
+    desktop = X11Desktop({'XDG_SESSION_TYPE': 'x11', 'DISPLAY': ':99'}, proc)
+    assert desktop.observe(favorite, entry)[0] == 'uncertain'
+    restore.desktop = desktop
+    preview = restore.preview(['Notes'])
+    assert preview['items'][0]['action'] == 'refuse'
+    assert restore.apply(['Notes'], preview['token'])['items'][0]['result'] == 'refused'
+    assert 'gtk-launch' not in calls
+
+    owner.joinpath('cmdline').write_bytes(b'/tmp/synthetic-app --profile-directory=Profile 2 --app-id=synthetic-app-id\0')
+    assert desktop.observe(favorite, entry)[0] == 'uncertain'
+    owner.joinpath('cmdline').write_bytes(b'/tmp/synthetic-app --profile-directory="Profile 1" --app-id=other-app\0')
+    assert desktop.observe(favorite, entry)[0] == 'uncertain'
+    owner.joinpath('cmdline').write_bytes(
+        b'/tmp/synthetic-app --profile-directory="Profile 2" --profile-directory="Profile 1" --app-id=synthetic-app-id\0')
+    assert desktop.observe(favorite, entry)[0] == 'uncertain'

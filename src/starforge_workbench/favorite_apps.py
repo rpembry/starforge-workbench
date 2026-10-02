@@ -22,6 +22,33 @@ DESKTOP_ID = re.compile(r'[A-Za-z0-9_.-]+\.desktop\Z')
 KINDS = {'native', 'pwa', 'terminal', 'workbench'}
 
 
+def _pwa_cmdline_identity(raw: bytes, favorite: dict) -> bool | None:
+    """Return exact match, definite other app, or ambiguous cmdline evidence."""
+    fields = raw.rstrip(b'\0').split(b'\0')
+    if not fields or not fields[0]:
+        return None
+    try:
+        if len(fields) == 1:
+            # Some Chrome builds expose the entire command as one /proc field.
+            # Parse only for an exact positive match; an apparent miss is unsafe.
+            args = shlex.split(fields[0].decode('utf-8'))
+        else:
+            args = [field.decode('utf-8') for field in fields]
+    except (UnicodeError, ValueError):
+        return None
+    profiles = [arg for arg in args if arg.startswith('--profile-directory=')]
+    apps = [arg for arg in args if arg.startswith('--app-id=')]
+    if '--profile-directory' in args or '--app-id' in args or len(profiles) > 1 or len(apps) > 1:
+        return None
+    expected_profile = '--profile-directory=' + favorite['profile']
+    expected_app = '--app-id=' + favorite['app_id']
+    if profiles == [expected_profile] and apps == [expected_app]:
+        return True
+    if len(fields) == 1 or len(profiles) != len(apps):
+        return None
+    return False
+
+
 def _private_file(path: Path):
     if path.is_symlink() or not path.is_file():
         raise ValueError('Private favorites file must be a regular nonsymlink file')
@@ -138,9 +165,7 @@ class X11Desktop:
                 if process.joinpath('exe').resolve(strict=True) != Path(entry['executable']):
                     return 'uncertain', 'Window class has a different process owner'
                 if favorite['kind'] == 'pwa':
-                    argv = process.joinpath('cmdline').read_bytes().split(b'\0')
-                    if (('--profile-directory=' + favorite['profile']).encode() not in argv or
-                            ('--app-id=' + favorite['app_id']).encode() not in argv):
+                    if _pwa_cmdline_identity(process.joinpath('cmdline').read_bytes(), favorite) is not True:
                         return 'uncertain', 'PWA window profile or application identity is unverified'
             if candidates:
                 return 'present', 'Exact window class and process identity verified'
@@ -152,9 +177,8 @@ class X11Desktop:
                             continue
                         if process.joinpath('exe').resolve(strict=True) == Path(entry['executable']):
                             if favorite['kind'] == 'pwa':
-                                argv = process.joinpath('cmdline').read_bytes().split(b'\0')
-                                if (('--profile-directory=' + favorite['profile']).encode() not in argv or
-                                        ('--app-id=' + favorite['app_id']).encode() not in argv):
+                                match = _pwa_cmdline_identity(process.joinpath('cmdline').read_bytes(), favorite)
+                                if match is False:
                                     continue
                             return 'uncertain', 'Matching process has no verified window'
                     except FileNotFoundError:
