@@ -85,9 +85,13 @@ ownership can be difficult to prove on some builds; those targets remain
 uncertain rather than receiving a duplicate launch. Only synthetic fixtures
 have been exercised for this slice. This workstation's observed desktop
 session is Wayland, so no live application launch or focus smoke was run.
-The X11 adapter treats `wmctrl -x` output as an `instance.class` tuple and
-refuses malformed or ambiguous class output; names containing an unescaped
-dot cannot be safely separated by this adapter.
+The X11 adapter treats `wmctrl -x` output as an `instance.class` tuple. It
+matches the configured `StartupWMClass` exactly against either component and
+requires matching process ownership; it never uses a substring match. A
+malformed tuple belonging to the selected process, or an unverifiable tuple
+when no selected window is confirmed, remains uncertain. Dotted or whitespace
+`StartupWMClass` values cannot be separated reliably in this output and are
+unsupported by this adapter.
 
 For independent QA, use disposable desktop entries and executables in a
 separate X11 session. Record the exact build and desktop-entry identities,

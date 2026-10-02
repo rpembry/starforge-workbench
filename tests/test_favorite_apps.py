@@ -331,7 +331,7 @@ def test_x11_class_tuple_native_and_pwa_owner_verification(setup, tmp_path, monk
     desktop = X11Desktop({'XDG_SESSION_TYPE': 'x11', 'DISPLAY': ':99'}, proc)
     assert desktop.observe(favorites[0], entry)[0] == 'present'
     output[0] = '0x01 0 100 0 0 600 400 synthetic-editor.editor host Synthetic Editor\n'
-    assert desktop.observe(favorites[0], entry)[0] == 'uncertain'
+    assert desktop.observe(favorites[0], entry)[0] == 'present'
     output[0] = '0x01 0 100 0 0 600 400 editor.synthetic-editor.extra host Synthetic Editor\n'
     assert desktop.observe(favorites[0], entry)[0] == 'uncertain'
     output[0] = '0x01 0 100 0 0 600 400 editor.synthetic-editor host Synthetic Editor\n'
@@ -350,6 +350,52 @@ def test_x11_class_tuple_native_and_pwa_owner_verification(setup, tmp_path, monk
     assert desktop.observe(pwa, pwa_entry)[0] == 'present'
     owner.joinpath('cmdline').write_bytes(b'synthetic-app\0--profile-directory=Profile 1\0--app-id=synthetic-app-id\0')
     assert desktop.observe(pwa, pwa_entry)[0] == 'uncertain'
+
+
+def test_unrelated_malformed_window_does_not_hide_verified_target(setup, tmp_path, monkeypatch):
+    _, _, _, applications, favorites = setup
+    favorite = favorites[0]
+    entry = resolve_entry(favorite, [applications])
+    proc = tmp_path / 'proc'
+    target = proc / '100'
+    target.mkdir(parents=True)
+    target.joinpath('exe').symlink_to(entry['executable'])
+    unrelated = proc / '200'
+    unrelated.mkdir()
+    other_executable = tmp_path / 'other-app'
+    other_executable.write_text('fixture')
+    unrelated.joinpath('exe').symlink_to(other_executable)
+    exact = '0x01 0 100 0 0 600 400 editor.synthetic-editor host Editor\n'
+    malformed = '0x02 0 200 0 0 600 400 other.dotted.class host Other\n'
+    output = ['']
+    monkeypatch.setattr('starforge_workbench.favorite_apps.shutil.which', lambda _: '/usr/bin/synthetic-tool')
+    monkeypatch.setattr('starforge_workbench.favorite_apps.subprocess.run',
+                        lambda *args, **kwargs: SimpleNamespace(stdout=output[0]))
+    desktop = X11Desktop({'XDG_SESSION_TYPE': 'x11', 'DISPLAY': ':99'}, proc)
+    for output[0] in (malformed + exact, exact + malformed):
+        assert desktop.observe(favorite, entry)[0] == 'present'
+    output[0] = malformed
+    assert desktop.observe(favorite, entry)[0] == 'uncertain'
+    output[0] = '0x02 0 0 0 0 600 400 other.dotted.class host Other\n'
+    assert desktop.observe(favorite, entry)[0] == 'uncertain'
+    unrelated.joinpath('exe').unlink()
+    unrelated.joinpath('exe').symlink_to(entry['executable'])
+    output[0] = exact + malformed
+    assert desktop.observe(favorite, entry)[0] == 'uncertain'
+    output[0] = malformed
+    assert desktop.observe(favorite, entry)[0] == 'uncertain'
+    unrelated.joinpath('exe').unlink()
+    unrelated.joinpath('exe').symlink_to(other_executable)
+    target.joinpath('exe').unlink()
+    assert desktop.observe(favorite, entry)[0] == 'absent'
+
+
+def test_dotted_startup_class_configuration_is_refused(setup):
+    _, _, config, _, favorites = setup
+    favorites[0]['wm_class'] = 'org.example.Editor'
+    config.write_text(yaml.safe_dump({'version': 1, 'favorites': favorites}))
+    with pytest.raises(ValueError, match='cannot be verified'):
+        load_config(config)
 
 
 def test_single_field_chrome_cmdline_cannot_prove_pwa_absence(setup, tmp_path, monkeypatch):

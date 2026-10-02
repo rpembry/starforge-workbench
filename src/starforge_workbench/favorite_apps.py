@@ -116,6 +116,8 @@ def load_config(path: Path = CONFIG) -> list[dict]:
             raise ValueError('Favorite identity fields must be nonempty text')
         if not DESKTOP_ID.fullmatch(row['desktop_id']) or not Path(row['executable']).is_absolute():
             raise ValueError('Favorite requires an exact desktop ID and absolute executable identity')
+        if '.' in row['wm_class'] or any(c.isspace() for c in row['wm_class']):
+            raise ValueError('Window class with a dot or whitespace cannot be verified from wmctrl')
         if row['name'].casefold() in names:
             raise ValueError('Favorite names must be unique')
         names.add(row['name'].casefold())
@@ -185,14 +187,32 @@ class X11Desktop:
         try:
             windows = subprocess.run(['wmctrl', '-lpGx'], capture_output=True, text=True, timeout=3, check=True).stdout
             candidates = []
+            relevant_ambiguity = False
+            unknown_ambiguity = False
             for line in windows.splitlines():
                 parts = line.split(maxsplit=8)
                 if len(parts) < 9:
-                    return 'uncertain', 'Window inventory is malformed'
+                    unknown_ambiguity = True
+                    continue
                 wm_identity = _wm_class_tuple(parts[7])
                 if wm_identity is None:
-                    return 'uncertain', 'Window class tuple is malformed or ambiguous'
-                if wm_identity[1] == favorite['wm_class']:
+                    try:
+                        pid = int(parts[2])
+                        if pid <= 0:
+                            unknown_ambiguity = True
+                            continue
+                        process = self.proc / str(pid)
+                        if process.joinpath('exe').resolve(strict=True) != Path(entry['executable']):
+                            continue
+                        if favorite['kind'] == 'pwa' and _pwa_cmdline_identity(
+                                process.joinpath('cmdline').read_bytes(), favorite) is False:
+                            continue
+                    except (OSError, ValueError):
+                        unknown_ambiguity = True
+                        continue
+                    relevant_ambiguity = True
+                    continue
+                if favorite['wm_class'] in wm_identity:
                     candidates.append(parts)
             for parts in candidates:
                 pid = int(parts[2])
@@ -204,8 +224,12 @@ class X11Desktop:
                 if favorite['kind'] == 'pwa':
                     if _pwa_cmdline_identity(process.joinpath('cmdline').read_bytes(), favorite) is not True:
                         return 'uncertain', 'PWA window profile or application identity is unverified'
+            if relevant_ambiguity:
+                return 'uncertain', 'Selected process has an ambiguous window class'
             if candidates:
                 return 'present', 'Exact window class and process identity verified'
+            if unknown_ambiguity:
+                return 'uncertain', 'Window inventory has an unverifiable class or owner'
             # A process without a window may still be starting; never infer absence.
             for process in self.proc.iterdir():
                 if process.name.isdigit():
