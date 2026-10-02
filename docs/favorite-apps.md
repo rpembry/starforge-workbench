@@ -93,6 +93,10 @@ when no selected window is confirmed, remains uncertain. Dotted or whitespace
 `StartupWMClass` values cannot be separated reliably in this output and are
 unsupported by this adapter.
 
+A [source-only GNOME 50 presence extension](gnome-favorite-presence.md) is
+prepared separately for Wayland review. It is not installed, enabled, or
+connected to `wb-apps`; its window observations do not authorize launches.
+
 For independent QA, use disposable desktop entries and executables in a
 separate X11 session. Record the exact build and desktop-entry identities,
 preview first, then verify launch count, actual window ownership/readiness,
