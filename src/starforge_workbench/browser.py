@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import time
 from urllib.parse import quote, urlparse
 from urllib.request import urlopen
 
@@ -24,6 +28,13 @@ CHROME_NAMES = {'chrome', 'google-chrome', 'google-chrome-stable', 'chromium', '
 
 class ChromeControlUnavailable(ValueError):
     """Chrome is present but its local browser-control endpoint is unavailable."""
+
+
+@dataclass(frozen=True)
+class BrowserConnection:
+    port: int
+    browser_id: str
+    profile: Path
 
 
 def _config_path(path: Path | str | None = None) -> Path:
@@ -197,126 +208,304 @@ def _canonical(url: str, mode: str) -> str:
     return url.rstrip('/')
 
 
-def _tabs(port: int) -> list[dict[str, object]]:
+def _json_endpoint(port: int, endpoint: str) -> object:
     try:
-        with urlopen(f'http://127.0.0.1:{port}/json/list', timeout=1) as response:
-            value = json.loads(response.read())
+        with urlopen(f'http://127.0.0.1:{port}{endpoint}', timeout=2) as response:
+            return json.loads(response.read())
     except Exception as exc:
-        if _running():
-            raise ChromeControlUnavailable(
-                f'Chrome is running but its local DevTools endpoint is unavailable on port {port}. '
-                'Do not restart the normal browser with a separate user-data directory: that profile cannot represent '
-                'the current tabs. For explicit normal-profile control, enable Remote Debugging in '
-                'chrome://inspect/#remote-debugging, approve Chrome\'s connection prompt, and use a trusted '
-                'Chrome DevTools MCP client with --autoConnect.'
-            ) from exc
-        raise ValueError(f'Chrome refresh requires a local DevTools endpoint on port {port}') from exc
-    return [item for item in value if item.get('type') == 'page' and isinstance(item.get('url'), str)]
+        raise ChromeControlUnavailable(f'Chrome DevTools connection on loopback port {port} is unavailable') from exc
 
 
-def control_status(port: int = 9222) -> dict[str, object]:
+def _listener_inodes(port: int) -> set[str]:
+    try:
+        lines = Path('/proc/net/tcp').read_text().splitlines()[1:]
+    except OSError as exc:
+        raise ChromeControlUnavailable('Cannot verify the DevTools listener owner') from exc
+    sockets = set()
+    for line in lines:
+        fields = line.split()
+        address, number = fields[1].split(':')
+        if int(number, 16) == port and fields[3] == '0A':
+            if address != '0100007F':
+                raise ChromeControlUnavailable('DevTools listener is not bound to IPv4 loopback only')
+            sockets.add(fields[9])
+    return sockets
+
+
+def _owner_profile(port: int) -> Path:
+    sockets = _listener_inodes(port)
+    if not sockets:
+        raise ChromeControlUnavailable('No verifiable Chrome DevTools listener owns this port')
+    profiles = set()
+    socket_refs = {f'socket:[{inode}]' for inode in sockets}
+    try:
+        processes = list(Path('/proc').iterdir())
+    except OSError as exc:
+        raise ChromeControlUnavailable('Cannot inspect the DevTools listener process') from exc
+    for process in processes:
+        if not process.name.isdigit():
+            continue
+        try:
+            if not any(fd.readlink().as_posix() in socket_refs
+                       for fd in (process / 'fd').iterdir()):
+                continue
+            args = [part.decode(errors='replace') for part in (process / 'cmdline').read_bytes().split(b'\0') if part]
+            if not args or Path(args[0]).name not in CHROME_NAMES:
+                continue
+            port_flag = f'--remote-debugging-port={port}'
+            if port_flag not in args:
+                continue
+            for index, arg in enumerate(args):
+                if arg.startswith('--user-data-dir='):
+                    profiles.add(Path(arg.partition('=')[2]).expanduser().resolve(strict=True))
+                elif arg == '--user-data-dir' and index + 1 < len(args):
+                    profiles.add(Path(args[index + 1]).expanduser().resolve(strict=True))
+        except (OSError, ValueError):
+            continue
+    if len(profiles) != 1:
+        raise ChromeControlUnavailable('Cannot verify the connected Chrome profile from its listener process')
+    return profiles.pop()
+
+
+def _connection(port: int, expected_profile: Path | str | None) -> BrowserConnection:
+    if expected_profile is None:
+        raise ChromeControlUnavailable('Specify --profile or WB_CHROME_PROFILE to identify the intended Chrome profile')
+    try:
+        expected = Path(expected_profile).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise ChromeControlUnavailable('Expected Chrome profile does not exist') from exc
+    version = _json_endpoint(port, '/json/version')
+    if not isinstance(version, dict) or not isinstance(version.get('webSocketDebuggerUrl'), str):
+        raise ChromeControlUnavailable('DevTools endpoint did not identify a browser')
+    browser_url = urlparse(version['webSocketDebuggerUrl'])
+    try:
+        valid_browser_url = (browser_url.scheme == 'ws' and browser_url.hostname in {'127.0.0.1', 'localhost'}
+                             and browser_url.port == port and browser_url.path.startswith('/devtools/browser/'))
+    except ValueError:
+        valid_browser_url = False
+    if not valid_browser_url:
+        raise ChromeControlUnavailable('DevTools endpoint did not identify the loopback browser')
+    actual = _owner_profile(port)
+    if actual != expected:
+        raise ChromeControlUnavailable(f'DevTools port {port} belongs to a different Chrome profile')
+    return BrowserConnection(port, version['webSocketDebuggerUrl'], actual)
+
+
+def _tabs(connection: BrowserConnection) -> list[dict[str, object]]:
+    if _connection(connection.port, connection.profile) != connection:
+        raise ChromeControlUnavailable('Connected Chrome browser changed during the operation')
+    value = _json_endpoint(connection.port, '/json/list')
+    if _connection(connection.port, connection.profile) != connection:
+        raise ChromeControlUnavailable('Connected Chrome browser changed while reading tabs')
+    if not isinstance(value, list):
+        raise ChromeControlUnavailable('Chrome returned an invalid tab list')
+    return [item for item in value if isinstance(item, dict) and item.get('type') == 'page'
+            and isinstance(item.get('id'), str) and isinstance(item.get('url'), str)]
+
+
+def control_status(port: int = 9222, profile: Path | str | None = None) -> dict[str, object]:
     """Report whether Workbench's isolated-profile DevTools control is available."""
     try:
-        return {'status': 'connected', 'transport': 'devtools-port', 'page_count': len(_tabs(port)), 'port': port}
-    except ChromeControlUnavailable:
+        connection = _connection(port, profile)
+        return {'status': 'connected', 'transport': 'devtools-port', 'page_count': len(_tabs(connection)),
+                'port': port, 'profile': str(connection.profile)}
+    except ChromeControlUnavailable as exc:
         return {
-            'status': 'needs_explicit_normal_profile_connection',
-            'transport': 'chrome-devtools-mcp-auto-connect',
+            'status': 'unavailable',
+            'transport': 'devtools-port',
             'port': port,
-            'next_action': 'Enable Remote Debugging in chrome://inspect/#remote-debugging and approve the Chrome prompt before connecting a trusted Chrome DevTools MCP client with --autoConnect.',
+            'reason': str(exc),
         }
-    except ValueError:
-        return {'status': 'unavailable', 'transport': 'devtools-port', 'port': port}
 
 
-def refresh(workspace: str = DEFAULT_WORKSPACE, port: int = 9222, path=None) -> dict[str, object]:
+def _launch_connected(connection: BrowserConnection, flag: str, urls: list[str]) -> None:
+    _connection(connection.port, connection.profile)
+    subprocess.Popen([_executable(), f'--user-data-dir={connection.profile}', flag, *urls],
+                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _verify_new_tabs(connection: BrowserConnection, before: list[dict[str, object]],
+                     urls: list[str], timeout: float = 3.0) -> tuple[list[dict[str, object]], list[str]]:
+    old_ids = {tab['id'] for tab in before}
+    deadline = time.monotonic() + timeout
+    last: list[dict[str, object]] = []
+    while True:
+        last = [tab for tab in _tabs(connection) if tab['id'] not in old_ids]
+        available = Counter(tab['url'] for tab in last)
+        if all(available[url] >= count for url, count in Counter(urls).items()):
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.1)
+    by_url: dict[str, list[dict[str, object]]] = {}
+    for tab in last:
+        by_url.setdefault(tab['url'], []).append(tab)
+    verified = []
+    partial = []
+    for url in urls:
+        matches = by_url.get(url, [])
+        if matches:
+            verified.append(matches.pop(0))
+        else:
+            partial.append(url)
+    return verified, partial
+
+
+def refresh(workspace: str = DEFAULT_WORKSPACE, port: int = 9222, path=None,
+            profile: Path | str | None = None) -> dict[str, object]:
     configured = entries(workspace, path)
-    tabs = _tabs(port)
-    opened = []
+    connection = _connection(port, profile)
+    tabs = _tabs(connection)
+    result: dict[str, object] = {'status': 'verified', 'workspace': workspace, 'existing_tabs': len(tabs),
+                                 'requested': [], 'verified': [], 'partial': [], 'uncertain': []}
     for item in configured:
         key = _canonical(item['url'], item['match'])
         if any(_canonical(tab['url'], item['match']) == key for tab in tabs):
             continue
-        executable = _executable()
-        subprocess.Popen([executable, '--new-tab', item['url']], start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        opened.append(item['name'])
-    return {'status': 'refreshed', 'workspace': workspace, 'existing_tabs': len(tabs), 'opened': opened}
+        if any(_canonical(url, item['match']) == key for url in result['requested']):
+            continue
+        try:
+            before = _tabs(connection)
+            if any(_canonical(tab['url'], item['match']) == key for tab in before):
+                result['verified'].append({'name': item['name'], 'url': item['url'], 'already_present': True})
+                tabs = before
+                continue
+            result['requested'].append(item['url'])
+            _launch_connected(connection, '--new-tab', [item['url']])
+            verified, partial = _verify_new_tabs(connection, before, [item['url']])
+            if verified:
+                result['verified'].append({'name': item['name'], 'url': item['url'], 'id': verified[0]['id']})
+                tabs = [*before, *verified]
+            if partial:
+                result['partial'].append({'name': item['name'], 'url': item['url'], 'reason': 'destination_not_verified'})
+                break
+        except ChromeControlUnavailable as exc:
+            result['uncertain'].append({'name': item['name'], 'url': item['url'], 'reason': str(exc)})
+            break
+    if result['uncertain']:
+        result['status'] = 'uncertain'
+    elif result['partial']:
+        result['status'] = 'partial'
+    return result
 
 
-def organization_preview(workspace: str = DEFAULT_WORKSPACE, port: int = 9222, path=None) -> dict[str, object]:
+def organization_preview(workspace: str = DEFAULT_WORKSPACE, port: int = 9222, path=None,
+                         profile: Path | str | None = None) -> dict[str, object]:
     """Describe the live tabs matched by one named workspace without changing Chrome."""
     configured = entries(workspace, path)
     selected = []
-    tabs = _tabs(port)
+    connection = _connection(port, profile)
+    tabs = _tabs(connection)
     for tab in tabs:
         for entry in configured:
             if _canonical(tab['url'], entry['match']) != _canonical(entry['url'], entry['match']):
                 continue
             selected.append({'id': tab.get('id'), 'url': tab['url'], 'entry': entry['name'], 'match': entry['match']})
             break
+    token = hashlib.sha256(json.dumps({'browser': connection.browser_id, 'profile': str(connection.profile),
+                                       'entries': configured, 'selected': selected}, sort_keys=True).encode()).hexdigest()
     return {
         'status': 'preview',
         'workspace': workspace,
         'selected': selected,
         'unmatched_tabs': len(tabs) - len(selected),
+        'expect': token,
     }
 
 
-def _close_tab(target_id: str, port: int) -> None:
+def _close_tab(target_id: str, connection: BrowserConnection) -> None:
     if not target_id:
         raise ValueError('Chrome did not supply an ID for a selected tab; no tab was closed')
     try:
-        with urlopen(f'http://127.0.0.1:{port}/json/close/{quote(target_id, safe="")}', timeout=1) as response:
+        _connection(connection.port, connection.profile)
+        with urlopen(f'http://127.0.0.1:{connection.port}/json/close/{quote(target_id, safe="")}', timeout=2) as response:
             response.read()
+    except ChromeControlUnavailable:
+        raise
     except Exception as exc:
         raise ValueError(f'Chrome could not close selected tab {target_id}') from exc
 
 
 def organize(workspace: str = DEFAULT_WORKSPACE, port: int = 9222, path=None,
-             apply: bool = False, action: str = 'copy') -> dict[str, object]:
+             apply: bool = False, action: str = 'copy', profile: Path | str | None = None,
+             expect: str | None = None) -> dict[str, object]:
     """Put matched tabs in a new workspace window, optionally replacing the originals."""
     if action not in {'copy', 'move'}:
         raise ValueError("Organization action must be 'copy' or 'move'")
-    preview = organization_preview(workspace, port, path)
+    preview = organization_preview(workspace, port, path, profile)
     preview['action'] = action
     if not apply:
         return preview
-
+    if not expect or expect != preview['expect']:
+        raise ValueError('Chrome target set changed or --expect preview token is missing; preview again before applying')
     selected = preview['selected']
-    result = {**preview, 'status': 'applied', 'opened': [], 'close_requested': [], 'closed': [],
-              'still_open': [], 'close_errors': [], 'verification': 'not_needed'}
+    result = {**preview, 'status': 'verified', 'requested': [item['url'] for item in selected],
+              'verified': [], 'partial': [], 'uncertain': [], 'closed': [], 'preserved': []}
     if not selected:
         return result
-    executable = _executable()
-    urls = [item['url'] for item in selected]
+    connection = _connection(port, profile)
+    before = _tabs(connection)
+    # The preview is a separate read; check the selected IDs and URLs again immediately before launch.
+    current = {tab['id']: tab['url'] for tab in before}
+    if any(current.get(item['id']) != item['url'] for item in selected):
+        raise ValueError('Selected Chrome tabs changed before apply; preview again')
+    urls = result['requested']
     # A separate window is the supported CDP-compatible workspace boundary. Chrome's
     # tab-group API is extension-only, so this CLI deliberately does not emulate it.
-    subprocess.Popen([executable, '--new-window', *urls], start_new_session=True,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    result['opened'] = urls
-    if action == 'copy':
-        return result
-
-    result['verification'] = 'pending'
-    for item in selected:
-        target_id = item['id']
-        if not isinstance(target_id, str) or not target_id:
-            result['close_errors'].append({'url': item['url'], 'reason': 'missing_target_id'})
-            continue
-        result['close_requested'].append(target_id)
-        try:
-            _close_tab(target_id, port)
-        except ValueError as exc:
-            result['close_errors'].append({'id': target_id, 'url': item['url'], 'reason': str(exc)})
+    _launch_connected(connection, '--new-window', urls)
     try:
-        remaining = {tab.get('id') for tab in _tabs(port)}
-    except ValueError:
-        result['verification'] = 'unavailable'
+        destinations, _ = _verify_new_tabs(connection, before, urls)
+    except ChromeControlUnavailable as exc:
+        result['uncertain'] = [{'source_id': item['id'], 'url': item['url'], 'reason': str(exc)} for item in selected]
+        result['preserved'] = [item['id'] for item in selected]
+        result['status'] = 'uncertain'
         return result
-    result['closed'] = [target_id for target_id in result['close_requested'] if target_id not in remaining]
-    result['still_open'] = [target_id for target_id in result['close_requested'] if target_id in remaining]
-    result['verification'] = 'verified'
+    # Match duplicate URLs one by one; a single new target never justifies closing two sources.
+    by_url: dict[str, list[dict[str, object]]] = {}
+    for destination in destinations:
+        by_url.setdefault(destination['url'], []).append(destination)
+    result['verified'] = []
+    for source in selected:
+        matches = by_url.get(source['url'], [])
+        if matches:
+            destination = matches.pop(0)
+            result['verified'].append({'source_id': source['id'], 'destination_id': destination['id'], 'url': source['url']})
+        else:
+            result['partial'].append({'source_id': source['id'], 'url': source['url'], 'reason': 'destination_not_verified'})
+            result['preserved'].append(source['id'])
+    if action == 'move':
+        close_attempted = set()
+        for match in result['verified']:
+            try:
+                current = {tab['id']: tab['url'] for tab in _tabs(connection)}
+                if current.get(match['source_id']) != match['url'] or current.get(match['destination_id']) != match['url']:
+                    result['partial'].append({**match, 'reason': 'source_or_destination_changed'})
+                    result['preserved'].append(match['source_id'])
+                    continue
+                close_attempted.add(match['source_id'])
+                _close_tab(match['source_id'], connection)
+                remaining = {tab['id'] for tab in _tabs(connection)}
+                if match['source_id'] not in remaining:
+                    result['closed'].append(match['source_id'])
+                else:
+                    result['partial'].append({**match, 'reason': 'source_still_open'})
+                    result['preserved'].append(match['source_id'])
+            except ChromeControlUnavailable as exc:
+                result['uncertain'].append({**match, 'reason': str(exc)})
+                break
+            except ValueError as exc:
+                result['uncertain'].append({**match, 'reason': str(exc)})
+                break
+    elif action == 'copy':
+        result['preserved'] = [item['id'] for item in selected]
+    if action == 'move':
+        result['preserved'] = list(dict.fromkeys([*result['preserved'],
+            *(item['id'] for item in selected if item['id'] not in result['closed']
+              and item['id'] not in close_attempted)]))
+    if result['uncertain']:
+        result['status'] = 'uncertain'
+    elif result['partial']:
+        result['status'] = 'partial'
     return result
 
 
@@ -324,6 +513,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog='ai-workbench chrome')
     parser.add_argument('--workspace', default=DEFAULT_WORKSPACE)
     parser.add_argument('--config', type=Path)
+    parser.add_argument('--profile', type=Path, default=os.environ.get('WB_CHROME_PROFILE'),
+                        help='Expected user-data directory of the connected Chrome browser')
     sub = parser.add_subparsers(dest='command')
     sub.add_parser('list')
     add = sub.add_parser('add'); add.add_argument('values', nargs='+'); add.add_argument('--match', choices=('origin', 'url'), default='origin')
@@ -334,8 +525,9 @@ def main(argv=None) -> int:
     organize_parser = sub.add_parser('organize', help='Preview or explicitly organize matching live tabs into a workspace window')
     organize_parser.add_argument('--port', type=int, default=int(os.environ.get('WB_CHROME_CDP_PORT', '9222')))
     organize_parser.add_argument('--apply', action='store_true', help='Open the selected tabs in a new workspace window')
+    organize_parser.add_argument('--expect', help='Target-set token returned by organize preview; required with --apply')
     organize_parser.add_argument('--action', choices=('copy', 'move'), default='copy',
-                                help='copy preserves originals; move closes only selected originals after opening the window')
+                                help='copy preserves originals; move closes a source only after its destination is verified')
     args = parser.parse_args(argv)
     if args.command in {None, 'list'}:
         if args.command is None:
@@ -355,9 +547,16 @@ def main(argv=None) -> int:
     elif args.command == 'update':
         print(json.dumps(update_entry(args.name, args.url, args.new_name, args.workspace, args.match, args.config), indent=2))
     elif args.command == 'refresh':
-        print(json.dumps(refresh(args.workspace, args.port, args.config), indent=2))
+        result = refresh(args.workspace, args.port, args.config, args.profile)
+        print(json.dumps(result, indent=2))
+        return 0 if result['status'] == 'verified' else 2
     elif args.command == 'control-status':
-        print(json.dumps(control_status(args.port), indent=2))
+        result = control_status(args.port, args.profile)
+        print(json.dumps(result, indent=2))
+        return 0 if result['status'] == 'connected' else 2
     elif args.command == 'organize':
-        print(json.dumps(organize(args.workspace, args.port, args.config, args.apply, args.action), indent=2))
+        result = organize(args.workspace, args.port, args.config, args.apply, args.action,
+                          args.profile, args.expect)
+        print(json.dumps(result, indent=2))
+        return 0 if result['status'] in {'preview', 'verified'} else 2
     return 0
