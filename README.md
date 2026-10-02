@@ -94,6 +94,12 @@ in a shell script. Use `bin/chrome` or `bin/ai-workbench chrome`; see the
 [Chrome workspace guide](docs/browser-workspaces.md) for CRUD, launch, and
 optional non-destructive refresh behavior.
 
+### Favorite desktop applications
+
+The opt-in [manual favorite application restore](docs/favorite-apps.md) previews
+exact private desktop-entry identities before a local apply. It is separate
+from Chrome tab organization and Workbench provider-session restoration.
+
 ### Report suggestions
 
 Optional [automatic Ollama suggestions](docs/report-suggestions.md) add saved,
