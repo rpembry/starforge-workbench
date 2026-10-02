@@ -108,6 +108,58 @@ def test_connection_identity_rejects_wrong_listener_profile(tmp_path, monkeypatc
         browser._connection(9222, profile)
 
 
+def test_listener_owner_accepts_single_space_separated_cmdline(tmp_path, monkeypatch):
+    profile = tmp_path / 'profile'
+    profile.mkdir()
+    proc = tmp_path / 'proc'
+    fd = proc / '123' / 'fd'
+    fd.mkdir(parents=True)
+    (fd / '8').symlink_to('socket:[42]')
+    command = (f'/opt/google/chrome/chrome --no-first-run '
+               f'--remote-debugging-address=127.0.0.1 --remote-debugging-port=33619 '
+               f'--user-data-dir={profile} http://127.0.0.1:12345/source ')
+    (proc / '123' / 'cmdline').write_bytes(command.encode())
+    monkeypatch.setattr(browser, '_listener_inodes', lambda port: {'42'})
+    assert browser._owner_profile(33619, proc) == profile
+    (proc / '123' / 'cmdline').write_bytes(b'\0'.join(part.encode() for part in [
+        '/opt/google/chrome/chrome', '--remote-debugging-port=33619', f'--user-data-dir={profile}']) + b'\0')
+    assert browser._owner_profile(33619, proc) == profile
+
+
+def test_listener_owner_rejects_wrong_or_ambiguous_single_field_identity(tmp_path, monkeypatch):
+    profile = tmp_path / 'profile'
+    profile.mkdir()
+    proc = tmp_path / 'proc'
+    fd = proc / '123' / 'fd'
+    fd.mkdir(parents=True)
+    (fd / '8').symlink_to('socket:[42]')
+    cmdline = proc / '123' / 'cmdline'
+    monkeypatch.setattr(browser, '_listener_inodes', lambda port: {'42'})
+    valid = f'/opt/google/chrome/chrome --remote-debugging-port=33619 --user-data-dir={profile} '
+    for command in (
+        valid.replace('/chrome/chrome ', '/chrome/not-chrome '),
+        valid.replace('port=33619', 'port=33620'),
+        valid.replace(f'--user-data-dir={profile}', ''),
+        valid + f'--user-data-dir={profile}',
+        valid + '--remote-debugging-port=33620',
+        valid.replace(f'--user-data-dir={profile}', '--user-data-dir=relative-profile'),
+        valid + '"unterminated',
+    ):
+        cmdline.write_bytes(command.encode())
+        with pytest.raises(browser.ChromeControlUnavailable, match='Cannot verify'):
+            browser._owner_profile(33619, proc)
+    cmdline.write_bytes(valid.encode())
+    second_fd = proc / '456' / 'fd'
+    second_fd.mkdir(parents=True)
+    (second_fd / '9').symlink_to('socket:[42]')
+    (proc / '456' / 'cmdline').write_bytes(valid.encode())
+    with pytest.raises(browser.ChromeControlUnavailable, match='Cannot verify'):
+        browser._owner_profile(33619, proc)
+    monkeypatch.setattr(browser, '_listener_inodes', lambda port: set())
+    with pytest.raises(browser.ChromeControlUnavailable, match='No unique'):
+        browser._owner_profile(33619, proc)
+
+
 def test_launch_targets_the_verified_profile(tmp_path, monkeypatch):
     connection = browser.BrowserConnection(9222, 'ws://127.0.0.1:9222/devtools/browser/test', tmp_path)
     monkeypatch.setattr(browser, '_connection', lambda port, profile: connection)

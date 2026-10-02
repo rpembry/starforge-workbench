@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -232,14 +233,51 @@ def _listener_inodes(port: int) -> set[str]:
     return sockets
 
 
-def _owner_profile(port: int) -> Path:
+def _chrome_cmdline(raw: bytes) -> list[str]:
+    fields = [part.decode(errors='replace') for part in raw.split(b'\0') if part]
+    if len(fields) != 1:
+        return fields
+    # Some Chrome builds expose a rewritten, space-separated process title as one field.
+    try:
+        return shlex.split(fields[0])
+    except ValueError:
+        return []
+
+
+def _profile_from_cmdline(args: list[str], port: int) -> Path | None:
+    if not args or Path(args[0]).name not in CHROME_NAMES:
+        return None
+    port_flags = [arg for arg in args[1:] if arg.startswith('--remote-debugging-port')]
+    if port_flags != [f'--remote-debugging-port={port}']:
+        return None
+    profile_flags = [index for index, arg in enumerate(args[1:], start=1)
+                     if arg.startswith('--user-data-dir')]
+    if len(profile_flags) != 1:
+        return None
+    index = profile_flags[0]
+    arg = args[index]
+    if arg == '--user-data-dir':
+        if index + 1 >= len(args):
+            return None
+        value = args[index + 1]
+    elif arg.startswith('--user-data-dir='):
+        value = arg.partition('=')[2]
+    else:
+        return None
+    profile = Path(value).expanduser()
+    if not profile.is_absolute():
+        return None
+    return profile.resolve(strict=True)
+
+
+def _owner_profile(port: int, proc: Path = Path('/proc')) -> Path:
     sockets = _listener_inodes(port)
-    if not sockets:
-        raise ChromeControlUnavailable('No verifiable Chrome DevTools listener owns this port')
-    profiles = set()
+    if len(sockets) != 1:
+        raise ChromeControlUnavailable('No unique verifiable Chrome DevTools listener owns this port')
+    owners: list[Path | None] = []
     socket_refs = {f'socket:[{inode}]' for inode in sockets}
     try:
-        processes = list(Path('/proc').iterdir())
+        processes = list(proc.iterdir())
     except OSError as exc:
         raise ChromeControlUnavailable('Cannot inspect the DevTools listener process') from exc
     for process in processes:
@@ -256,22 +294,14 @@ def _owner_profile(port: int) -> Path:
                     continue
             if not owns_listener:
                 continue
-            args = [part.decode(errors='replace') for part in (process / 'cmdline').read_bytes().split(b'\0') if part]
-            if not args or Path(args[0]).name not in CHROME_NAMES:
-                continue
-            port_flag = f'--remote-debugging-port={port}'
-            if port_flag not in args:
-                continue
-            for index, arg in enumerate(args):
-                if arg.startswith('--user-data-dir='):
-                    profiles.add(Path(arg.partition('=')[2]).expanduser().resolve(strict=True))
-                elif arg == '--user-data-dir' and index + 1 < len(args):
-                    profiles.add(Path(args[index + 1]).expanduser().resolve(strict=True))
+            owners.append(_profile_from_cmdline(_chrome_cmdline((process / 'cmdline').read_bytes()), port))
         except (OSError, ValueError):
+            if owns_listener:
+                owners.append(None)
             continue
-    if len(profiles) != 1:
+    if len(owners) != 1 or owners[0] is None:
         raise ChromeControlUnavailable('Cannot verify the connected Chrome profile from its listener process')
-    return profiles.pop()
+    return owners[0]
 
 
 def _connection(port: int, expected_profile: Path | str | None) -> BrowserConnection:
