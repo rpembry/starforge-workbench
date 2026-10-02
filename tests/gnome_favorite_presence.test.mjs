@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
     calculateSnapshot,
+    desktopAppId,
     normalizeAllowlist,
 } from '../extensions/favorite-presence@rpembry.github.io/presence-core.js';
 
@@ -22,6 +23,40 @@ function observation(overrides = {}) {
         ...overrides,
     };
 }
+
+function shellApp(id, {windowBacked = false, desktopId = id} = {}) {
+    return {
+        get_id: () => id,
+        is_window_backed: () => windowBacked,
+        get_app_info: () => desktopId === null ? null : {get_id: () => desktopId},
+    };
+}
+
+test('only verified desktop-backed Shell apps count as mapped windows', () => {
+    const native = shellApp('org.example.Editor.desktop');
+    const synthetic = shellApp('window:0x1234', {windowBacked: true, desktopId: null});
+    assert.equal(desktopAppId(native), 'org.example.Editor.desktop');
+    assert.equal(desktopAppId(synthetic), null);
+    assert.equal(desktopAppId(shellApp('window:0x5678', {desktopId: null})), null);
+    assert.equal(desktopAppId(shellApp('org.example.Editor.desktop', {
+        desktopId: 'org.example.Other.desktop',
+    })), null);
+    assert.equal(desktopAppId(null), null);
+
+    const mappedIds = [synthetic, native].map(desktopAppId).filter(Boolean);
+    const incomplete = observation({
+        windowAppIds: mappedIds,
+        unmappedWindowCount: 1,
+    });
+    assert.deepEqual(calculateSnapshot(rows, incomplete)[0],
+        ['editor', 'present', 'shell-app-association', 1]);
+    assert.deepEqual(calculateSnapshot(rows, observation({
+        windowAppIds: [],
+        unmappedWindowCount: 1,
+    }))[0], ['editor', 'unknown', 'none', 0]);
+    assert.deepEqual(calculateSnapshot(rows, observation())[0],
+        ['editor', 'absent', 'window-inventory', 0]);
+});
 
 test('only exact native Shell app identity establishes window presence', () => {
     const result = calculateSnapshot(rows, observation({

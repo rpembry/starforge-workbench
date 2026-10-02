@@ -21,6 +21,17 @@ export function unknownSnapshot(rows) {
     return rows.map(row => [row.key, 'unknown', 'none', 0]);
 }
 
+export function desktopAppId(app) {
+    if (!app || app.is_window_backed())
+        return null;
+    const appInfo = app.get_app_info();
+    const id = app.get_id();
+    if (!appInfo || typeof id !== 'string' || !DESKTOP_ID.test(id) ||
+        appInfo.get_id() !== id)
+        return null;
+    return id;
+}
+
 export function calculateSnapshot(rows, observation) {
     if (!observation?.active || !(observation.knownAppIds instanceof Set) ||
         !Array.isArray(observation.windowAppIds) ||

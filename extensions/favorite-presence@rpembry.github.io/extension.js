@@ -5,7 +5,7 @@ import Shell from 'gi://Shell';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
-import {calculateSnapshot, normalizeAllowlist, unknownSnapshot} from './presence-core.js';
+import {calculateSnapshot, desktopAppId, normalizeAllowlist, unknownSnapshot} from './presence-core.js';
 
 const BUS_NAME = 'org.starforge.Workbench.FavoritePresence';
 const OBJECT_PATH = '/org/starforge/Workbench/FavoritePresence';
@@ -43,14 +43,15 @@ class PresenceService {
             const windowAppIds = [];
             let unmappedWindowCount = 0;
             for (const window of windows) {
-                const app = tracker.get_window_app(window);
-                if (app)
-                    windowAppIds.push(app.get_id());
+                const appId = desktopAppId(tracker.get_window_app(window));
+                if (appId)
+                    windowAppIds.push(appId);
                 else
                     unmappedWindowCount++;
             }
             const knownAppIds = new Set(rows
-                .filter(row => row.kind === 'native' && Boolean(appSystem.lookup_app(row.appId)))
+                .filter(row => row.kind === 'native' &&
+                    desktopAppId(appSystem.lookup_app(row.appId)) === row.appId)
                 .map(row => row.appId));
             const startupPending = tracker.get_startup_sequences().length > 0;
             return [observed, calculateSnapshot(rows, {
@@ -75,6 +76,7 @@ export default class FavoritePresenceExtension extends Extension {
             Gio.BusType.SESSION,
             BUS_NAME,
             Gio.BusNameOwnerFlags.NONE,
+            null,
             connection => {
                 if (!this._service)
                     return;
@@ -82,7 +84,6 @@ export default class FavoritePresenceExtension extends Extension {
                 this._exported = Gio.DBusExportedObject.wrapJSObject(INTERFACE_XML, this._service);
                 this._exported.export(connection, OBJECT_PATH);
             },
-            null,
             () => {
                 this._exported?.unexport();
                 this._exported = null;

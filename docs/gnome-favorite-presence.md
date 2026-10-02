@@ -31,7 +31,9 @@ with Shell app IDs. An exact mapping can report `present` with confidence
 `shell-app-association` and a count. Zero matching windows can report `absent`
 with confidence `window-inventory` only when the exact desktop ID is installed,
 the window inventory has no unmapped entries, and no startup sequence is
-pending. This says nothing about a process that has not opened a window and is
+pending. A synthetic window-backed Shell app, or an app without matching
+desktop-file information, counts as unmapped and makes zero matches `unknown`.
+This says nothing about a process that has not opened a window and is
 **not** sufficient to launch without duplicate risk. GNOME's mapping is
 heuristic. Browser and PWA entries always return `unknown`: Shell app IDs do
 not prove a selected Chrome/Edge profile or PWA identity, particularly when
@@ -40,8 +42,10 @@ multiple profiles share a browser executable.
 The interface is available only while the extension is enabled in the normal
 unlocked user session. GNOME disables user-mode extensions on lock; the method
 also checks session mode and lock state and returns `unknown` during a
-transition. A missing bus name, disabled extension, call error, invalid
-identity, or cached result older than two seconds must be interpreted by any
+transition. The object is exported only after the extension acquires its bus
+name; name loss unexports it, and reacquisition exports it again. A missing bus
+name, disabled extension, call error, invalid identity, or cached result older
+than two seconds must be interpreted by any
 future consumer as `unknown`. The timestamp is monotonic and meaningful only
 within the same boot. A client must verify that the D-Bus owner is the actual
 GNOME Shell process before trusting even `present`; a same-user process can

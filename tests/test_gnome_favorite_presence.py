@@ -34,7 +34,9 @@ def test_mocked_presence_logic():
     node = shutil.which('node')
     if not node:
         pytest.skip('Node.js is needed for the mocked GNOME presence test')
-    subprocess.run([node, '--test', str(ROOT / 'tests/gnome_favorite_presence.test.mjs')],
+    subprocess.run([node, '--test',
+                    str(ROOT / 'tests/gnome_favorite_presence.test.mjs'),
+                    str(ROOT / 'tests/gnome_favorite_presence_extension.test.mjs')],
                    check=True, capture_output=True, text=True)
 
 
