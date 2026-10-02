@@ -90,7 +90,7 @@ def test_present_is_preserved_and_delayed_launch_stays_uncertain(setup):
     desktop.states['Notes'] = 'present'
     ready = restore.apply(['Notes'], restore.preview(['Notes'])['token'])
     assert ready['items'][0]['result'] == 'already_present'
-    assert json.loads(restore.state_path.read_text()) == {}
+    assert restore._state() == {}
 
 
 def test_ready_and_partial_failure_are_reported_per_target(setup):
@@ -201,6 +201,56 @@ def test_renaming_favorite_cannot_bypass_pending_launch(setup):
     assert desktop.launches == ['editor.desktop']
 
 
+def test_receipt_survives_same_boot_but_reboot_allows_explicit_retry(setup):
+    restore, desktop, _, _, _ = setup
+    boot = ['00000000-0000-0000-0000-000000000001']
+    restore.generation = lambda: boot[0]
+    first = restore.preview(['Editor'])
+    assert restore.apply(['Editor'], first['token'])['items'][0]['result'] == 'uncertain'
+    assert restore.preview(['Editor'])['items'][0]['action'] == 'skip'
+    assert restore.apply(['Editor'], first['token'])['items'][0]['result'] == 'uncertain'
+    assert desktop.launches == ['editor.desktop']
+    boot[0] = '00000000-0000-0000-0000-000000000002'
+    with pytest.raises(ValueError, match='preview again'):
+        restore.apply(['Editor'], first['token'])
+    fresh = restore.preview(['Editor'])
+    assert fresh['items'][0]['action'] == 'launch'
+    assert 'different verified boot' in fresh['items'][0]['evidence']
+    assert restore.apply(['Editor'], fresh['token'])['items'][0]['launch_requested'] is True
+    assert desktop.launches == ['editor.desktop', 'editor.desktop']
+    assert restore._state()['editor.desktop']['boot_id'] == boot[0]
+
+
+def test_failed_launch_requires_reboot_or_verified_delayed_success(setup):
+    restore, desktop, _, _, _ = setup
+    boot = ['00000000-0000-0000-0000-000000000001']
+    restore.generation = lambda: boot[0]
+    desktop.launch_result['notes.desktop'] = False
+    first = restore.preview(['Notes'])
+    assert restore.apply(['Notes'], first['token'])['items'][0]['launcher_accepted'] is False
+    assert restore.preview(['Notes'])['items'][0]['action'] == 'skip'
+    desktop.states['Notes'] = 'present'
+    assert restore.apply(['Notes'], first['token'])['items'][0]['result'] == 'already_present'
+    assert restore._state() == {}
+    desktop.states['Notes'] = 'absent'
+    boot[0] = '00000000-0000-0000-0000-000000000002'
+    retry = restore.preview(['Notes'])
+    assert retry['items'][0]['action'] == 'launch'
+    assert restore.apply(['Notes'], retry['token'])['items'][0]['launch_requested'] is True
+    assert desktop.launches == ['notes.desktop', 'notes.desktop']
+
+
+def test_legacy_receipt_fails_closed(setup):
+    restore, desktop, _, _, _ = setup
+    restore.state_path.write_text(json.dumps({'editor.desktop': 'a' * 64}))
+    restore.state_path.chmod(0o600)
+    with pytest.raises(ValueError, match='Unversioned'):
+        restore.preview(['Editor'])
+    with pytest.raises(ValueError, match='Unversioned'):
+        restore.apply(['Editor'], restore._identity(restore._selection(['Editor']))[1])
+    assert desktop.launches == []
+
+
 def test_pwa_entry_flags_and_private_config_required(setup):
     restore, _, config, applications, favorites = setup
     entry = applications / 'notes.desktop'
@@ -214,6 +264,23 @@ def test_pwa_entry_flags_and_private_config_required(setup):
     config.write_text(yaml.safe_dump({'version': 1, 'favorites': favorites}))
     with pytest.raises(ValueError, match='PWA requires'):
         load_config(config)
+
+
+@pytest.mark.parametrize('flags', [
+    '--profile-directory="Profile 2" --profile-directory="Profile 1" --app-id=synthetic-app-id',
+    '--profile-directory="Profile 1" --profile-directory="Profile 2" --app-id=synthetic-app-id',
+    '--profile-directory="Profile 2" --app-id=synthetic-app-id --app-id=other',
+    '--app-id=other --profile-directory="Profile 2" --app-id=synthetic-app-id',
+    '--profile-directory="Profile 2" --profile-directory "Profile 1" --app-id=synthetic-app-id',
+    '--profile-directory="Profile 2" --app-id=synthetic-app-id --app-id other',
+])
+def test_pwa_conflicting_or_split_entry_flags_never_resolve(setup, flags):
+    restore, desktop, _, applications, favorites = setup
+    entry = applications / 'notes.desktop'
+    entry.write_text('[Desktop Entry]\nType=Application\nExec=' + favorites[1]['executable'] + ' ' + flags +
+                     '\nStartupWMClass=synthetic-notes\n')
+    assert restore.preview(['Notes'])['items'][0]['action'] == 'refuse'
+    assert desktop.launches == []
 
 
 def test_duplicate_desktop_id_is_rejected(setup):
@@ -234,7 +301,7 @@ def test_x11_pwa_window_and_process_identity_fixture(setup, tmp_path, monkeypatc
     owner.mkdir()
     owner.joinpath('exe').symlink_to(entry['executable'])
     owner.joinpath('cmdline').write_bytes(b'synthetic-app\0--profile-directory=Profile 1\0--app-id=synthetic-app-id\0')
-    windows = '0x01  0  100  0  0  600  400  synthetic-notes  host  Synthetic Notes\n'
+    windows = '0x01  0  100  0  0  600  400  notes.synthetic-notes  host  Synthetic Notes\n'
     monkeypatch.setattr('starforge_workbench.favorite_apps.shutil.which', lambda _: '/usr/bin/synthetic-tool')
     monkeypatch.setattr('starforge_workbench.favorite_apps.subprocess.run',
                         lambda *args, **kwargs: SimpleNamespace(stdout=windows))
@@ -247,6 +314,42 @@ def test_x11_pwa_window_and_process_identity_fixture(setup, tmp_path, monkeypatc
     owner.joinpath('cmdline').write_bytes(b'synthetic-app\0--profile-directory=Profile 1\0--app-id=synthetic-app-id\0')
     assert desktop.observe(favorite, entry)[0] == 'absent'
     assert X11Desktop({'XDG_SESSION_TYPE': 'wayland', 'DISPLAY': ':99'}, proc).observe(favorite, entry)[0] == 'unavailable'
+
+
+def test_x11_class_tuple_native_and_pwa_owner_verification(setup, tmp_path, monkeypatch):
+    _, _, _, applications, favorites = setup
+    proc = tmp_path / 'proc'
+    owner = proc / '100'
+    owner.mkdir(parents=True)
+    entry = resolve_entry(favorites[0], [applications])
+    owner.joinpath('exe').symlink_to(entry['executable'])
+    owner.joinpath('cmdline').write_bytes(b'synthetic-app\0')
+    output = ['0x01 0 100 0 0 600 400 editor.synthetic-editor host Synthetic Editor\n']
+    monkeypatch.setattr('starforge_workbench.favorite_apps.shutil.which', lambda _: '/usr/bin/synthetic-tool')
+    monkeypatch.setattr('starforge_workbench.favorite_apps.subprocess.run',
+                        lambda *args, **kwargs: SimpleNamespace(stdout=output[0]))
+    desktop = X11Desktop({'XDG_SESSION_TYPE': 'x11', 'DISPLAY': ':99'}, proc)
+    assert desktop.observe(favorites[0], entry)[0] == 'present'
+    output[0] = '0x01 0 100 0 0 600 400 synthetic-editor.editor host Synthetic Editor\n'
+    assert desktop.observe(favorites[0], entry)[0] == 'uncertain'
+    output[0] = '0x01 0 100 0 0 600 400 editor.synthetic-editor.extra host Synthetic Editor\n'
+    assert desktop.observe(favorites[0], entry)[0] == 'uncertain'
+    output[0] = '0x01 0 100 0 0 600 400 editor.synthetic-editor host Synthetic Editor\n'
+    owner.joinpath('exe').unlink()
+    other = tmp_path / 'other-exe'
+    other.write_text('fixture')
+    owner.joinpath('exe').symlink_to(other)
+    assert desktop.observe(favorites[0], entry)[0] == 'uncertain'
+
+    pwa = favorites[1]
+    pwa_entry = resolve_entry(pwa, [applications])
+    owner.joinpath('exe').unlink()
+    owner.joinpath('exe').symlink_to(pwa_entry['executable'])
+    output[0] = '0x01 0 100 0 0 600 400 notes.synthetic-notes host Synthetic Notes\n'
+    owner.joinpath('cmdline').write_bytes(b'synthetic-app\0--profile-directory=Profile 2\0--app-id=synthetic-app-id\0')
+    assert desktop.observe(pwa, pwa_entry)[0] == 'present'
+    owner.joinpath('cmdline').write_bytes(b'synthetic-app\0--profile-directory=Profile 1\0--app-id=synthetic-app-id\0')
+    assert desktop.observe(pwa, pwa_entry)[0] == 'uncertain'
 
 
 def test_single_field_chrome_cmdline_cannot_prove_pwa_absence(setup, tmp_path, monkeypatch):

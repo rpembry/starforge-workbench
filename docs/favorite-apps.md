@@ -66,9 +66,15 @@ this slice does not focus their windows.
 
 An unresolved launch is recorded in private local state before invoking
 `gtk-launch`. Repeated or overlapping applies will not launch it again merely
-because its window has not appeared. If an app remains uncertain, inspect it
-manually before deciding on any separate recovery action; this CLI has no
-force-retry or pending-state reset command. Missing, ambiguous, changed, or
+because its window has not appeared. The receipt includes the verified kernel
+boot ID. A same-boot unresolved launch remains blocked, including after a
+failed launcher result; a verified ready window clears its receipt. After a
+reboot, a fresh preview and complete absent inventory permit an explicit new
+apply, because the old process cannot survive that boot change. A changed
+desktop-entry identity still refuses. Legacy receipts without a boot ID fail
+closed for operator review. If an app remains uncertain, inspect it manually
+before deciding on any separate recovery action; this CLI has no force-retry
+or pending-state reset command. Missing, ambiguous, changed, or
 unverifiable identities fail closed. A target that cannot be verified does not
 block a separate exact target in the same selection.
 
@@ -79,6 +85,9 @@ ownership can be difficult to prove on some builds; those targets remain
 uncertain rather than receiving a duplicate launch. Only synthetic fixtures
 have been exercised for this slice. This workstation's observed desktop
 session is Wayland, so no live application launch or focus smoke was run.
+The X11 adapter treats `wmctrl -x` output as an `instance.class` tuple and
+refuses malformed or ambiguous class output; names containing an unescaped
+dot cannot be safely separated by this adapter.
 
 For independent QA, use disposable desktop entries and executables in a
 separate X11 session. Record the exact build and desktop-entry identities,

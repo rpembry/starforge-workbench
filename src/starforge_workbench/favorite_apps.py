@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import time
+import uuid
 
 import yaml
 
@@ -20,6 +21,39 @@ import yaml
 CONFIG = Path.home() / '.config/starforge-ai-workbench/favorite-apps.yaml'
 DESKTOP_ID = re.compile(r'[A-Za-z0-9_.-]+\.desktop\Z')
 KINDS = {'native', 'pwa', 'terminal', 'workbench'}
+
+
+def _valid_boot_id(value: str) -> bool:
+    try:
+        return str(uuid.UUID(value)) == value
+    except (ValueError, AttributeError):
+        return False
+
+
+def _boot_generation() -> str:
+    """A kernel boot identity makes an old launch receipt safely expire after reboot."""
+    try:
+        value = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        return str(uuid.UUID(value))
+    except (OSError, ValueError):
+        raise ValueError('Cannot verify current boot identity') from None
+
+
+def _exact_pwa_flags(args: list[str], favorite: dict) -> bool:
+    profiles = [arg for arg in args if arg == '--profile-directory' or arg.startswith('--profile-directory=')]
+    apps = [arg for arg in args if arg == '--app-id' or arg.startswith('--app-id=')]
+    return (profiles == ['--profile-directory=' + favorite['profile']] and
+            apps == ['--app-id=' + favorite['app_id']])
+
+
+def _wm_class_tuple(value: str) -> tuple[str, str] | None:
+    """wmctrl joins the WM_CLASS instance and class with one unescaped dot."""
+    if value.count('.') != 1:
+        return None
+    instance, class_name = value.split('.')
+    if not instance or not class_name or any(c.isspace() for c in value):
+        return None
+    return instance, class_name
 
 
 def _pwa_cmdline_identity(raw: bytes, favorite: dict) -> bool | None:
@@ -130,7 +164,7 @@ def resolve_entry(favorite: dict, directories: list[Path]) -> dict:
                 Path(executable).resolve() != Path(favorite['executable']).resolve()):
             raise ValueError('Desktop executable identity changed')
         if favorite['kind'] == 'pwa':
-            if argv.count('--profile-directory=' + favorite['profile']) != 1 or argv.count('--app-id=' + favorite['app_id']) != 1:
+            if not _exact_pwa_flags(argv, favorite):
                 raise ValueError('PWA profile or application identity changed')
         return {'desktop_id': favorite['desktop_id'], 'path': str(path), 'digest': hashlib.sha256(raw).hexdigest(),
                 'executable': str(Path(executable).resolve())}
@@ -153,9 +187,12 @@ class X11Desktop:
             candidates = []
             for line in windows.splitlines():
                 parts = line.split(maxsplit=8)
-                if len(parts) < 8:
+                if len(parts) < 9:
                     return 'uncertain', 'Window inventory is malformed'
-                if parts[7] == favorite['wm_class']:
+                wm_identity = _wm_class_tuple(parts[7])
+                if wm_identity is None:
+                    return 'uncertain', 'Window class tuple is malformed or ambiguous'
+                if wm_identity[1] == favorite['wm_class']:
                     candidates.append(parts)
             for parts in candidates:
                 pid = int(parts[2])
@@ -198,11 +235,13 @@ class X11Desktop:
 
 
 class FavoriteRestore:
-    def __init__(self, config: Path = CONFIG, directories=None, desktop=None, sleeper=time.sleep):
+    def __init__(self, config: Path = CONFIG, directories=None, desktop=None, sleeper=time.sleep,
+                 generation=_boot_generation):
         self.config = Path(config)
         self.directories = desktop_dirs() if directories is None else list(directories)
         self.desktop = X11Desktop() if desktop is None else desktop
         self.sleeper = sleeper
+        self.generation = generation
         self.state_path = self.config.with_name('favorite-app-restore-state.json')
         self.lock_path = self.config.with_name('favorite-app-restore.lock')
 
@@ -216,16 +255,22 @@ class FavoriteRestore:
             state = json.loads(self.state_path.read_text())
         except (OSError, UnicodeError, ValueError):
             raise ValueError('Cannot read private restore state') from None
-        if not isinstance(state, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in state.items()):
-            raise ValueError('Invalid private restore state')
-        return state
+        if (not isinstance(state, dict) or set(state) != {'version', 'pending'} or state['version'] != 1 or
+                not isinstance(state['pending'], dict) or
+                any(not isinstance(k, str) or not isinstance(v, dict) or
+                    set(v) != {'digest', 'boot_id'} or
+                    not isinstance(v['digest'], str) or not re.fullmatch(r'[0-9a-f]{64}', v['digest']) or
+                    not isinstance(v['boot_id'], str) or not _valid_boot_id(v['boot_id'])
+                    for k, v in state['pending'].items())):
+            raise ValueError('Unversioned or invalid private restore receipts require operator review')
+        return state['pending']
 
     def _save_state(self, state: dict):
         temporary = self.state_path.with_name('.favorite-app-restore-' + str(os.getpid()))
         fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
         try:
             with os.fdopen(fd, 'w') as stream:
-                json.dump(state, stream)
+                json.dump({'version': 1, 'pending': state}, stream)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.state_path)
@@ -256,13 +301,17 @@ class FavoriteRestore:
                 rows.append((favorite, entry, None))
             except ValueError as exc:
                 rows.append((favorite, None, str(exc)))
-        token_data = [(favorite, (entry['path'], entry['digest']) if entry else error)
-                      for favorite, entry, error in rows]
+        boot_id = self.generation()
+        if not _valid_boot_id(boot_id):
+            raise ValueError('Cannot verify current boot identity')
+        token_data = {'boot_id': boot_id, 'selection': [
+            (favorite, (entry['path'], entry['digest']) if entry else error)
+            for favorite, entry, error in rows]}
         token = hashlib.sha256(json.dumps(token_data, sort_keys=True).encode()).hexdigest()
-        return rows, token
+        return rows, token, boot_id
 
     def preview(self, names: list[str]) -> dict:
-        rows, token = self._identity(self._selection(names))
+        rows, token, boot_id = self._identity(self._selection(names))
         pending = self._state()
         items = []
         for favorite, entry, error in rows:
@@ -274,12 +323,14 @@ class FavoriteRestore:
                 identity = entry['digest']
                 if status == 'present':
                     action = 'preserve'
-                elif pending_key in pending and pending[pending_key] != identity:
+                elif pending_key in pending and pending[pending_key]['digest'] != identity:
                     action, evidence = 'refuse', 'Prior launch identity changed; resolve it before retry'
-                elif pending.get(pending_key) == identity:
+                elif pending_key in pending and pending[pending_key]['boot_id'] == boot_id:
                     action, evidence = 'skip', 'Prior launch is unresolved; ' + evidence
                 elif status == 'absent':
                     action = 'launch'
+                    if pending_key in pending:
+                        evidence = 'Prior receipt belongs to a different verified boot; ' + evidence
                 else:
                     action = 'refuse'
             items.append({'name': favorite['name'], 'kind': favorite['kind'],
@@ -295,7 +346,7 @@ class FavoriteRestore:
             if os.fstat(fd).st_uid != os.getuid() or os.fstat(fd).st_mode & 0o077:
                 raise ValueError('Unsafe favorites restore lock')
             fcntl.flock(fd, fcntl.LOCK_EX)
-            rows, current_token = self._identity(self._selection(names))
+            rows, current_token, boot_id = self._identity(self._selection(names))
             if token != current_token:
                 raise ValueError('Selection or desktop identity changed; preview again')
             pending = self._state()
@@ -317,14 +368,14 @@ class FavoriteRestore:
                         pending.pop(pending_key, None)
                         self._save_state(pending)
                         result = 'already_present'
-                    elif pending_key in pending and pending[pending_key] != entry['digest']:
+                    elif pending_key in pending and pending[pending_key]['digest'] != entry['digest']:
                         result, evidence = 'refused', 'Prior launch identity changed; resolve it before retry'
-                    elif pending.get(pending_key) == entry['digest']:
+                    elif pending_key in pending and pending[pending_key]['boot_id'] == boot_id:
                         result, evidence = 'uncertain', 'Prior launch remains unresolved; ' + evidence
                     elif status != 'absent':
                         result = 'refused'
                     else:
-                        pending[pending_key] = entry['digest']
+                        pending[pending_key] = {'digest': entry['digest'], 'boot_id': boot_id}
                         self._save_state(pending)
                         launch_requested = True
                         requested = self.desktop.launch(entry['desktop_id'])
