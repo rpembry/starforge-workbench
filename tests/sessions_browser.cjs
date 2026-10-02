@@ -182,5 +182,73 @@ const {chromium} = require(process.env.WB_PLAYWRIGHT_MODULE);
     assert.equal(await page.getByRole('button', {name: 'Retry same attempt'}).isVisible(), false);
     assert.equal(await page.getByRole('button', {name: 'Start new attempt'}).isVisible(), false);
     await page.unroute('**/api/instructions', conflict);
+
+    for (const [entered, normalized, loseResponse] of [
+      ['  \tUnicode ✓ café\n', 'Unicode ✓ café', false],
+      ['\nQA whitespace\n', 'QA whitespace', true]]) {
+      const whitespacePage = await browser.newPage({viewport: {width: 360, height: 740},
+        extraHTTPHeaders: {Authorization: 'Bearer ' + 'o'.repeat(40)}});
+      await whitespacePage.goto(process.env.WB_TEST_URL + '/sessions/registered_session_0001');
+      await whitespacePage.locator('#session-poll-state').filter({hasText: 'Server status checked now'}).waitFor();
+      await whitespacePage.getByLabel('Instruction text').fill(entered);
+      await whitespacePage.getByLabel(/Confirm this exact session/).check();
+      const key = await whitespacePage.locator('input[name="idempotency_key"]').inputValue();
+      let posts = 0;
+      if (loseResponse) await whitespacePage.route('**/api/instructions', async route => {
+        posts++;
+        await route.fetch();
+        await route.abort('failed');
+      });
+      await whitespacePage.getByRole('button', {name: 'Queue instruction'}).click();
+      await whitespacePage.getByRole('status').filter({hasText: loseResponse
+        ? 'Instruction recorded as queued' : 'Instruction queued for this exact session'}).waitFor();
+      const record = await (await whitespacePage.request.get(process.env.WB_TEST_URL +
+        '/api/instructions/by-key/' + key)).json();
+      assert.equal(record.text, normalized);
+      assert.equal(record.idempotency_key, key);
+      assert.equal(await whitespacePage.getByRole('button', {name: 'Retry same attempt'}).isVisible(), false);
+      if (loseResponse) assert.equal(posts, 1);
+      await whitespacePage.close();
+    }
+
+    const blocked = await browser.newPage({viewport: {width: 360, height: 740},
+      extraHTTPHeaders: {Authorization: 'Bearer ' + 'o'.repeat(40)}});
+    await blocked.goto(process.env.WB_TEST_URL + '/sessions/registered_session_0001');
+    await blocked.locator('#session-poll-state').filter({hasText: 'Server status checked now'}).waitFor();
+    await blocked.evaluate(() => {
+      sessionStorage.clear();
+      Storage.prototype.setItem = function () { throw new DOMException('quota', 'QuotaExceededError'); };
+    });
+    await blocked.getByLabel('Instruction text').fill('Synthetic draft while storage is blocked');
+    await blocked.getByLabel(/Confirm this exact session/).check();
+    assert.equal(await blocked.getByRole('button', {name: 'Queue instruction'}).isDisabled(), true);
+    let blockedPosts = 0;
+    await blocked.route('**/api/instructions', route => { blockedPosts++; return route.abort('failed'); });
+    await blocked.locator('[data-instruction-form]').evaluate(form => form.dispatchEvent(
+      new Event('submit', {bubbles: true, cancelable: true})));
+    await blocked.getByRole('status').filter({hasText: 'Tab storage is unavailable. No instruction was sent'}).waitFor();
+    assert.equal(blockedPosts, 0);
+    assert.equal(await blocked.getByLabel('Instruction text').inputValue(), 'Synthetic draft while storage is blocked');
+    await blocked.goto(process.env.WB_TEST_URL + '/sessions');
+    await blocked.goBack();
+    await blocked.waitForURL('**/sessions/registered_session_0001');
+    assert.equal(blockedPosts, 0);
+    await blocked.close();
+
+    const slow = await browser.newPage({viewport: {width: 360, height: 740},
+      extraHTTPHeaders: {Authorization: 'Bearer ' + 'o'.repeat(40)}});
+    const slowStatusUrl = process.env.WB_TEST_URL + '/ui/sessions/registered_session_0001/status';
+    const slowStatus = await (await slow.request.get(slowStatusUrl)).json();
+    let slowResponses = 0;
+    await slow.route(slowStatusUrl, async route => {
+      await new Promise(resolve => setTimeout(resolve, 12000));
+      slowResponses++;
+      await route.fulfill({json: slowStatus});
+    });
+    await slow.goto(process.env.WB_TEST_URL + '/sessions/registered_session_0001');
+    await slow.locator('#session-poll-state').filter({hasText: 'Server status checked now'}).waitFor({timeout: 18000});
+    assert.ok(slowResponses >= 1);
+    assert.equal(await slow.getByRole('button', {name: 'Queue instruction'}).isDisabled(), false);
+    await slow.close();
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

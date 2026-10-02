@@ -21,6 +21,7 @@
   let sending = false;
   let reconciling = false;
   let authExpired = false;
+  let storageAvailable = true;
 
   function announce(value) { message.textContent = value; }
   function count() { counter.textContent = String(Array.from(text.value).length); }
@@ -28,25 +29,39 @@
     return attempt && attempt.target === target && attempt.text === text.value &&
       attempt.expiry_minutes === Number(expiry.value);
   }
+  function matchingRecord(record) {
+    return record.idempotency_key === attempt.key && record.registered_session_id === attempt.target &&
+      Number(record.expiry_minutes) === attempt.expiry_minutes &&
+      (record.text === attempt.text || record.text === attempt.text.trim());
+  }
   function save() {
     try {
-      sessionStorage.setItem(storageKey, JSON.stringify({text: text.value, expiry: expiry.value,
+      const snapshot = JSON.stringify({text: text.value, expiry: expiry.value,
         confirmed: confirmation.checked, attempt, caretStart: text.selectionStart,
-        caretEnd: text.selectionEnd, focused: document.activeElement === text}));
-    } catch (_error) { /* The in-memory attempt still remains authoritative in this page. */ }
+        caretEnd: text.selectionEnd, focused: document.activeElement === text});
+      sessionStorage.setItem(storageKey, snapshot);
+      if (sessionStorage.getItem(storageKey) !== snapshot) throw new Error('tab storage did not retain attempt');
+      storageAvailable = true;
+      return true;
+    } catch (_error) {
+      storageAvailable = false;
+      return false;
+    }
   }
   function render() {
     const unknown = attempt && attempt.phase === 'unknown';
     sendButton.hidden = Boolean(attempt);
-    sendButton.disabled = !eligible || sending || Boolean(attempt);
+    sendButton.disabled = !eligible || sending || Boolean(attempt) || !storageAvailable;
     checkButton.hidden = !unknown;
     checkButton.disabled = reconciling || sending || authExpired;
     retryButton.hidden = !unknown || !attempt.reconciledMissing || attempt.conflictSeen;
-    retryButton.disabled = !eligible || sending || reconciling || !sameEnvelope() || !confirmation.checked;
+    retryButton.disabled = !eligible || sending || reconciling || !sameEnvelope() || !confirmation.checked || !storageAvailable;
     newButton.hidden = !attempt || unknown;
     newButton.disabled = sending || reconciling;
     count();
     save();
+    sendButton.disabled = sendButton.disabled || !storageAvailable;
+    retryButton.disabled = retryButton.disabled || !storageAvailable;
   }
   function restore() {
     try {
@@ -88,10 +103,10 @@
         announce('Attempt status is unavailable. Outcome remains unknown; no retry is offered until it can be checked.');
       } else {
         const record = await response.json();
-        if (record.idempotency_key !== attempt.key || record.registered_session_id !== attempt.target ||
-            record.text !== attempt.text || Number(record.expiry_minutes) !== attempt.expiry_minutes) {
-          attempt.phase = 'conflict';
-          announce('The key belongs to different instruction metadata. This attempt cannot be retried.');
+        if (!matchingRecord(record)) {
+          attempt.phase = 'unknown';
+          attempt.conflictSeen = true;
+          announce('The key belongs to different instruction metadata. Outcome remains unknown; do not start another attempt.');
         } else {
           attempt.phase = 'accepted';
           announce('Instruction recorded as ' + record.state + '. Provider receipt and requested-work completion are separate.');
@@ -107,9 +122,18 @@
   async function send() {
     if (sending || !eligible || !confirmation.checked || !form.checkValidity()) return;
     if (attempt && (!attempt.reconciledMissing || !sameEnvelope() || attempt.phase !== 'unknown')) return;
-    if (!attempt) {
+    const newAttempt = !attempt;
+    if (newAttempt) {
       attempt = {key: keyField.value, target, text: text.value, expiry_minutes: Number(expiry.value),
         phase: 'unknown', reconciledMissing: false};
+    }
+    if (!save()) {
+      if (newAttempt) attempt = null;
+      announce(newAttempt
+        ? 'Tab storage is unavailable. No instruction was sent. Keep this tab open and retry only after storage works.'
+        : 'Tab storage is unavailable. This retry was not sent; the prior outcome remains unknown. Keep this tab open.');
+      render();
+      return;
     }
     sending = true;
     announce('Submitting this exact instruction attempt…');
@@ -122,8 +146,7 @@
           text: attempt.text, expiry_minutes: attempt.expiry_minutes})});
       if (response.ok) {
         const record = await response.json();
-        if (record.idempotency_key !== attempt.key || record.registered_session_id !== attempt.target ||
-            record.text !== attempt.text || Number(record.expiry_minutes) !== attempt.expiry_minutes) {
+        if (!matchingRecord(record)) {
           announce('The response did not match this attempt. Outcome is unknown; checking the original key.');
           await reconcile();
         } else {

@@ -313,11 +313,12 @@ def test_sessions_android_viewport_browser(tmp_path):
                         env={**os.environ, 'WB_CHROME': chrome, 'WB_TEST_URL': f'http://127.0.0.1:{port}'}, timeout=60)
         selected = repo.list_instructions(session_id='registered_session_0001')
         other = repo.list_instructions(session_id='registered_session_0002')
-        assert len(selected) == 3
+        assert len(selected) == 5
         assert {item['text'] for item in selected} == {
             'Synthetic dictation with Unicode \u2713 and $HOME; no merge.',
-            'Accepted once, response lost', 'Retry only after checking original key'}
-        assert len({item['idempotency_key'] for item in selected}) == 3
+            'Accepted once, response lost', 'Retry only after checking original key',
+            'Unicode \u2713 café', 'QA whitespace'}
+        assert len({item['idempotency_key'] for item in selected}) == 5
         assert other == []
     finally:
         server.should_exit = True

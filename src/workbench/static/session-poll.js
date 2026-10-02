@@ -7,8 +7,10 @@
   if (!indicator || (!list && !detail)) return;
 
   let sequence = 0;
+  let lastApplied = 0;
   let timer = null;
   let active = true;
+  const requests = new Set();
 
   function announce(message) { indicator.textContent = message; }
   function publishStatus(value) {
@@ -94,27 +96,38 @@
   async function poll() {
     if (!active || document.hidden) return;
     const requestNumber = ++sequence;
+    const controller = new AbortController();
+    requests.add(controller);
+    const deadline = setTimeout(() => controller.abort(), 30000);
+    const current = () => active && requestNumber > lastApplied;
     const path = detail
       ? '/ui/sessions/' + encodeURIComponent(detail.dataset.sessionId) + '/status'
       : '/ui/sessions/status?limit=' + encodeURIComponent(list.dataset.limit) + '&offset=' + encodeURIComponent(list.dataset.offset);
     try {
-      const response = await fetch(path, {cache: 'no-store', credentials: 'same-origin', headers: {Accept: 'application/json'}});
-      if (!active || requestNumber !== sequence) return;
+      const response = await fetch(path, {cache: 'no-store', credentials: 'same-origin',
+        headers: {Accept: 'application/json'}, signal: controller.signal});
+      if (!current()) return;
       if (response.status === 401 || response.status === 403) {
+        lastApplied = requestNumber;
         announce('Authentication expired or access denied. Showing last known status; sign in again.');
         if (detail) publishStatus({available: false, authExpired: true});
         return;
       }
       if (!response.ok) throw new Error('status request failed');
       const payload = await response.json();
-      if (!active || requestNumber !== sequence) return;
+      if (!current()) return;
       const visibility = detail ? applyDetail(payload) : (applyList(payload), null);
+      lastApplied = requestNumber;
       announce('Server status checked now. ' + (visibility ? 'Collector visibility: ' + visibility + '.' :
         'Session observations may still be stale or offline.'));
     } catch (_error) {
-      if (!active || requestNumber !== sequence) return;
+      if (!current()) return;
+      lastApplied = requestNumber;
       announce('Status refresh unavailable. Showing last known status; send is paused until a fresh check succeeds.');
       if (detail) publishStatus({available: false, authExpired: false});
+    } finally {
+      clearTimeout(deadline);
+      requests.delete(controller);
     }
   }
   function start() {
@@ -125,7 +138,8 @@
   }
   window.addEventListener('pagehide', () => {
     active = false;
-    sequence++;
+    lastApplied = ++sequence;
+    for (const controller of requests) controller.abort();
     if (timer) clearInterval(timer);
     timer = null;
   });

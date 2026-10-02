@@ -32,7 +32,10 @@ retry after provider contact, and remote selection of provider origin or model.
 The Sessions form keeps its draft and exact send-attempt envelope in per-tab
 `sessionStorage` so Back/Forward navigation and a lost response do not silently
 generate a new idempotency key. This includes the typed instruction text until
-the tab's session data is cleared. The authenticated by-key read returns an
+the tab's session data is cleared. If the browser cannot save and read back the
+attempt before submission, the form blocks that send and retains the draft in
+the open page; navigating away can then lose an unsaved draft. The authenticated
+by-key read returns an
 instruction only to the same operator principal and is used to reconcile an
 uncertain browser POST before any explicit same-key retry. A 404 leaves the
 outcome unknown; retry still requires the unchanged target, text, expiry, and
