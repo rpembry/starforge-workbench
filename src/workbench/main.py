@@ -274,6 +274,12 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
         return {'items': repository.list_instructions(limit, offset, registered_session_id),
                 'limit': limit, 'offset': offset}
 
+    @app.get('/api/instructions/by-key/{key}')
+    def instruction_by_key(key: str, who=Depends(operator)):
+        if not re.fullmatch(r'[A-Za-z0-9._~-]{16,128}', key):
+            raise Problem(404, 'not_found', 'Instruction attempt does not exist')
+        return repository.get_instruction_by_key(key, who.name)
+
     @app.get('/api/instructions/{identity}')
     def instruction(identity: str, who=Depends(operator)):
         return repository.get_instruction(identity)
@@ -386,6 +392,11 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
 
     templates = Jinja2Templates(directory=str(Path(__file__).with_name('templates')))
 
+    def session_status(item):
+        return {key: item[key] for key in ('id', 'display_name', 'host', 'provider', 'status_label',
+                                           'reason_label', 'activity_label', 'heartbeat_label',
+                                           'visibility', 'send_allowed', 'send_explanation')}
+
     def session_page(identity, notice=None, error=None, retry_key=None):
         from .session_views import display_instruction, display_session
         item = display_session(repository.get_registered_session(identity), repository)
@@ -409,6 +420,18 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
         items = [display_session(row, repository) for row in rows[:limit]]
         return templates.TemplateResponse(request=request, name='sessions.html', context={
             'sessions': items, 'limit': limit, 'offset': offset, 'has_next': len(rows) > limit})
+
+    @app.get('/ui/sessions/status', dependencies=[Depends(operator)])
+    def sessions_status(limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0)):
+        from .session_views import display_session
+        rows = repository.list_registered_sessions(limit + 1, offset)
+        return {'items': [session_status(display_session(row, repository)) for row in rows[:limit]],
+                'has_next': len(rows) > limit, 'limit': limit, 'offset': offset}
+
+    @app.get('/ui/sessions/{identity}/status', dependencies=[Depends(operator)])
+    def selected_session_status(identity: str):
+        from .session_views import display_session
+        return session_status(display_session(repository.get_registered_session(identity), repository))
 
     @app.get('/sessions/{identity}', response_class=HTMLResponse, dependencies=[Depends(operator)])
     def session_view(request: Request, identity: str, notice: str | None = None,
@@ -489,6 +512,10 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     @app.get('/assets/session-form.js')
     def session_form_script():
         return FileResponse(Path(__file__).with_name('static')/'session-form.js', media_type='application/javascript')
+
+    @app.get('/assets/session-poll.js')
+    def session_poll_script():
+        return FileResponse(Path(__file__).with_name('static')/'session-poll.js', media_type='application/javascript')
 
     @app.get('/assets/htmx.min.js')
     def htmx():

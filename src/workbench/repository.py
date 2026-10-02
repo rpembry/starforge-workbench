@@ -437,6 +437,9 @@ class SQLiteRepository:
                     raise Problem(409, 'idempotency_conflict', 'Idempotency key already has different instruction metadata')
                 db.commit()
                 return self._instruction_public(existing)
+            if db.execute('SELECT 1 FROM instructions WHERE idempotency_key=?',
+                          (data['idempotency_key'],)).fetchone():
+                raise Problem(409, 'idempotency_conflict', 'Idempotency key is already in use')
             self._controllable_session(db, data['registered_session_id'])
             current = datetime.now(timezone.utc)
             stamp = current.isoformat()
@@ -486,6 +489,20 @@ class SQLiteRepository:
                 raise Problem(404, 'not_found', 'Instruction does not exist')
             history = [dict(item) for item in db.execute('''SELECT id,actor,registered_session_id,state,reason_code,occurred_at
                 FROM instruction_audit WHERE instruction_id=? ORDER BY occurred_at,id''', (identity,))]
+            db.commit()
+            return dict(self._instruction_public(row), history=history)
+
+    def get_instruction_by_key(self, key, principal):
+        """Resolve only this operator's exact send attempt after an ambiguous response."""
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._expire_instruction_leases(db, now())
+            row = db.execute('SELECT * FROM instructions WHERE operator_principal=? AND idempotency_key=?',
+                             (principal, key)).fetchone()
+            if not row:
+                raise Problem(404, 'not_found', 'Instruction attempt does not exist')
+            history = [dict(item) for item in db.execute('''SELECT id,actor,registered_session_id,state,reason_code,occurred_at
+                FROM instruction_audit WHERE instruction_id=? ORDER BY occurred_at,id''', (row['id'],))]
             db.commit()
             return dict(self._instruction_public(row), history=history)
 
