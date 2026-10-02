@@ -350,6 +350,16 @@ def test_x11_class_tuple_native_and_pwa_owner_verification(setup, tmp_path, monk
     assert desktop.observe(pwa, pwa_entry)[0] == 'present'
     owner.joinpath('cmdline').write_bytes(b'synthetic-app\0--profile-directory=Profile 1\0--app-id=synthetic-app-id\0')
     assert desktop.observe(pwa, pwa_entry)[0] == 'uncertain'
+    owner.joinpath('cmdline').write_bytes(b'synthetic-app\0--profile-directory=Profile 2\0--app-id=synthetic-app-id\0')
+    original_stat = Path.stat
+
+    def different_user(path, *args, **kwargs):
+        if path == owner:
+            return SimpleNamespace(st_uid=os.getuid() + 1)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'stat', different_user)
+    assert desktop.observe(pwa, pwa_entry)[0] == 'uncertain'
 
 
 def test_unrelated_malformed_window_does_not_hide_verified_target(setup, tmp_path, monkeypatch):

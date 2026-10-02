@@ -202,6 +202,9 @@ class X11Desktop:
                             unknown_ambiguity = True
                             continue
                         process = self.proc / str(pid)
+                        if process.stat().st_uid != os.getuid():
+                            unknown_ambiguity = True
+                            continue
                         if process.joinpath('exe').resolve(strict=True) != Path(entry['executable']):
                             continue
                         if favorite['kind'] == 'pwa' and _pwa_cmdline_identity(
@@ -219,6 +222,8 @@ class X11Desktop:
                 if pid <= 0:
                     return 'uncertain', 'Window has no verifiable owner'
                 process = self.proc / str(pid)
+                if process.stat().st_uid != os.getuid():
+                    return 'uncertain', 'Window process is not owned by this user'
                 if process.joinpath('exe').resolve(strict=True) != Path(entry['executable']):
                     return 'uncertain', 'Window class has a different process owner'
                 if favorite['kind'] == 'pwa':
