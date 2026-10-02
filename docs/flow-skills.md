@@ -12,6 +12,14 @@ not in an external project's source repository, tracker, or PR. A small request
 can be completed without creating a FLOW item. Publishing external-project
 metadata to a central Workbench is a separate deliberate choice.
 
+For multi-step capture or delegation, inspect relevant existing source issues
+and local FLOW items before adding tasks. Keep each deliverable with the issue
+that owns it; describe work owned by another issue as a prerequisite instead
+of duplicating its tasks under the selected issue. Local task dependencies use
+task IDs within one FLOW item. Cross-issue relationships need source issue
+identities and, when authorized, a separate source-tracker link. Unclear
+ownership should be surfaced before assignment.
+
 The deterministic `ai-workbench work packet ISSUE` command (or `flow_packet` MCP
 tool) prepares a bounded **read-only** resume packet. Add `--kind handoff --role
 ROLE` and selected `--expected-head NAME=SHA`, `--pr-link URL`, `--test TEXT`,
