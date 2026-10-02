@@ -84,6 +84,28 @@ def test_sessions_page_escapes_labels_and_omits_summary(api, repo):
     assert 'src="/assets/response-preview.js"' in detail.text
 
 
+def test_live_status_payload_is_bounded_and_keeps_evidence_distinct_from_request_failure(api, repo):
+    add_session(api)
+    listing = api.get('/ui/sessions/status?limit=1&offset=0')
+    detail = api.get('/ui/sessions/registered_session_0001/status')
+    assert listing.status_code == detail.status_code == 200
+    assert listing.json()['items'][0] == detail.json()
+    assert detail.json()['visibility'] == 'fresh'
+    assert detail.json()['send_allowed'] is True
+    assert 'summary' not in detail.json()
+    assert 'DO_NOT_RENDER_TRANSCRIPT' not in listing.text + detail.text
+    with repo.connection() as db:
+        db.execute('UPDATE collectors SET heartbeat_at=? WHERE source=?',
+                   ((datetime.now(timezone.utc) - timedelta(seconds=100)).isoformat(), 'synthetic-collector'))
+        db.commit()
+    offline = api.get('/ui/sessions/registered_session_0001/status').json()
+    assert offline['visibility'] == 'offline'
+    assert offline['send_allowed'] is False
+    api.headers.clear()
+    assert api.get('/ui/sessions/status').status_code == 401
+    assert api.get('/ui/sessions/registered_session_0001/status').status_code == 401
+
+
 def test_sessions_view_distinguishes_stale_offline_unknown_and_work(api, repo, monkeypatch):
     objective = api.post('/api/objectives', json={'title': 'Synthetic objective'}).json()
     action = api.post('/api/actions', json={'title': 'Synthetic action', 'objective_id': objective['id'],
@@ -167,7 +189,8 @@ def test_mobile_send_is_idempotent_origin_checked_and_text_safe(api):
 def test_mobile_send_requires_operator_confirmation_and_controllable_target(api, repo):
     add_session(api, evidence_state='unknown', reason='no_evidence')
     detail = api.get('/sessions/registered_session_0001').text
-    assert '<form' not in detail
+    assert 'data-send-allowed="false"' in detail
+    assert '<button type="submit" disabled>' in detail
     assert 'not currently a controllable OpenCode target' in detail
     path = '/ui/sessions/registered_session_0001/instructions'
     body = {'idempotency_key': 'synthetic-ui-key-0001', 'text': 'DO_NOT_ECHO_REJECTED_TEXT',
@@ -188,6 +211,35 @@ def test_mobile_send_requires_operator_confirmation_and_controllable_target(api,
     assert api.post(path, data=body, headers={'Origin': 'http://testserver'}).status_code == 403
     api.headers.clear()
     assert api.post(path, data=body, headers={'Origin': 'http://testserver'}).status_code == 401
+
+
+def test_same_key_lookup_reconciles_lost_response_and_rejects_conflicting_payload(api, repo):
+    add_session(api)
+    envelope = {'idempotency_key': 'synthetic-attempt-key-0001',
+                'registered_session_id': 'registered_session_0001',
+                'text': 'Synthetic instruction', 'expiry_minutes': 15}
+    assert api.get('/api/instructions/by-key/' + envelope['idempotency_key']).status_code == 404
+    first = api.post('/api/instructions', json=envelope, headers={'Origin': 'http://testserver'})
+    assert first.status_code == 201
+    record = api.get('/api/instructions/by-key/' + envelope['idempotency_key'])
+    assert record.status_code == 200
+    assert all(record.json()[key] == value for key, value in envelope.items())
+    assert record.json()['history'][0]['state'] == 'queued'
+    again = api.post('/api/instructions', json=envelope, headers={'Origin': 'http://testserver'})
+    assert again.status_code == 201 and again.json()['id'] == first.json()['id']
+    conflict = api.post('/api/instructions', json={**envelope, 'text': 'Changed'},
+                        headers={'Origin': 'http://testserver'})
+    assert conflict.status_code == 409
+    assert conflict.json()['error']['code'] == 'idempotency_conflict'
+    assert len(repo.list_instructions(session_id='registered_session_0001')) == 1
+    with pytest.raises(Problem) as denied:
+        repo.get_instruction_by_key(envelope['idempotency_key'], 'another-operator')
+    assert denied.value.status == 404
+    with pytest.raises(Problem) as cross_principal:
+        repo.create_instruction(envelope, 'another-operator')
+    assert cross_principal.value.code == 'idempotency_conflict'
+    assert len(repo.list_instructions(session_id='registered_session_0001')) == 1
+    assert api.get('/api/instructions/by-key/not-valid').status_code == 404
 
 
 @pytest.mark.parametrize('state,label', [
@@ -261,8 +313,11 @@ def test_sessions_android_viewport_browser(tmp_path):
                         env={**os.environ, 'WB_CHROME': chrome, 'WB_TEST_URL': f'http://127.0.0.1:{port}'}, timeout=60)
         selected = repo.list_instructions(session_id='registered_session_0001')
         other = repo.list_instructions(session_id='registered_session_0002')
-        assert len(selected) == 1
-        assert selected[0]['text'] == 'Synthetic dictation with Unicode \u2713 and $HOME; no merge.'
+        assert len(selected) == 3
+        assert {item['text'] for item in selected} == {
+            'Synthetic dictation with Unicode \u2713 and $HOME; no merge.',
+            'Accepted once, response lost', 'Retry only after checking original key'}
+        assert len({item['idempotency_key'] for item in selected}) == 3
         assert other == []
     finally:
         server.should_exit = True

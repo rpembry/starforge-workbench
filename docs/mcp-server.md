@@ -16,6 +16,15 @@ tool families and package version. Discover exact schemas through the MCP host.
 It does not establish client-side skill discovery or API health. See
 [agent-interface.md](agent-interface.md) for interface routing and current gaps.
 
+The read-only `registered_session_list`, `registered_session_detail`,
+`registered_session_instructions`, and `registered_instruction_status` tools
+use the existing operator API. They bound pages to 50 records, require exact
+opaque IDs, and report API check time separately from collector timestamps and
+visibility. Their output omits host identifiers, instruction text, preview
+excerpts, idempotency keys, leases, and credentials. API failure is a tool
+error, not evidence that a session is offline. These tools do not queue or
+retry instructions, attach to a provider, or alter delivery state.
+
 The server instructions tell connected agents to treat an unsupported Workbench
 (`aiw`) operation as a possible MCP capability gap. An agent should consider
 creating a GitHub feature request for future support; if it lacks GitHub access,

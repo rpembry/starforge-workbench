@@ -1,5 +1,7 @@
 """Local stdio MCP server for the authenticated Starforge Workbench API."""
 import os
+import re
+from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Literal
@@ -9,9 +11,49 @@ from mcp.server.mcpserver import MCPServer
 
 from .client import client
 from .flow_mcp import register_flow_tools
+from .session_views import REASON_LABELS
 
 TABLES = frozenset({'actions', 'artifacts', 'collectors', 'events', 'import_batches',
                     'import_records', 'objectives', 'runs'})
+SESSION_ID = re.compile(r'^[A-Za-z0-9_-]{16,128}$')
+INSTRUCTION_ID = re.compile(r'^[A-Za-z0-9_-]{16,128}$')
+
+
+def _safe_session(row):
+    fields = ('id', 'visibility', 'evidence_state',
+              'observed_at', 'heartbeat_at', 'last_activity_at')
+    result = {key: row.get(key) for key in fields}
+    result['provider'] = row.get('provider') if row.get('provider') in {
+        'opencode', 'codex', 'claude', 'ollama', 'antigravity'} else 'other'
+    result['reason'] = row.get('reason') if row.get('reason') in REASON_LABELS else 'unknown'
+    result['send_eligible'] = (row.get('visibility') == 'fresh' and row.get('provider') == 'opencode'
+                               and row.get('evidence_state') not in {'unknown', 'stopped'})
+    return result
+
+
+def _safe_instruction(row, history=False):
+    fields = ('id', 'registered_session_id', 'state', 'reason_code', 'created_at', 'updated_at',
+              'expires_at', 'received_at', 'responded_at', 'terminal_at')
+    result = {key: row.get(key) for key in fields}
+    if history:
+        result['history'] = [{key: event.get(key) for key in ('state', 'reason_code', 'occurred_at')}
+                             for event in row.get('history', [])[:50]]
+    return result
+
+
+def _exact_id(value, pattern, label):
+    if not isinstance(value, str) or not pattern.fullmatch(value):
+        raise ValueError(f'{label} must be an exact opaque ID')
+    return value
+
+
+def _page(limit, offset):
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 50 or not isinstance(offset, int) or isinstance(offset, bool) or not 0 <= offset <= 10000:
+        raise ValueError('Use limit 1..50 and offset 0..10000')
+
+
+def _checked_at():
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _release_version() -> str:
@@ -85,7 +127,8 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
             'transport': 'stdio',
             'evidence': 'running-server',
             'tool_families': ['configured-contexts', 'browser-desired-state',
-                              'bounded-worklog', 'standup', 'session-restore-preview',
+                              'bounded-worklog', 'standup', 'registered-session-status',
+                              'session-restore-preview',
                               *(['opt-in-session-restore'] if os.environ.get('WB_MCP_ALLOW_RESTORE') == '1' else [])],
             'flow': ('local-read-write' if selected_flow_profile and selected_flow_write else
                      'local-read' if selected_flow_profile else 'unavailable'),
@@ -120,6 +163,43 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
         if table not in TABLES or not 1 <= limit <= 500 or offset < 0:
             raise ValueError('Use an allowed table, limit 1..500, and a non-negative offset')
         return request('GET', f'/api/{table}?limit={limit}&offset={offset}')
+
+    @server.tool(name='registered_session_list', structured_output=True)
+    def registered_session_list(limit: int = 25, offset: int = 0) -> dict[str, object]:
+        """Read a bounded page of registered-session evidence without host identifiers or provider content."""
+        _page(limit, offset)
+        response = request('GET', f'/api/registered-sessions?limit={limit}&offset={offset}')
+        return {'items': [_safe_session(row) for row in response['items'][:limit]],
+                'limit': limit, 'offset': offset, 'checked_at': _checked_at(), 'api_status': 'available'}
+
+    @server.tool(name='registered_session_detail', structured_output=True)
+    def registered_session_detail(session_id: str) -> dict[str, object]:
+        """Read one exact registered-session status, freshness, and send eligibility."""
+        _exact_id(session_id, SESSION_ID, 'session_id')
+        return {'session': _safe_session(request('GET', f'/api/registered-sessions/{session_id}')),
+                'checked_at': _checked_at(), 'api_status': 'available'}
+
+    @server.tool(name='registered_session_instructions', structured_output=True)
+    def registered_session_instructions(session_id: str, limit: int = 20, offset: int = 0) -> dict[str, object]:
+        """Read bounded instruction delivery states for one exact session; no bodies or leases."""
+        _exact_id(session_id, SESSION_ID, 'session_id')
+        _page(limit, offset)
+        response = request('GET', f'/api/instructions?limit={limit}&offset={offset}&registered_session_id={session_id}')
+        if any(row.get('registered_session_id') != session_id for row in response['items']):
+            raise ValueError('API returned an unrelated session instruction')
+        return {'items': [_safe_instruction(row) for row in response['items'][:limit]], 'session_id': session_id,
+                'limit': limit, 'offset': offset, 'checked_at': _checked_at(), 'api_status': 'available'}
+
+    @server.tool(name='registered_instruction_status', structured_output=True)
+    def registered_instruction_status(session_id: str, instruction_id: str) -> dict[str, object]:
+        """Read one instruction's state and bounded timeline for its exact registered session."""
+        _exact_id(session_id, SESSION_ID, 'session_id')
+        _exact_id(instruction_id, INSTRUCTION_ID, 'instruction_id')
+        row = request('GET', f'/api/instructions/{instruction_id}')
+        if row.get('registered_session_id') != session_id:
+            raise ValueError('Instruction does not belong to the selected session')
+        return {'instruction': _safe_instruction(row, history=True),
+                'checked_at': _checked_at(), 'api_status': 'available'}
 
     @server.tool(name='worklog_append', structured_output=True)
     def worklog_append(kind: Literal['proposal', 'accomplishment'], summary: str, details: str = '', project: str | None = None) -> dict[str, object]:
