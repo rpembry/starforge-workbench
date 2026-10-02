@@ -29,6 +29,7 @@ chmod -R go-w "$release"
 chown root:workbench /etc/workbench/access.json
 chmod 0640 /etc/workbench/access.json
 chmod 0600 /etc/workbench/tunnel-token
+"$release/deploy/check-service-env.sh" /etc/workbench/service.env "$release/deploy/service.env.example" 0 "$(getent group workbench | cut -d: -f3)" no
 install -o root -g root -m 0644 deploy/workbench.service /etc/systemd/system/workbench.service
 install -o root -g root -m 0644 deploy/workbench-tunnel.service /etc/systemd/system/workbench-tunnel.service
 ln -sfn "$release" /opt/workbench/current.next

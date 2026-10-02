@@ -81,10 +81,52 @@ def test_unsafe_existing_file_fails_without_replacement(tmp_path, unsafe):
         assert target.read_bytes() == expected
 
 
+@pytest.mark.parametrize('kind', ['directory', 'symlink_directory', 'regular_file', 'false_success'])
+def test_first_install_race_fails_closed_without_replacing_target(tmp_path, kind):
+    target, example = fixture(tmp_path)
+    injected = tmp_path / 'bin'
+    injected.mkdir()
+    wrapper = injected / 'ln'
+    wrapper.write_text('''#!/bin/sh
+case "$RACE_KIND" in
+  directory) mkdir -- "$RACE_TARGET" ;;
+  symlink_directory) mkdir -- "${RACE_TARGET}.actual"; /usr/bin/ln -s -- "${RACE_TARGET}.actual" "$RACE_TARGET" ;;
+  regular_file) printf 'CONCURRENT=keep\\n' > "$RACE_TARGET" ;;
+  false_success) exit 0 ;;
+esac
+exec /usr/bin/ln "$@"
+''')
+    wrapper.chmod(0o755)
+    result = subprocess.run(
+        ['sh', str(CHECK), str(target), str(example), str(os.getuid()), str(os.getgid()), 'yes'],
+        env={**os.environ, 'PATH': str(injected) + ':' + os.environ['PATH'],
+             'RACE_KIND': kind, 'RACE_TARGET': str(target)},
+        capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode != 0, kind
+    assert not list(tmp_path.glob('service.env.tmp.*'))
+    if kind == 'directory':
+        assert target.is_dir() and not target.is_symlink()
+        assert list(target.iterdir()) == []
+    elif kind == 'symlink_directory':
+        assert target.is_symlink() and target.is_dir()
+        assert target.resolve() == tmp_path / 'service.env.actual'
+        assert list(target.iterdir()) == []
+    elif kind == 'regular_file':
+        assert target.is_file() and not target.is_symlink()
+        assert target.read_bytes() == b'CONCURRENT=keep\n'
+    else:
+        assert not target.exists() and not target.is_symlink()
+
+
 def test_validation_precedes_activation_and_example_is_never_installed_over_target():
     script = INSTALLER.read_text()
     check_at = script.index('/check-service-env.sh')
-    assert check_at < script.index('install -o root -g root -m 0644 deploy/workbench.service')
-    assert check_at < script.index('mv -Tf /opt/workbench/current.next')
-    assert check_at < script.index('systemctl daemon-reload')
+    final_check_at = script.rindex('/check-service-env.sh')
+    assert final_check_at > check_at
+    assert check_at < script.index('/opt/workbench-runtime/uv sync')
+    assert final_check_at < script.index('install -o root -g root -m 0644 deploy/workbench.service')
+    assert final_check_at < script.index('mv -Tf /opt/workbench/current.next')
+    assert final_check_at < script.index('systemctl daemon-reload')
     assert 'install -o root -g workbench -m 0640 deploy/service.env.example' not in script
