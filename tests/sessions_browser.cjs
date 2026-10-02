@@ -217,22 +217,27 @@ const {chromium} = require(process.env.WB_PLAYWRIGHT_MODULE);
     await blocked.locator('#session-poll-state').filter({hasText: 'Server status checked now'}).waitFor();
     await blocked.evaluate(() => {
       sessionStorage.clear();
+      window.originalStorageSetItem = Storage.prototype.setItem;
       Storage.prototype.setItem = function () { throw new DOMException('quota', 'QuotaExceededError'); };
     });
     await blocked.getByLabel('Instruction text').fill('Synthetic draft while storage is blocked');
     await blocked.getByLabel(/Confirm this exact session/).check();
+    await blocked.getByRole('alert').filter({hasText: 'Tab storage is unavailable. Queue and retry are disabled'}).waitFor();
     assert.equal(await blocked.getByRole('button', {name: 'Queue instruction'}).isDisabled(), true);
     let blockedPosts = 0;
     await blocked.route('**/api/instructions', route => { blockedPosts++; return route.abort('failed'); });
-    await blocked.locator('[data-instruction-form]').evaluate(form => form.dispatchEvent(
-      new Event('submit', {bubbles: true, cancelable: true})));
-    await blocked.getByRole('status').filter({hasText: 'Tab storage is unavailable. No instruction was sent'}).waitFor();
+    await blocked.getByRole('button', {name: 'Queue instruction'}).evaluate(button => button.click());
     assert.equal(blockedPosts, 0);
     assert.equal(await blocked.getByLabel('Instruction text').inputValue(), 'Synthetic draft while storage is blocked');
+    await blocked.evaluate(() => { Storage.prototype.setItem = window.originalStorageSetItem; });
+    await blocked.getByLabel('Instruction text').fill('Synthetic draft after storage recovered');
+    assert.equal(await blocked.getByRole('alert').count(), 0);
+    assert.equal(await blocked.getByRole('button', {name: 'Queue instruction'}).isDisabled(), false);
     await blocked.goto(process.env.WB_TEST_URL + '/sessions');
     await blocked.goBack();
     await blocked.waitForURL('**/sessions/registered_session_0001');
     assert.equal(blockedPosts, 0);
+    assert.equal(await blocked.getByLabel('Instruction text').inputValue(), 'Synthetic draft after storage recovered');
     await blocked.close();
 
     const slow = await browser.newPage({viewport: {width: 360, height: 740},

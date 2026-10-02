@@ -14,6 +14,7 @@
   const retryButton = form.querySelector('[data-retry-attempt]');
   const newButton = form.querySelector('[data-new-attempt]');
   const message = document.getElementById('instruction-attempt-state');
+  const storageWarning = document.getElementById('instruction-storage-warning');
   const confirmationLabel = form.querySelector('.confirmation label');
   const storageKey = 'workbench:instruction-draft:' + target;
   let attempt = null;
@@ -50,6 +51,9 @@
   }
   function render() {
     const unknown = attempt && attempt.phase === 'unknown';
+    count();
+    save();
+    storageWarning.hidden = storageAvailable;
     sendButton.hidden = Boolean(attempt);
     sendButton.disabled = !eligible || sending || Boolean(attempt) || !storageAvailable;
     checkButton.hidden = !unknown;
@@ -58,10 +62,6 @@
     retryButton.disabled = !eligible || sending || reconciling || !sameEnvelope() || !confirmation.checked || !storageAvailable;
     newButton.hidden = !attempt || unknown;
     newButton.disabled = sending || reconciling;
-    count();
-    save();
-    sendButton.disabled = sendButton.disabled || !storageAvailable;
-    retryButton.disabled = retryButton.disabled || !storageAvailable;
   }
   function restore() {
     try {
