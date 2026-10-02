@@ -222,10 +222,11 @@ def publish_registered_sessions(api, manifest, selected, submitted_runs, collect
                 'observed_at': datetime.now(timezone.utc).isoformat(),
                 'last_activity_at': item['last_activity_at'],
             }
+            item['sequence'] = replaced['observation_sequence']
+            # Reserve the sequence before the POST: an accepted write can lose its response.
+            _save_registration_state(registration_state, state)
             response = api.post('/api/registered-sessions', json=replaced)
             response.raise_for_status()
-            item['sequence'] = replaced['observation_sequence']
-            _save_registration_state(registration_state, state)
             item = None
         if item is None:
             item = {'id': 'registered_'+secrets.token_urlsafe(24),
@@ -249,12 +250,12 @@ def publish_registered_sessions(api, manifest, selected, submitted_runs, collect
             'observed_at': datetime.now(timezone.utc).isoformat(),
             'last_activity_at': run.get('last_activity_at'),
         }
-        response = api.post('/api/registered-sessions', json=payload)
-        response.raise_for_status()
         item['sequence'] = payload['observation_sequence']
         item.update(run_id=run['id'], action_id=run.get('action_id'),
                     last_activity_at=run.get('last_activity_at'))
         _save_registration_state(registration_state, state)
+        response = api.post('/api/registered-sessions', json=payload)
+        response.raise_for_status()
         published += 1
     return published
 
