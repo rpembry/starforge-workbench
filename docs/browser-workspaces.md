@@ -22,13 +22,24 @@ Raw Chrome remains available through `google-chrome` (or the installed Chromium
 equivalent).
 
 `chrome refresh` is deliberately opt-in and non-destructive. It inspects page
-tabs through a local DevTools endpoint and opens only missing configured origins.
-Use `control-status` before a refresh or organization attempt:
+tabs through an existing loopback DevTools endpoint and opens only missing
+configured entries. Supply the expected user-data directory of that same Chrome
+instance before a refresh or organization attempt:
 
 ```sh
-bin/ai-workbench chrome control-status
-bin/ai-workbench chrome refresh
+bin/ai-workbench chrome --profile /path/to/existing/isolated-profile control-status
+bin/ai-workbench chrome --profile /path/to/existing/isolated-profile refresh
 ```
+
+The profile must already exist and the DevTools listener must be owned by its
+Chrome process. If the profile is missing, differs from the listener, or cannot
+be verified, the command fails before opening or closing tabs. New tabs and
+windows are launched with that profile explicitly, then checked through the
+same browser connection. A disconnected or restarted browser fails verification.
+Refresh reports requested URLs separately from verified, partial, and uncertain
+outcomes. It stops after a destination cannot be verified, avoiding additional
+requests in an uncertain state. Recheck the browser before retrying a partial
+result, because a delayed Chrome launch may still finish.
 
 It never closes unrelated tabs. The CLI only controls the local browser; the
 authenticated Workbench API and MCP server expose desired-state CRUD so an AIW
@@ -37,42 +48,10 @@ YAML.
 
 ### Current Chrome profiles
 
-Chrome 136 and later deliberately ignore a remote-debugging port for the normal
-user-data directory. Workbench never restarts the normal browser with a separate
-profile, because that browser would not contain the tabs, accounts, or state the
-operator asked to manage. If `control-status` reports
-`needs_explicit_normal_profile_connection`, use Chrome's explicit, browser-owned
-connection flow instead:
-
-1. In the running browser, open `chrome://inspect/#remote-debugging`, enable
-   Remote Debugging, and approve Chrome's permission dialog.
-2. Configure a trusted local MCP client with Chrome DevTools MCP's
-   `--autoConnect` option. The client connects to the normal profile only after
-   that browser approval; it can list, open, and close browser pages.
-
-For example, a local MCP client configuration can use:
-
-```json
-{
-  "mcpServers": {
-    "chrome-devtools": {
-      "command": "npx",
-      "args": ["-y", "chrome-devtools-mcp@latest", "--autoConnect", "--no-usage-statistics"]
-    }
-  }
-}
-```
-
-This is a separate, explicitly approved local browser-control integration; it
-does not send tab URLs to the Workbench service. The port-based Workbench
-commands remain appropriate for a deliberately launched, isolated debugging
-profile only, for example:
-
-```sh
-google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/workbench-chrome-profile
-```
-
-That separate profile has no access to the normal-profile tab set.
+Chrome 136 and later ignore a remote-debugging port for the normal user-data
+directory. These commands require an already connected, isolated profile and
+do not start a debugging listener or modify Chrome security settings. An
+isolated profile does not contain normal-profile tabs, accounts, or state.
 
 ## Organizing live tabs
 
@@ -81,17 +60,23 @@ match entries in one selected workspace. It changes nothing until `--apply` is
 given:
 
 ```sh
-bin/ai-workbench chrome --workspace default organize
-bin/ai-workbench chrome --workspace default organize --apply
-bin/ai-workbench chrome --workspace default organize --apply --action move
+bin/ai-workbench chrome --profile /path/to/existing/isolated-profile --workspace default organize
+bin/ai-workbench chrome --profile /path/to/existing/isolated-profile --workspace default organize --apply --expect TOKEN
+bin/ai-workbench chrome --profile /path/to/existing/isolated-profile --workspace default organize --apply --expect TOKEN --action move
 ```
 
-The preview reports each selected tab, the matching entry, and the matching rule.
+The preview reports each selected tab, the matching entry, the matching rule,
+and a target-set token. Copy its `expect` value into `--expect` when applying.
+If a selected tab navigates, closes, or changes identity, or if the workspace
+configuration changes, apply rejects the token; preview again.
 Applying opens those selected URLs in a separate Chrome window for that named
 Workbench workspace. The default `copy` action leaves every existing tab in
-place. `move` is explicit: only after the new window has been requested does it
-ask Chrome to close the exact selected original tabs, then reports whether each
-close was verified. Unrelated tabs are never selected or closed.
+place. `move` is explicit: it closes each selected source only after a new target
+with the same URL is observed in the connected browser. A missing or changed
+destination leaves its source open. Results distinguish requested, verified,
+partial, and uncertain copies, along with confirmed source closes. If the
+connection fails after a close request, source state is reported as uncertain.
+Unrelated tabs are never selected or closed.
 
 Chrome's tab-group API is extension-only, so the local launcher uses a separate
 window as the supported workspace boundary. It does not install an extension,
