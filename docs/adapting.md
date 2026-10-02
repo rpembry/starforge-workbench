@@ -103,6 +103,8 @@ Claude collection starts with a persisted cutoff covering the preceding day. Ope
 
 `deploy/install-collector.py` expects a versioned release layout and protected client configuration. Options enable additional observer services. `deploy/install-release.sh` installs the server under `/opt/workbench` with state under `/var/lib/workbench`. Inspect paths, dependencies, service actions, and access configuration before running either helper. These recipes are not a universal installation workflow.
 
+The release installer preserves an existing `/etc/workbench/service.env` byte-for-byte and requires it to be a regular, nonsymlink file owned by `root:workbench` with mode `0600` or `0640`. A first install with no such file must explicitly pass `--init-service-env` to initialize it from the example; otherwise installation stops before switching the active release or activating services. Review the initialized private values before using the service.
+
 No task execution scheduler is implied by run heartbeats or attention records. Reporting time windows and the default human actor label are simple personal conventions to adapt.
 
 ## Personal display and reporting settings
