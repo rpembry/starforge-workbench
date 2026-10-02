@@ -246,8 +246,15 @@ def _owner_profile(port: int) -> Path:
         if not process.name.isdigit():
             continue
         try:
-            if not any(fd.readlink().as_posix() in socket_refs
-                       for fd in (process / 'fd').iterdir()):
+            owns_listener = False
+            for fd in (process / 'fd').iterdir():
+                try:
+                    if fd.readlink().as_posix() in socket_refs:
+                        owns_listener = True
+                        break
+                except OSError:
+                    continue
+            if not owns_listener:
                 continue
             args = [part.decode(errors='replace') for part in (process / 'cmdline').read_bytes().split(b'\0') if part]
             if not args or Path(args[0]).name not in CHROME_NAMES:
