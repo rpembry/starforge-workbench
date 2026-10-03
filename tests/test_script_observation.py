@@ -77,6 +77,8 @@ def test_emitted_events_match_versioned_schema():
         validator.validate(event)
     bad = dict(events[0], script_id="unexpected source", extra="private")
     assert list(validator.iter_errors(bad))
+    contradictory = dict(events[1], data={"exit_code": None, "signal": None, "duration_ms": 1})
+    assert list(validator.iter_errors(contradictory))
 
 
 def test_term_is_forwarded_to_direct_child():

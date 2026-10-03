@@ -19,6 +19,10 @@ times and process-level evidence. Child stdout/stderr/stdin are inherited.
 exception is contained and cannot alter a confirmed child exit. Exit zero is
 only process-level evidence; domain result, artifacts, external effects and
 human acceptance remain unknown. No log text is interpreted as progress.
+The callable requires the main thread for signal forwarding. Its sink is
+synchronous and must be locally bounded by an adapter before any host job uses
+it; an arbitrary blocking sink could delay the child or wrapper exit. This
+first slice includes no production sink or installation instructions.
 
 The wrapper forwards TERM/INT to the tracked direct child and returns its
 shell-compatible signal exit code. Daemonizing/background children are outside

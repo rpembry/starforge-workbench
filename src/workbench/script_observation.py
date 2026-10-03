@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import signal
 import subprocess
+import threading
 import time
 import uuid
 from typing import Callable, Mapping, Sequence
@@ -53,6 +54,8 @@ def run_observed(identity: ScriptIdentity, argv: Sequence[str],
     """
     if not argv or any(not isinstance(arg, str) or not arg for arg in argv):
         raise ValueError("argv must contain nonempty strings")
+    if threading.current_thread() is not threading.main_thread():
+        raise ValueError("signal forwarding requires the main thread")
     run_id = uuid.uuid4().hex
     started = time.monotonic()
 

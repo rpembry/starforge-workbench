@@ -21,7 +21,7 @@
   },
   "allOf": [
     {"if": {"properties": {"kind": {"const": "started"}}}, "then": {"properties": {"seq": {"const": 1}, "data": {"type": "object", "required": ["pid_known"], "properties": {"pid_known": {"const": true}}, "additionalProperties": false}}}},
-    {"if": {"properties": {"kind": {"const": "exited"}}}, "then": {"properties": {"seq": {"const": 2}, "data": {"type": "object", "required": ["exit_code", "signal", "duration_ms"], "properties": {"exit_code": {"type": ["integer", "null"], "minimum": 0}, "signal": {"type": ["integer", "null"], "minimum": 1}, "duration_ms": {"type": "integer", "minimum": 0}}, "additionalProperties": false}}}},
+    {"if": {"properties": {"kind": {"const": "exited"}}}, "then": {"properties": {"seq": {"const": 2}, "data": {"type": "object", "required": ["exit_code", "signal", "duration_ms"], "properties": {"exit_code": {"type": ["integer", "null"], "minimum": 0}, "signal": {"type": ["integer", "null"], "minimum": 1}, "duration_ms": {"type": "integer", "minimum": 0}}, "oneOf": [{"properties": {"exit_code": {"type": "integer"}, "signal": {"type": "null"}}}, {"properties": {"exit_code": {"type": "null"}, "signal": {"type": "integer"}}}], "additionalProperties": false}}}},
     {"if": {"properties": {"kind": {"const": "launch_failed"}}}, "then": {"properties": {"seq": {"const": 2}, "data": {"type": "object", "required": ["error"], "properties": {"error": {"type": "string", "maxLength": 80}}, "additionalProperties": false}}}}
   ]
 }
