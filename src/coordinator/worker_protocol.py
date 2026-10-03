@@ -105,16 +105,17 @@ class WorkerInbox:
             self.state = json.loads(self.path.read_text())
             if self.state["identity"] != self.identity:
                 raise ProtocolError("persisted worker incarnation mismatch")
-            if "artifacts" not in self.state:
+            if "artifacts_complete" not in self.state:
                 events = self.state["events"]
                 complete = (self.state["floor"] == 1 and not self.state["gaps"] and
                             [event["seq"] for event in events] == list(range(1, self.state["last_seq"] + 1)))
-                self.state["artifacts"] = [event["frame"]["data"]["path"] for event in events
-                                           if event["frame"]["kind"] == "artifact"] if complete else []
+                if complete:
+                    self.state["artifacts"] = [event["frame"]["data"]["path"] for event in events
+                                               if event["frame"]["kind"] == "artifact"]
+                else:
+                    self.state.setdefault("artifacts", [])
                 self.state["artifacts_complete"] = complete
                 self._save()
-            else:
-                self.state.setdefault("artifacts_complete", not self.state["gaps"])
         else:
             self.state = {"identity": self.identity, "last_seq": 0, "hello": False,
                           "ready": False, "result": None, "events": [], "floor": 1,

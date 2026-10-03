@@ -118,3 +118,33 @@ def test_old_rotated_inbox_cannot_claim_complete_artifacts(inbox):
     assert reopened.state["artifacts_complete"] is False
     assert reopened.state["artifacts"] == []
     assert protocol_execution_result(0, reopened.state) is None
+
+
+def test_intermediate_upgrade_empty_artifact_list_is_not_complete(inbox):
+    inbox.accept(frame(1, "hello", {"capabilities": []}))
+    inbox.accept(frame(2, "ready"))
+    inbox.accept(frame(3, "artifact", {"path": "required.txt"}))
+    inbox.accept(frame(4, "result", {"ok": True, "summary": "fixture"}))
+    intermediate = dict(inbox.state)
+    intermediate["artifacts"] = []  # older upgrade inserted an empty list
+    intermediate.pop("artifacts_complete")
+    inbox.path.write_text(json.dumps(intermediate))
+    reopened = WorkerInbox(inbox.directory, job_id="job", attempt_id="attempt", incarnation="first")
+    assert reopened.state["artifacts"] == ["required.txt"]
+    assert reopened.state["artifacts_complete"] is True
+
+
+def test_intermediate_rotated_upgrade_remains_uncertain(inbox):
+    inbox.accept(frame(1, "hello", {"capabilities": []}))
+    inbox.accept(frame(2, "ready"))
+    inbox.accept(frame(3, "artifact", {"path": "required.txt"}))
+    for seq in range(4, 136):
+        inbox.accept(frame(seq, "heartbeat"))
+    inbox.accept(frame(136, "result", {"ok": True, "summary": "fixture"}))
+    intermediate = dict(inbox.state)
+    intermediate["artifacts"] = []
+    intermediate.pop("artifacts_complete")
+    inbox.path.write_text(json.dumps(intermediate))
+    reopened = WorkerInbox(inbox.directory, job_id="job", attempt_id="attempt", incarnation="first")
+    assert reopened.state["artifacts_complete"] is False
+    assert protocol_execution_result(0, reopened.state) is None
