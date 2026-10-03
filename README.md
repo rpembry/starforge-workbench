@@ -52,8 +52,9 @@ The conversation is the everyday control surface: ask what needs attention, reco
 
 See [`src/starforge_workbench/`](src/starforge_workbench/) and the [example manifest](config/workbench.example.yaml).
 The [Codex title reconciliation workflow](docs/codex-title-reconciliation.md)
-previews exact saved conversation titles. Real rename apply is blocked until
-Codex provides an atomic expected-title operation.
+previews exact saved conversation titles. Strict apply requires an atomic
+provider guard; an explicit practical mode uses Codex's supported rename
+method with a disclosed concurrent-edit race.
 Provider compatibility claims and their evidence level are tracked in the
 [capability matrix](docs/provider-capabilities.md). Recheck that matrix and use
 its opt-in smoke procedure after provider upgrades; fixture coverage is not a

@@ -730,19 +730,25 @@ def titles_main(argv=None):
     choice = apply.add_mutually_exclusive_group(required=True)
     choice.add_argument('--all-eligible', action='store_true')
     choice.add_argument('--context', action='append')
+    apply.add_argument('--mode', choices=['strict', 'practical'], default='strict')
+    apply.add_argument('--confirm-non-atomic', action='store_true')
     status = commands.add_parser('status')
     status.add_argument('plan_id')
     undo = commands.add_parser('undo')
     undo.add_argument('plan_id')
     undo.add_argument('context')
+    undo.add_argument('--mode', choices=['strict', 'practical'], default='strict')
+    undo.add_argument('--confirm-non-atomic', action='store_true')
     args = p.parse_args(argv)
     service = title_reconciler(args.manifest.resolve())
     if args.command == 'preview':
         result = service.preview(args.contexts)
     elif args.command == 'apply':
-        result = service.apply(args.plan_id, selected=args.context, all_eligible=args.all_eligible)
+        result = service.apply(args.plan_id, selected=args.context, all_eligible=args.all_eligible,
+                               mode=args.mode, confirm_non_atomic=args.confirm_non_atomic)
     elif args.command == 'undo':
-        result = service.undo(args.plan_id, args.context)
+        result = service.undo(args.plan_id, args.context, mode=args.mode,
+                              confirm_non_atomic=args.confirm_non_atomic)
     else:
         result = service.status(args.plan_id)
     print(json.dumps(result, ensure_ascii=False, indent=2))

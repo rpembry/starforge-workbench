@@ -165,18 +165,22 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
 
     @server.tool(name='codex_title_apply', structured_output=True)
     def codex_title_apply(plan_id: str, context_ids: list[str] | None = None,
-                          all_eligible: bool = False) -> dict[str, object]:
-        """Explicitly apply selected preview rows; requires local opt-in and provider atomic title guard."""
+                          all_eligible: bool = False, mode: Literal['strict', 'practical'] = 'strict',
+                          confirm_non_atomic: bool = False) -> dict[str, object]:
+        """Apply exact preview rows; practical mode needs explicit acknowledgement of its title race."""
         if os.environ.get('WB_MCP_ALLOW_TITLE_APPLY') != '1':
             return {'plan_id': plan_id, 'status': 'denied', 'reason': 'WB_MCP_ALLOW_TITLE_APPLY is not enabled'}
-        return reconcile().apply(plan_id, selected=context_ids, all_eligible=all_eligible)
+        return reconcile().apply(plan_id, selected=context_ids, all_eligible=all_eligible,
+                                 mode=mode, confirm_non_atomic=confirm_non_atomic)
 
     @server.tool(name='codex_title_undo', structured_output=True)
-    def codex_title_undo(plan_id: str, context_id: str) -> dict[str, object]:
-        """Restore one verified prior title only while its written value remains current."""
+    def codex_title_undo(plan_id: str, context_id: str, mode: Literal['strict', 'practical'] = 'strict',
+                         confirm_non_atomic: bool = False) -> dict[str, object]:
+        """Restore one verified prior title; practical mode acknowledges the non-atomic title race."""
         if os.environ.get('WB_MCP_ALLOW_TITLE_APPLY') != '1':
             return {'plan_id': plan_id, 'status': 'denied', 'reason': 'WB_MCP_ALLOW_TITLE_APPLY is not enabled'}
-        return reconcile().undo(plan_id, context_id)
+        return reconcile().undo(plan_id, context_id, mode=mode,
+                                confirm_non_atomic=confirm_non_atomic)
 
     @server.tool(name='browser_workspace_list', structured_output=True)
     def browser_workspace_list() -> dict[str, object]:
