@@ -167,11 +167,21 @@ def install(app, operator, socket: str, *, factory=None):
             attempt = next((a for a in job["attempts"] if a["id"] == attempt_id), None)
             if not attempt or not attempt["stopped"]:
                 return HTMLResponse("Post-stop evidence is not available yet", status_code=409)
-            logs = call("logs", job_id, attempt_id, cursor=cursor, limit=4096)
-            artifacts = call("artifacts", job_id, attempt_id)
             error = None
         except CoordinatorError as exc:
-            logs = artifacts = None
-            error = _error(exc)
+            return page(request, mode="evidence", job_id=job_id, attempt_id=attempt_id,
+                        logs=None, artifacts=None, log_error=None, artifact_error=None,
+                        error=_error(exc))
+        try:
+            logs = call("logs", job_id, attempt_id, cursor=cursor, limit=4096)
+            log_error = None
+        except CoordinatorError as exc:
+            logs, log_error = None, _error(exc)
+        try:
+            artifacts = call("artifacts", job_id, attempt_id)
+            artifact_error = None
+        except CoordinatorError as exc:
+            artifacts, artifact_error = None, _error(exc)
         return page(request, mode="evidence", job_id=job_id, attempt_id=attempt_id,
-                    logs=logs, artifacts=artifacts, error=error)
+                    logs=logs, artifacts=artifacts, log_error=log_error,
+                    artifact_error=artifact_error, error=error)

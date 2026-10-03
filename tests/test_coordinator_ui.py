@@ -214,6 +214,19 @@ def test_close_and_reopen_only_reads_same_attempt():
     assert fake.calls == []
 
 
+def test_artifact_manifest_remains_visible_when_logs_unavailable():
+    fake = FakeCoordinator()
+    fake.stopped = True
+    def missing_logs(*_args, **_kwargs):
+        raise CoordinatorError("unavailable", 503)
+    fake.logs = missing_logs
+    with client(fake) as browser:
+        evidence = browser.get(f"/coordinator/jobs/{JOB_ID}/attempts/{ATTEMPT_ID}/evidence")
+        assert evidence.status_code == 200
+        assert "Logs: Coordinator unavailable" in evidence.text
+        assert "output.txt" in evidence.text
+
+
 def test_remote_host_rejected_before_socket_access():
     fake = FakeCoordinator()
     with client(fake) as browser:
