@@ -19,10 +19,15 @@ times and process-level evidence. Child stdout/stderr/stdin are inherited.
 exception is contained and cannot alter a confirmed child exit. Exit zero is
 only process-level evidence; domain result, artifacts, external effects and
 human acceptance remain unknown. No log text is interpreted as progress.
-The callable requires the main thread for signal forwarding. Its sink is
-synchronous and must be locally bounded by an adapter before any host job uses
-it; an arbitrary blocking sink could delay the child or wrapper exit. This
-first slice includes no production sink or installation instructions.
+The callable requires the main thread for signal forwarding. It installs
+TERM/INT forwarding before spawning the child, including a pending-signal
+handoff across process creation. Publication runs in a daemon thread with a
+100 ms wait per event. A failed or blocked `started` publication suppresses
+the terminal publication, leaving an explicit evidence gap; it never holds the
+child exit. This is a bounded best-effort source seam, not a durable outbox.
+The future adapter must be nonblocking, source bound and durable before any
+host job uses it. This first slice includes no production sink or installation
+instructions.
 
 The wrapper forwards TERM/INT to the tracked direct child and returns its
 shell-compatible signal exit code. Daemonizing/background children are outside
@@ -33,13 +38,16 @@ termination and cannot be treated as a failed or successful job.
 
 ## Versioned seams
 
-`schemas/script-observation-v1.schema.json` describes the event shape. The
-future ingest adapter must validate kind/sequence/data, bound payload sizes,
-deduplicate event IDs, reject conflicting replay, enforce source identity and
-record receive time independently. No such ingest path or durable outbox is
-enabled here. `read_status` is a pure, redacted projection for an eventual
-Workbench adapter. Its freshness reflects receive evidence; it has no schedule
-inputs yet, so it makes no due/overdue claim. It does not write another ledger.
+`schemas/script-observation-v1.schema.json` describes the event shape.
+`validate_event` checks the event against a locally supplied `ScriptIdentity`,
+including strict ASCII IDs, shape, result semantics and size. `read_status`
+and `rgb_cue` require that validation before use. The future ingest adapter
+must additionally authenticate the source transport, deduplicate event IDs,
+reject conflicting replay and record receive time independently. No such
+ingest path or durable outbox is enabled here. `read_status` is a pure,
+redacted projection for an eventual Workbench adapter. Its freshness reflects
+receive evidence; it has no schedule inputs yet, so it makes no due/overdue
+claim. It does not write another ledger.
 
 `rgb_cue` yields a semantic producer **proposal** only. RGB #3 has not yet
 established its final wire version. The output is neither sent nor routed, and
