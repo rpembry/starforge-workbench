@@ -1,10 +1,11 @@
 # GNOME 50 favorite presence: source-only review artifact
 
-This issue #167 artifact is an **uninstalled, disabled-by-default** GNOME Shell
-extension. It offers a narrow Wayland observation source for the manual favorite
-restore design. It does not launch, focus, restore, or control applications, and
-the existing X11-only `wb-apps` adapter does not consume it. Do not use a
-`Snapshot` response to authorize a launch yet.
+This issue #167 artifact is a disabled-by-default GNOME Shell extension. It
+offers a narrow Wayland observation source for the manual favorite restore
+design. It does not launch, focus, restore, or control applications. The
+`wb-apps` client consumes its read-only snapshot only after verifying its bus
+owner, allowlist, sample age, and local process evidence. An unknown snapshot
+never authorizes an automatic launch.
 
 The source is in
 [`extensions/favorite-presence@rpembry.github.io`](../extensions/favorite-presence@rpembry.github.io).
@@ -47,10 +48,9 @@ name; name loss unexports it, and reacquisition exports it again. A missing bus
 name, disabled extension, call error, invalid identity, or cached result older
 than two seconds must be interpreted by any
 future consumer as `unknown`. The timestamp is monotonic and meaningful only
-within the same boot. A client must verify that the D-Bus owner is the actual
-GNOME Shell process before trusting even `present`; a same-user process can
-otherwise claim the extension's well-known bus name when it is disabled. No
-client or launch integration is included in this artifact.
+within the same boot. The client verifies that the D-Bus owner has the same
+Unix PID as GNOME Shell before trusting even `present`; a same-user process can
+otherwise claim the extension's well-known bus name when it is disabled.
 
 ## Compatibility and trust
 

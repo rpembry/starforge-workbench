@@ -162,6 +162,19 @@ def test_desktop_unavailable_and_uncertain_evidence_never_launch(setup):
     assert desktop.launches == []
 
 
+def test_explicit_unknown_open_is_receipted_and_never_repeated(setup):
+    restore, desktop, _, _, _ = setup
+    desktop.states['Notes'] = 'uncertain'
+    preview = restore.preview(['Notes'])
+    assert preview['items'][0]['action'] == 'refuse'
+    result = restore.apply(['Notes'], preview['token'], open_unknown=True)
+    assert result['items'][0]['launch_requested'] is True
+    assert desktop.launches == ['notes.desktop']
+    assert restore.preview(['Notes'])['items'][0]['action'] == 'skip'
+    restore.apply(['Notes'], preview['token'], open_unknown=True)
+    assert desktop.launches == ['notes.desktop']
+
+
 def test_concurrent_apply_has_one_launch_request(setup):
     restore, desktop, _, _, _ = setup
     preview = restore.preview(['Editor'])
@@ -400,12 +413,12 @@ def test_unrelated_malformed_window_does_not_hide_verified_target(setup, tmp_pat
     assert desktop.observe(favorite, entry)[0] == 'absent'
 
 
-def test_dotted_startup_class_configuration_is_refused(setup):
+def test_dotted_startup_class_is_accepted_for_wayland_but_x11_stays_unknown(setup):
     _, _, config, _, favorites = setup
     favorites[0]['wm_class'] = 'org.example.Editor'
     config.write_text(yaml.safe_dump({'version': 1, 'favorites': favorites}))
-    with pytest.raises(ValueError, match='cannot be verified'):
-        load_config(config)
+    row = load_config(config)[0]
+    assert X11Desktop().observe(row, {'executable': row['executable']})[0] == 'unavailable'
 
 
 def test_single_field_chrome_cmdline_cannot_prove_pwa_absence(setup, tmp_path, monkeypatch):

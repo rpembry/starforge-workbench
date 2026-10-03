@@ -1,5 +1,12 @@
 # Manual favorite application restore
 
+The **Favorite Apps** application-menu entry opens a manual checklist. It
+shows which configured favorites are already open, ready to open, or have an
+unknown running status. The user selects apps, reviews a preview, and confirms
+before opening them. Unknown status requires an explicit **Open anyway** choice
+because another window may already exist. An unresolved same-boot launch
+remains blocked after that choice. The entry never starts apps at login.
+
 `uv run wb-apps` is a local, manual desktop-entry restorer. It never starts a
 Workbench provider session, changes Chrome tabs, or creates login autostart.
 The later coding-agent restore slice is separate work; a `workbench` favorite
@@ -78,13 +85,15 @@ or pending-state reset command. Missing, ambiguous, changed, or
 unverifiable identities fail closed. A target that cannot be verified does not
 block a separate exact target in the same selection.
 
-The real observation adapter currently requires an X11 session, `wmctrl`,
-`gtk-launch`, exact window class, and matching `/proc` process identity. It
-refuses launches on Wayland or when inventory is incomplete. Chrome/PWA window
-ownership can be difficult to prove on some builds; those targets remain
-uncertain rather than receiving a duplicate launch. Only synthetic fixtures
-have been exercised for this slice. This workstation's observed desktop
-session is Wayland, so no live application launch or focus smoke was run.
+The X11 observation adapter requires `wmctrl`, `gtk-launch`, exact window
+class, and matching `/proc` process identity. On GNOME Wayland, the optional
+read-only GNOME presence extension can provide native window presence. The
+client checks its D-Bus owner against GNOME Shell, allowlist membership, and
+sample freshness, then checks user processes before declaring absence. Browser
+PWAs remain unknown unless an exact same-profile, same-app browser process
+proves presence. Unknown does not authorize an automatic launch. Only synthetic
+tests have been exercised for this integration; live GNOME mapping and normal
+app launches remain separate QA steps.
 The X11 adapter treats `wmctrl -x` output as an `instance.class` tuple. It
 matches the configured `StartupWMClass` exactly against either component and
 requires matching process ownership; it never uses a substring match. A
@@ -93,9 +102,19 @@ when no selected window is confirmed, remains uncertain. Dotted or whitespace
 `StartupWMClass` values cannot be separated reliably in this output and are
 unsupported by this adapter.
 
-A [source-only GNOME 50 presence extension](gnome-favorite-presence.md) is
-prepared separately for Wayland review. It is not installed, enabled, or
-connected to `wb-apps`; its window observations do not authorize launches.
+The [GNOME 50 presence extension](gnome-favorite-presence.md) is optional and
+read-only. Installing or enabling it is a separate review decision. If it is
+disabled or unreachable, the dialog reports unknown status.
+
+After installing the Python package into a stable user-owned environment,
+install the menu entry with `bin/install-favorite-apps-desktop --executable`
+pointed at that environment's absolute `wb-apps` path. The installer creates
+only `starforge-favorite-apps.desktop` in the user's applications directory;
+it refuses to overwrite a different existing entry. The private favorites
+file must be configured separately. No app is opened by installation.
+
+This is a local manual desktop feature. It adds no MCP tool, agent skill, or
+background service; no existing MCP registration or skill needs to change.
 
 For independent QA, use disposable desktop entries and executables in a
 separate X11 session. Record the exact build and desktop-entry identities,

@@ -116,8 +116,8 @@ def load_config(path: Path = CONFIG) -> list[dict]:
             raise ValueError('Favorite identity fields must be nonempty text')
         if not DESKTOP_ID.fullmatch(row['desktop_id']) or not Path(row['executable']).is_absolute():
             raise ValueError('Favorite requires an exact desktop ID and absolute executable identity')
-        if '.' in row['wm_class'] or any(c.isspace() for c in row['wm_class']):
-            raise ValueError('Window class with a dot or whitespace cannot be verified from wmctrl')
+        if any(c.isspace() for c in row['wm_class']):
+            raise ValueError('Window class with whitespace cannot be verified')
         if row['name'].casefold() in names:
             raise ValueError('Favorite names must be unique')
         names.add(row['name'].casefold())
@@ -182,6 +182,8 @@ class X11Desktop:
         self.proc = Path(proc)
 
     def observe(self, favorite: dict, entry: dict) -> tuple[str, str]:
+        if '.' in favorite['wm_class']:
+            return 'unavailable', 'Dotted window class cannot be verified from wmctrl'
         if self.env.get('XDG_SESSION_TYPE') != 'x11' or not self.env.get('DISPLAY') or not shutil.which('wmctrl') or not shutil.which('gtk-launch'):
             return 'unavailable', 'Exact window evidence or desktop launcher unavailable'
         try:
@@ -268,6 +270,9 @@ class FavoriteRestore:
                  generation=_boot_generation):
         self.config = Path(config)
         self.directories = desktop_dirs() if directories is None else list(directories)
+        if desktop is None and os.environ.get('XDG_SESSION_TYPE') == 'wayland':
+            from .gnome_presence import GnomeDesktop
+            desktop = GnomeDesktop()
         self.desktop = X11Desktop() if desktop is None else desktop
         self.sleeper = sleeper
         self.generation = generation
@@ -345,6 +350,7 @@ class FavoriteRestore:
         items = []
         for favorite, entry, error in rows:
             pending_key = favorite['desktop_id']
+            can_open_anyway = False
             if error:
                 action, evidence = 'refuse', error
             else:
@@ -362,11 +368,13 @@ class FavoriteRestore:
                         evidence = 'Prior receipt belongs to a different verified boot; ' + evidence
                 else:
                     action = 'refuse'
+                    can_open_anyway = status in ('uncertain', 'unavailable')
             items.append({'name': favorite['name'], 'kind': favorite['kind'],
-                          'desktop_id': favorite['desktop_id'], 'action': action, 'evidence': evidence})
+                          'desktop_id': favorite['desktop_id'], 'action': action,
+                          'can_open_anyway': can_open_anyway, 'evidence': evidence})
         return {'selection': names, 'token': token, 'items': items}
 
-    def apply(self, names: list[str], token: str) -> dict:
+    def apply(self, names: list[str], token: str, *, open_unknown: bool = False) -> dict:
         parent = self.config.parent
         if parent.is_symlink() or not parent.is_dir() or parent.stat().st_uid != os.getuid() or parent.stat().st_mode & 0o077:
             raise ValueError('Favorites directory must be owned by you with mode 0700')
@@ -401,7 +409,7 @@ class FavoriteRestore:
                         result, evidence = 'refused', 'Prior launch identity changed; resolve it before retry'
                     elif pending_key in pending and pending[pending_key]['boot_id'] == boot_id:
                         result, evidence = 'uncertain', 'Prior launch remains unresolved; ' + evidence
-                    elif status != 'absent':
+                    elif status != 'absent' and not open_unknown:
                         result = 'refused'
                     else:
                         pending[pending_key] = {'digest': entry['digest'], 'boot_id': boot_id}
@@ -411,6 +419,8 @@ class FavoriteRestore:
                         launcher_accepted = requested
                         result = 'launch_requested' if requested else 'uncertain'
                         evidence = 'Desktop launcher accepted request; readiness not yet verified' if requested else 'Desktop launcher result is uncertain'
+                        if status != 'absent':
+                            evidence = 'You chose to open an app whose running status could not be verified; ' + evidence
                         for _ in range(3):
                             observed, detail = self.desktop.observe(favorite, entry)
                             if observed == 'present':
@@ -437,6 +447,7 @@ def main(argv=None):
     parser.add_argument('--config', type=Path, default=CONFIG)
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('list')
+    sub.add_parser('gui')
     preview = sub.add_parser('preview')
     preview.add_argument('names', nargs='+')
     apply = sub.add_parser('apply')
@@ -445,6 +456,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         restorer = FavoriteRestore(args.config)
+        if args.command == 'gui':
+            from .favorite_apps_ui import run_gui
+            return run_gui(restorer)
         if args.command == 'list':
             configured = load_config(args.config)
             result = {'items': restorer.preview([item['name'] for item in configured])['items'] if configured else []}

@@ -96,8 +96,9 @@ optional non-destructive refresh behavior.
 
 ### Favorite desktop applications
 
-The opt-in [manual favorite application restore](docs/favorite-apps.md) previews
-exact private desktop-entry identities before a local apply. It is separate
+The opt-in [Favorite Apps launcher](docs/favorite-apps.md) provides a manual
+desktop checklist and previews exact private desktop-entry identities before
+opening selected apps. It is separate
 from Chrome tab organization and Workbench provider-session restoration.
 
 ### Report suggestions
