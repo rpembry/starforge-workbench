@@ -328,6 +328,14 @@ class DockerRuntime:
             return False
         return self._inspect(receipt) is None
 
+    def review_no_start(self, plan):
+        from .no_start_retention import review
+        return review(self, plan)
+
+    def retain_no_start(self, plan, review_sha256, operation_id):
+        from .no_start_retention import retain
+        return retain(self, plan, review_sha256, operation_id)
+
     def review(self, plan, runtime_id):
         from .disposition import review
         return review(self, plan, runtime_id)

@@ -510,6 +510,27 @@ class Supervisor:
             raise OwnershipUnknown("committed artifact and exit evidence required")
         return attempt
 
+    def _collected_no_start(self, attempt):
+        if (attempt["state"] != "stopped" or attempt["runtime_id"] is not None or
+                attempt["no_start_reason"] != "workspace_setup_failed"):
+            raise OwnershipUnknown("confirmed workspace no-start required")
+        with self._db() as db:
+            saved = db.execute("SELECT response FROM evidence WHERE attempt_id=?", (
+                attempt["id"],)).fetchone()
+        if not saved:
+            raise OwnershipUnknown("committed no-start evidence required")
+        evidence = json.loads(saved["response"])
+        if (evidence.get("attempt_id") != attempt["id"] or
+                evidence.get("job_id") != attempt["job_id"] or
+                evidence.get("incarnation") != attempt["incarnation"] or
+                evidence.get("runtime_id", False) is not None or
+                evidence.get("exit_code", False) is not None or
+                evidence.get("no_start") is not True or
+                evidence.get("no_start_reason") != "workspace_setup_failed" or
+                evidence.get("stopped") is not True):
+            raise OwnershipUnknown("no-start evidence identity changed")
+        return attempt
+
     def _archive_absence_proven(self, item):
         """Require original collection and matching durable archive intent."""
         if not item["runtime_id"]:
@@ -551,6 +572,13 @@ class Supervisor:
     @_serialized
     def review(self, attempt_id: str):
         """Owner-only immutable review snapshot before any archive mutation."""
+        item = self.inspect(attempt_id)
+        if item["no_start_reason"]:
+            item = self._collected_no_start(item)
+            review = getattr(self.runtime, "review_no_start", None)
+            if review is None:
+                raise OwnershipUnknown("no-start retention adapter unavailable")
+            return review(item["plan"])
         attempt = self._collected_stopped(attempt_id)
         return self.runtime.review(attempt["plan"], attempt["runtime_id"])
 
@@ -560,6 +588,9 @@ class Supervisor:
         if (not operation_id or not isinstance(review_sha256, str) or
                 len(review_sha256) != 64 or any(c not in "0123456789abcdef" for c in review_sha256)):
             raise ValueError("review digest and operation identity required")
+        item = self.inspect(attempt_id)
+        if item["no_start_reason"]:
+            return self._retain_no_start(item, review_sha256, operation_id)
         self._restore_archiving_stop(self.inspect(attempt_id))
         attempt = self._collected_stopped(attempt_id)
         confirmed_response = None
@@ -583,6 +614,30 @@ class Supervisor:
                                       review_sha256, operation_id)
         response = {"attempt_id": attempt_id, "review_sha256": review_sha256,
                     "phase": result["phase"], "archive": result["archive"]}
+        with self._tx() as db:
+            db.execute("UPDATE operations SET status='confirmed',response=? WHERE id=?", (
+                _json(response), operation_id))
+        return response
+
+    def _retain_no_start(self, item, review_sha256, operation_id):
+        item = self._collected_no_start(item)
+        retain = getattr(self.runtime, "retain_no_start", None)
+        if retain is None:
+            raise OwnershipUnknown("no-start retention adapter unavailable")
+        with self._tx() as db:
+            old = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
+            if old:
+                if (old["attempt_id"] != item["id"] or old["kind"] != "no_start_retention" or
+                        json.loads(old["response"])["review_sha256"] != review_sha256):
+                    raise Conflict("retention operation identity changed")
+            else:
+                db.execute("INSERT INTO operations VALUES(?,?,?,?,?)", (
+                    operation_id, item["id"], "no_start_retention", "pending",
+                    _json({"review_sha256": review_sha256})))
+        result = retain(item["plan"], review_sha256, operation_id)
+        response = {"attempt_id": item["id"], "evidence_kind": "no_start_retention",
+                    "review_sha256": review_sha256, "phase": result["phase"],
+                    "archive": result["archive"]}
         with self._tx() as db:
             db.execute("UPDATE operations SET status='confirmed',response=? WHERE id=?", (
                 _json(response), operation_id))

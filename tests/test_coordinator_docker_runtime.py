@@ -243,16 +243,57 @@ def test_partial_git_setup_retains_receipt_and_never_creates_container(runtime, 
             return b""
         assert args[:3] == ("worktree", "add", "--detach")
         (adapter.root / ("a" * 32) / "worktree").mkdir()
+        (adapter.root / ("a" * 32) / "worktree" / "partial.txt").write_text("reviewed partial bytes\n")
         raise WorkerError("interrupted worktree setup")
     monkeypatch.setattr("coordinator.docker_runtime.git", interrupted_git)
     spec = {**plan(), "workspace_ref": "reviewed_git"}
-    with pytest.raises(WorkerError, match="interrupted"):
-        adapter.launch(spec)
+    journal = tmp_path / "journal"
+    journal.mkdir(mode=0o700)
+    supervisor = Supervisor(journal, adapter)
+    lease = supervisor.acquire("controller")
+    with pytest.raises(OwnershipUnknown, match="launch response unknown"):
+        supervisor.launch(spec, controller="controller", generation=lease["generation"],
+                          operation_id="partial-launch")
     receipt = json.loads((adapter.root / ("a" * 32) / "runtime.json").read_text())
     assert receipt["phase"] == "workspace_pending" and receipt["revision"] == revision
     assert (adapter.root / ("a" * 32) / "worktree").exists()
     assert not any("create" in argv for argv in fake.calls)
     assert adapter.inspect_no_start(spec) is True
+    assert supervisor.reconcile("a" * 32, controller="controller",
+                                generation=lease["generation"])["no_start_reason"] == "workspace_setup_failed"
+    evidence = supervisor.collect("a" * 32, controller="controller", generation=lease["generation"])
+    assert evidence["no_start"] is True and "artifact_manifest" not in evidence
+    reviewed = supervisor.review("a" * 32)
+    assert reviewed["evidence_kind"] == "no_start_retention"
+    partial = adapter.root / ("a" * 32) / "worktree" / "partial.txt"
+    partial.write_text("changed after review\n")
+    with pytest.raises(WorkerError, match="reviewed source changed"):
+        supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],
+                           operation_id="retain-partial")
+    partial.write_text("reviewed partial bytes\n")
+    import coordinator.no_start_retention as retention
+    original_copy = retention._copy_reviewed
+    def interrupted_copy(attempt, target, entries):
+        (target / "worktree").mkdir(exist_ok=True)
+        (target / "worktree" / "partial.txt").write_text("incomplete copy\n")
+        raise TimeoutError("copy interrupted")
+    monkeypatch.setattr(retention, "_copy_reviewed", interrupted_copy)
+    with pytest.raises(TimeoutError, match="copy interrupted"):
+        supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],
+                           operation_id="retain-partial")
+    assert json.loads((adapter.root / ("a" * 32) / "no-start-retention.json").read_text())["phase"] == "retaining"
+    monkeypatch.setattr(retention, "_copy_reviewed", original_copy)
+    retained = supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],
+                                  operation_id="retain-partial")
+    assert retained["evidence_kind"] == "no_start_retention" and retained["phase"] == "complete"
+    assert (adapter.root / ("a" * 32) / "archive" / "no-start" / "worktree" /
+            "partial.txt").read_text() == "reviewed partial bytes\n"
+    assert partial.read_text() == "reviewed partial bytes\n"
+    assert supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],
+                              operation_id="retain-partial") == retained
+    with pytest.raises(Conflict, match="retention operation identity"):
+        supervisor.archive("a" * 32, review_sha256="0" * 64,
+                           operation_id="retain-partial")
     original_command = adapter.command
     def daemon_unavailable(argv, **kwargs):
         if "ps" in argv:
@@ -265,6 +306,56 @@ def test_partial_git_setup_retains_receipt_and_never_creates_container(runtime, 
     receipt["phase"] = "create_pending"
     (adapter.root / ("a" * 32) / "runtime.json").write_text(json.dumps(receipt))
     assert adapter.inspect_no_start(spec) is False
+
+
+def test_no_start_retention_keeps_real_git_administration(runtime, tmp_path, monkeypatch):
+    adapter, fake = runtime
+    repository = tmp_path / "source-repository"
+    repository.mkdir()
+    def git_local(*args):
+        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(repository), *args],
+                              check=True, capture_output=True,
+                              env={**os.environ, "GIT_AUTHOR_NAME": "Fixture",
+                                   "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+                                   "GIT_COMMITTER_NAME": "Fixture",
+                                   "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}).stdout
+    git_local("init", "-q")
+    (repository / "input.txt").write_text("before\n")
+    git_local("add", "input.txt")
+    git_local("-c", "commit.gpgsign=false", "commit", "-qm", "fixture")
+    revision = git_local("rev-parse", "HEAD").decode().strip()
+    adapter.workspaces["reviewed_git"] = {"kind": "git_worktree", "repository": str(repository),
+                                           "revision": revision}
+    import coordinator.docker_runtime as docker_module
+    original_git = docker_module.git
+    def interrupted_after_add(repo, *args):
+        result = original_git(repo, *args)
+        if args[:3] == ("worktree", "add", "--detach"):
+            raise WorkerError("lost worktree add response")
+        return result
+    monkeypatch.setattr(docker_module, "git", interrupted_after_add)
+    spec = {**plan(), "workspace_ref": "reviewed_git"}
+    journal = tmp_path / "journal"
+    journal.mkdir(mode=0o700)
+    supervisor = Supervisor(journal, adapter)
+    lease = supervisor.acquire("controller")
+    with pytest.raises(OwnershipUnknown):
+        supervisor.launch(spec, controller="controller", generation=lease["generation"],
+                          operation_id="lost-worktree-reply")
+    original = adapter.root / ("a" * 32) / "worktree"
+    assert str(original) in git_local("worktree", "list", "--porcelain").decode()
+    assert supervisor.reconcile("a" * 32, controller="controller",
+                                generation=lease["generation"])["no_start_reason"] == "workspace_setup_failed"
+    supervisor.collect("a" * 32, controller="controller", generation=lease["generation"])
+    reviewed = supervisor.review("a" * 32)
+    retained = supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],
+                                  operation_id="retain-real-git")
+    assert retained["phase"] == "complete"
+    assert (original / "input.txt").read_text() == "before\n"
+    assert str(original) in git_local("worktree", "list", "--porcelain").decode()
+    assert (adapter.root / ("a" * 32) / "archive" / "no-start" / "worktree" /
+            "input.txt").read_text() == "before\n"
+    assert fake.create_count == 0
 
 
 def test_protocol_channel_reconnect_and_result_evidence(tmp_path, monkeypatch):
