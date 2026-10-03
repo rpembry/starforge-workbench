@@ -4,12 +4,14 @@ import json
 import os
 import errno
 import base64
+import subprocess
 
 import pytest
 
 from coordinator.docker_runtime import DockerRuntime
 from coordinator.supervisor import OwnershipUnknown, Supervisor
 from coordinator.worker_sdk import WorkerClient
+from starforge_workbench.docker_worker import WorkerError
 
 
 def profile():
@@ -132,6 +134,62 @@ def test_unapproved_reference_rejected_before_docker(runtime):
     with pytest.raises(ValueError, match="workspace"):
         adapter.validate(bad)
     assert fake.calls == []
+
+
+def test_approved_git_worktree_exports_patch_and_retains_all_work(runtime, tmp_path):
+    adapter, fake = runtime
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    def git(*args):
+        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(repository), *args],
+                              check=True, capture_output=True,
+                              env={**os.environ, "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+                                   "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}).stdout
+    git("init", "-q")
+    (repository / "input.txt").write_text("before\n")
+    git("add", "input.txt")
+    git("-c", "commit.gpgsign=false", "commit", "-qm", "fixture")
+    revision = git("rev-parse", "HEAD").decode().strip()
+    adapter.workspaces["reviewed_git"] = {"kind": "git_worktree", "repository": str(repository),
+                                           "revision": revision}
+    spec = {**plan(), "workspace_ref": "reviewed_git", "payload": {"argv": ["true"]}}
+    runtime_id = adapter.launch(spec)
+    worktree = adapter.root / ("a" * 32) / "worktree"
+    assert git("worktree", "list", "--porcelain").decode().find(str(worktree)) >= 0
+    assert (worktree / "input.txt").read_text() == "before\n"
+    (worktree / "input.txt").write_text("after\n")
+    fake.item["State"].update(Status="exited", Running=False, ExitCode=0)
+    manifest = json.loads(open(adapter.collect(spec, runtime_id)).read())
+    names = {entry["path"] for entry in manifest["files"]}
+    assert {"changes.patch", "status.txt", "output.txt", "exit.json"} <= names
+    assert b"+after" in adapter.read_artifact(spec, runtime_id, "changes.patch")
+    assert (worktree / "input.txt").read_text() == "after\n"
+    assert (adapter.root / ("a" * 32) / "runtime.json").exists()
+
+
+def test_partial_git_setup_retains_receipt_and_never_creates_container(runtime, tmp_path, monkeypatch):
+    adapter, fake = runtime
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    revision = "a" * 40
+    adapter.workspaces["reviewed_git"] = {"kind": "git_worktree", "repository": str(repository),
+                                           "revision": revision}
+    def interrupted_git(repo, *args):
+        if args[:1] == ("rev-parse",):
+            return (revision + "\n").encode()
+        if args[:1] == ("config",):
+            return b""
+        assert args[:3] == ("worktree", "add", "--detach")
+        (adapter.root / ("a" * 32) / "worktree").mkdir()
+        raise WorkerError("interrupted worktree setup")
+    monkeypatch.setattr("coordinator.docker_runtime.git", interrupted_git)
+    spec = {**plan(), "workspace_ref": "reviewed_git"}
+    with pytest.raises(WorkerError, match="interrupted"):
+        adapter.launch(spec)
+    receipt = json.loads((adapter.root / ("a" * 32) / "runtime.json").read_text())
+    assert receipt["phase"] == "workspace_pending" and receipt["revision"] == revision
+    assert (adapter.root / ("a" * 32) / "worktree").exists()
+    assert not any("create" in argv for argv in fake.calls)
 
 
 def test_protocol_channel_reconnect_and_result_evidence(tmp_path, monkeypatch):

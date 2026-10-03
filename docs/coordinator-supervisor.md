@@ -15,7 +15,12 @@ does not install a service. Example private config:
 
 Create the state directory and config outside Git with mode 0700/0600 and set
 the profile UID/GID to the actual non-root service account. Then run
-`coord-supervisor serve --state-root DIR --config FILE`. Its private Unix
+`coord-supervisor serve --state-root DIR --config FILE`. An approved Git
+workspace entry uses
+`"reviewed_repo":{"kind":"git_worktree","repository":"/absolute/repository","revision":"<full-commit-id>"}`
+in `workspaces`; the service state directory must be outside that repository.
+The repository and revision are operator configuration, not job input.
+The service's private Unix
 `control.sock` accepts fenced acquire/renew/launch/reconcile/cancel/inspect;
 `owner.sock` accepts only owner stop, inspect, and explicit takeover. The
 control socket rejects `owner_takeover`. `coord-supervisor owner-stop --socket
@@ -80,8 +85,15 @@ budget is refreshed by a coordinator reconnection. A backward clock step
 blocks starts and causes the watchdog to stop owned attempts conservatively.
 
 The runtime adapter contract is in the class docstring. `DockerRuntime` now
-implements approved **scratch plus ordinary command** and fixed
-`protocol_example` paths. It resolves
+implements approved scratch or Git-worktree workspaces for ordinary commands
+and the fixed `protocol_example` worker. The Git workspace is bound by private
+operator configuration to an absolute repository and full commit, never by a
+job-supplied host path or branch. It refuses configured Git content filters,
+records a receipt before linked-worktree allocation, verifies the linked
+worktree and HEAD, and retains work plus bounded `changes.patch` and
+`status.txt` exports for review. A partial worktree setup with no confirmed
+Docker runtime remains unknown and retained for explicit recovery; it is not
+reported as an execution result. The adapter resolves
 symbolic profile/workspace references from administrator configuration, uses
 the existing runner's digest-pinned image/environment and restricted create
 verification, and checks exact labels/token/ID, plan hash, and incarnation on
@@ -92,9 +104,9 @@ review. No legacy receipt is adopted automatically. The existing Git-worktree
 runner remains a separate compatibility path, unchanged by this slice.
 
 This slice contains an independently runnable local service process,
-scratch command and protocol-example adapters, and fake-Docker tests. The
-Git-worktree coordinator adapter, live Docker proof, and end-to-end #175
-dispatch integration remain gated. Host death suspends enforcement until the
+scratch and Git workspace adapters, and fake-Docker tests. Git workspace
+review/archive disposition, live Docker proof, and end-to-end #175 dispatch
+integration remain gated. Host death suspends enforcement until the
 supervisor restarts and reconciles. The owner and control sockets both trust
 the same local UID; they are separate operation surfaces, not isolation from
 a malicious process running under that UID. No service installation or live
@@ -102,7 +114,7 @@ Docker claim is made by these tests.
 
 Operator evidence remains open for a reviewed, digest-pinned protocol image,
 live two-worker admission and runtime measurements, independent resource
-reservation against actual host load, scratch review/archive disposition, and
-a fault matrix on a host with ordinary Docker access. The legacy Git runner is
-not a coordinator workspace adapter. Remote access and Starkeep testing belong
+reservation against actual host load, scratch/Git review/archive disposition, and
+a fault matrix on a host with ordinary Docker access. The legacy Git runner
+remains untouched. Remote access and Starkeep testing belong
 to a separately approved later gate.
