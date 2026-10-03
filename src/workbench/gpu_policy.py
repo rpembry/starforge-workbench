@@ -85,6 +85,7 @@ class ReservationPolicy:
     """
 
     REPLAY_SECONDS = 3600
+    MAX_ACQUISITIONS = 4096
 
     def __init__(self, snapshot: PolicySnapshot | None = None, *,
                  clock_id: str = 'synthetic-boot', now: float = 0):
@@ -123,6 +124,8 @@ class ReservationPolicy:
             if now >= lease.expires_at or lease.stale:
                 raise ValueError("Reservation for request key awaits expiry reconciliation")
             return Lease(**vars(lease))
+        if len(self._acquisitions) >= self.MAX_ACQUISITIONS:
+            raise ValueError("Reservation history requires operator recovery")
         token = secrets.token_urlsafe(32)
         lease = Lease(owner, token, now + ttl)
         self._leases[token] = lease
@@ -161,6 +164,10 @@ class ReservationPolicy:
         return Lease(**vars(self._get(owner, token)))
 
     def release(self, owner: str, token: str, now: float) -> None:
+        if token not in self._leases:
+            if any(r.owner == owner and r.token == token and r.retain_until is not None
+                   for r in self._acquisitions.values()):
+                return
         self._get(owner, token)
         del self._leases[token]
         self._retire(token, now)
