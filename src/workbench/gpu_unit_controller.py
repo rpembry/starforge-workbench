@@ -52,7 +52,7 @@ class GpuProcessProbe(Protocol):
 
 class WorkloadScopeProbe(Protocol):
     def ended(self, owner: str) -> bool | None: ...
-    def permitted_gpu_pids(self) -> set[int] | None: ...
+    def permitted_gpu_pids(self, active_leases) -> set[int] | None: ...
 
 
 class LibcPidfd:
@@ -98,7 +98,7 @@ class ExactUnitController:
         self.scopes = scopes
         self._stopped_generation: UnitGeneration | None = None
 
-    def observe(self) -> tuple[Observation, Observation, bool]:
+    def observe(self, active_leases=()) -> tuple[Observation, Observation, bool]:
         try:
             current = self.unit.snapshot()
         except EvidenceUnavailable:
@@ -128,10 +128,12 @@ class ExactUnitController:
             return Observation.ABSENT, Observation.UNKNOWN, True
         if gpu_pids.intersection(p.pid for p in captured.processes):
             return Observation.ABSENT, Observation.PRESENT, True
-        permitted = self.scopes.permitted_gpu_pids()
+        permitted = self.scopes.permitted_gpu_pids(active_leases)
         if permitted is None or not gpu_pids.issubset(permitted):
             # A late escaped miner child and an unrelated GPU client are
             # indistinguishable without positive workload-scope attribution.
+            return Observation.ABSENT, Observation.UNKNOWN, True
+        if self.gpu.pids() != gpu_pids or self.scopes.permitted_gpu_pids(active_leases) != permitted:
             return Observation.ABSENT, Observation.UNKNOWN, True
         # The unit's existing watcher remains the idle authority after START.
         return Observation.ABSENT, Observation.ABSENT, True

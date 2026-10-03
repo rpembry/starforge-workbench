@@ -20,7 +20,7 @@ class FakeController:
         self.actions = []
         self.fail_after_apply = False
 
-    def observe(self):
+    def observe(self, _active_leases):
         return self.process, self.context, self.idle
 
     def workload_ended(self, owner):
