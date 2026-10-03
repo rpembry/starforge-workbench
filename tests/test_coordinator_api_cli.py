@@ -251,3 +251,77 @@ def test_client_uses_fd_relative_address_for_deep_socket(tmp_path, monkeypatch):
         os.fstat(held_fd)
     with pytest.raises(OSError):
         os.fstat(held_fd)
+
+
+def test_server_closes_parent_fd_if_socket_creation_fails(tmp_path, monkeypatch):
+    import os
+    from coordinator import server
+
+    tmp_path.chmod(0o700)
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    policy = tmp_path / "policy.json"
+    policy.write_text(json.dumps({"profiles": ["offline"], "workspaces": ["scratch"],
+        "worker_types": ["command"], "limits": {"max_pending": 1, "max_active": 1,
+        "cpu_millis": 1000, "memory_mb": 128}}))
+    policy.chmod(0o600)
+    real_open = os.open
+    held = []
+
+    def opening(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if str(path) == str(tmp_path):
+            held.append(fd)
+        return fd
+
+    def fail_socket(*_args):
+        raise OSError("synthetic socket creation failure")
+
+    monkeypatch.setattr(server.os, "open", opening)
+    monkeypatch.setattr(server.socket, "socket", fail_socket)
+    with pytest.raises(OSError, match="synthetic socket creation failure"):
+        server.run(state, tmp_path / "coord.sock", policy)
+    assert len(held) == 1
+    with pytest.raises(OSError):
+        os.fstat(held[0])
+
+
+def test_server_closes_parent_fd_if_listener_cleanup_fails(tmp_path, monkeypatch):
+    import os
+    from coordinator import server
+
+    tmp_path.chmod(0o700)
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    policy = tmp_path / "policy.json"
+    policy.write_text(json.dumps({"profiles": ["offline"], "workspaces": ["scratch"],
+        "worker_types": ["command"], "limits": {"max_pending": 1, "max_active": 1,
+        "cpu_millis": 1000, "memory_mb": 128}}))
+    policy.chmod(0o600)
+    socket_path = tmp_path / "coord.sock"
+    real_open = os.open
+    held = []
+
+    def opening(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if str(path) == str(tmp_path):
+            held.append(fd)
+        return fd
+
+    class Listener:
+        def bind(self, address):
+            assert address.startswith("/proc/self/fd/")
+            socket_path.touch(mode=0o600)
+        def listen(self, _backlog):
+            pass
+        def close(self):
+            raise OSError("synthetic cleanup failure")
+
+    monkeypatch.setattr(server.os, "open", opening)
+    monkeypatch.setattr(server.socket, "socket", lambda *_args: Listener())
+    monkeypatch.setattr(server.uvicorn.Server, "run", lambda *_args, **_kwargs: None)
+    with pytest.raises(OSError, match="synthetic cleanup failure"):
+        server.run(state, socket_path, policy)
+    assert len(held) == 1
+    with pytest.raises(OSError):
+        os.fstat(held[0])

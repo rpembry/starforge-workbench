@@ -56,11 +56,12 @@ def run(state_root: Path, socket_path: Path, policy_path: Path,
                   if supervisor_socket is not None else None)
     app = create_app(store, adapter=SupervisorEvidence(dispatcher) if dispatcher else None)
     parent_fd = os.open(socket_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener = None
     socket_inode = None
     stop = threading.Event()
     thread = None
     try:
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         old_mask = os.umask(0o177)
         try:
             # A short fd-relative alias works even when the private state path
@@ -68,8 +69,8 @@ def run(state_root: Path, socket_path: Path, policy_path: Path,
             listener.bind(f"/proc/self/fd/{parent_fd}/{socket_path.name}")
         finally:
             os.umask(old_mask)
-        os.chmod(socket_path, stat.S_IRUSR | stat.S_IWUSR)
         socket_inode = socket_path.stat().st_ino
+        os.chmod(socket_path, stat.S_IRUSR | stat.S_IWUSR)
         listener.listen(128)
         if dispatcher is not None:
             thread = threading.Thread(target=_dispatch_loop, args=(dispatcher, stop), daemon=True)
@@ -77,13 +78,21 @@ def run(state_root: Path, socket_path: Path, policy_path: Path,
         uvicorn.Server(uvicorn.Config(app, log_level="warning", access_log=False)).run(sockets=[listener])
     finally:
         stop.set()
-        if thread is not None:
-            thread.join(timeout=6)
-        listener.close()
-        if (socket_path.is_socket() and socket_path.stat().st_uid == os.getuid() and
-                socket_path.stat().st_ino == socket_inode):
-            socket_path.unlink()
-        os.close(parent_fd)
+        try:
+            if thread is not None:
+                thread.join(timeout=6)
+        finally:
+            try:
+                if listener is not None:
+                    listener.close()
+            finally:
+                try:
+                    if (socket_inode is not None and socket_path.is_socket() and
+                            socket_path.stat().st_uid == os.getuid() and
+                            socket_path.stat().st_ino == socket_inode):
+                        socket_path.unlink()
+                finally:
+                    os.close(parent_fd)
 
 
 def main(argv=None) -> int:
