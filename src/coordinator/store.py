@@ -299,6 +299,8 @@ class CoordinatorStore:
         """Apply a supervisor observation. Missing observations never imply an outcome."""
         if phase not in {"starting", "running", "exited", "stopping", "stopped", "unknown"}:
             raise ValueError("invalid observation phase")
+        if stopped != (phase in {"exited", "stopped"}):
+            raise ValueError("phase and positive stop evidence disagree")
         if observation_seq < 1 or result_ok is not None and (not stopped or exit_code is None):
             raise ValueError("result needs confirmed stop and exit evidence")
         if result_ok is True and exit_code != 0:
@@ -312,6 +314,8 @@ class CoordinatorStore:
                 raise Conflict("stale or mismatched attempt")
             if observation_seq <= attempt["observation_seq"]:
                 return job
+            if attempt["stopped"] and not stopped:
+                raise Conflict("positive stop evidence cannot be reversed")
             if attempt["supervisor_id"] and attempt["supervisor_id"] != supervisor_id:
                 raise Conflict("supervisor identity changed")
             if attempt["runtime_id"] and runtime_id and attempt["runtime_id"] != runtime_id:

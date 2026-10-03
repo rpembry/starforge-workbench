@@ -125,3 +125,36 @@ def test_clock_rewind_blocks_new_start_but_stops_existing(setup):
     with pytest.raises(OwnershipUnknown):
         supervisor.acquire("b", owner_takeover=True)
     assert runtime.stops == 1
+
+
+def test_reacquired_lease_cannot_extend_strict_orphan_stop(setup):
+    supervisor, runtime, clock = setup
+    original = supervisor.acquire("old", lease_seconds=5)
+    supervisor.launch(plan(), controller="old", generation=original["generation"], operation_id="launch")
+    clock[0] = 1006
+    supervisor.acquire("new", lease_seconds=30)
+    clock[0] = 1008
+    assert supervisor.tick() == ["attempt-1"]
+    assert runtime.stops == 1
+
+
+def test_timely_renewal_extends_only_same_generation_budget(setup):
+    supervisor, runtime, clock = setup
+    original = supervisor.acquire("old", lease_seconds=5)
+    supervisor.launch(plan(), controller="old", generation=original["generation"], operation_id="launch")
+    clock[0] = 1004
+    supervisor.renew("old", original["generation"], lease_seconds=5)
+    clock[0] = 1008
+    assert supervisor.tick() == []
+    clock[0] = 1012
+    assert supervisor.tick() == ["attempt-1"]
+
+
+def test_duplicate_owner_stop_does_not_fence_new_controller(setup):
+    supervisor, runtime, clock = setup
+    original = supervisor.acquire("old")
+    supervisor.launch(plan(), controller="old", generation=original["generation"], operation_id="launch")
+    supervisor.owner_stop("attempt-1", operation_id="owner-stop")
+    new = supervisor.acquire("new")
+    supervisor.owner_stop("attempt-1", operation_id="owner-stop")
+    assert supervisor.renew("new", new["generation"]) > clock[0]

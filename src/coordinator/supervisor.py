@@ -162,6 +162,11 @@ class Supervisor:
             now, meta = self._clock_check(db)
             self._authority(meta, controller, generation, now)
             db.execute("UPDATE meta SET lease_until=?", (now + lease_seconds,))
+            # A timely renewal extends only attempts controlled by this same
+            # generation. A later reacquisition cannot reset an orphan budget.
+            db.execute("UPDATE attempts SET orphan_deadline=MIN(deadline,?+grace) "
+                       "WHERE generation=? AND policy='strict' AND state!='stopped'", (
+                           now + lease_seconds, generation))
             return now + lease_seconds
 
     @staticmethod
@@ -203,7 +208,9 @@ class Supervisor:
                 # A lost launch response must be reconciled, never repeated.
                 return self._attempt(old)
             deadline = now + plan["deadline_seconds"]
-            orphan_deadline = min(deadline, now + policy["max_orphan_seconds"]) if policy["mode"] == "trusted_local" else deadline
+            orphan_deadline = (min(deadline, now + policy["max_orphan_seconds"])
+                               if policy["mode"] == "trusted_local"
+                               else min(deadline, meta["lease_until"] + policy["grace_seconds"]))
             db.execute("INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                 plan["attempt_id"], plan["job_id"], plan["incarnation"], digest, _json(plan),
                 generation, operation_id, None, "launch_pending", 0, deadline,
@@ -303,10 +310,26 @@ class Supervisor:
             old = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
             if old and (old["attempt_id"] != attempt_id or old["kind"] != "owner_stop"):
                 raise Conflict("operation identity conflict")
+            if old:
+                # Repeat the exact stop if its confirmation was lost, but do
+                # not revoke a controller which acquired control afterwards.
+                already_recorded = True
+            else:
+                already_recorded = False
+            if row["state"] == "stopped":
+                if not old:
+                    db.execute("INSERT INTO operations VALUES(?,?,?,?,?)", (
+                        operation_id, attempt_id, "owner_stop", "confirmed",
+                        _json({"state": "stopped"})))
+                else:
+                    db.execute("UPDATE operations SET status='confirmed',response=? WHERE id=?", (
+                        _json({"state": "stopped"}), operation_id))
+                return self._attempt(row)
             if not old:
                 db.execute("INSERT INTO operations VALUES(?,?,?,?,?)", (operation_id, attempt_id, "owner_stop", "pending", None))
             db.execute("UPDATE attempts SET cancel=1 WHERE id=?", (attempt_id,))
-            db.execute("UPDATE meta SET generation=generation+1,controller=NULL,lease_until=0")
+            if not already_recorded:
+                db.execute("UPDATE meta SET generation=generation+1,controller=NULL,lease_until=0")
         return self._stop_exact(attempt_id)
 
     def _stop_exact(self, attempt_id):
@@ -343,8 +366,8 @@ class Supervisor:
             due = []
             for row in rows:
                 stop_at = row["deadline"]
-                if meta["lease_until"] <= now:
-                    stop_at = min(stop_at, meta["lease_until"] + row["grace"] if row["policy"] == "strict" else row["orphan_deadline"])
+                if row["generation"] != meta["generation"] or meta["lease_until"] <= now:
+                    stop_at = min(stop_at, row["orphan_deadline"])
                 if meta["blocked"] or now >= stop_at or row["cancel"]:
                     db.execute("UPDATE attempts SET cancel=1 WHERE id=?", (row["id"],))
                     due.append(row["id"])

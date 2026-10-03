@@ -86,9 +86,9 @@ def test_unknown_evidence_retry_and_stale_observation(store, spec):
     job = store.observe(**args, observation_seq=1, phase="running", runtime_id="container-1")
     job = store.mark_visibility_unknown(job["id"], expected_version=job["version"])
     assert job["visibility"] == "unknown" and job["outcome"] is None
-    assert store.observe(**args, observation_seq=1, phase="exited") == job
+    assert store.observe(**args, observation_seq=1, phase="running") == job
     with pytest.raises(ValueError, match="result needs"):
-        store.observe(**args, observation_seq=2, phase="exited", result_ok=True)
+        store.observe(**args, observation_seq=2, phase="running", result_ok=True)
     with pytest.raises(Conflict, match="runtime identity"):
         store.observe(**args, observation_seq=2, phase="running", runtime_id="other")
     job = store.observe(**args, observation_seq=2, phase="stopped", runtime_id="container-1",
@@ -124,3 +124,23 @@ def test_dispatch_command_identity_survives_restart(store, spec):
     assert restarted.pending_commands() == []
     with pytest.raises(Conflict):
         restarted.set_command_status(pending[0]["id"], "running")
+
+
+def test_stopped_evidence_cannot_be_reversed_or_contradicted(store, spec):
+    store.submit(spec, principal="client", key="a")
+    job = store.admit_next(principal="scheduler", key="a")
+    attempt = job["attempts"][0]
+    args = dict(job_id=job["id"], attempt_id=attempt["id"],
+                incarnation=attempt["incarnation"], supervisor_id="host")
+    with pytest.raises(ValueError, match="disagree"):
+        store.observe(**args, observation_seq=1, phase="running", stopped=True,
+                      exit_code=0, result_ok=True)
+    stopped = store.observe(**args, observation_seq=1, phase="exited", stopped=True,
+                            exit_code=0)
+    assert stopped["phase"] == "finalizing"
+    with pytest.raises(Conflict, match="cannot be reversed"):
+        store.observe(**args, observation_seq=2, phase="unknown", stopped=False)
+    assert store.get(job["id"])["attempts"][0]["stopped"] == 1
+    final = store.observe(**args, observation_seq=2, phase="stopped", stopped=True,
+                          exit_code=0, result_ok=True)
+    assert final["outcome"] == "succeeded"
