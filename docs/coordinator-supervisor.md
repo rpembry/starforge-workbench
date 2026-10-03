@@ -78,7 +78,10 @@ is uncertain. Mutating control reconciliation requires the current controller
 and generation; a stale coordinator cannot change journal observations.
 If Docker starts a worker but its response is lost, cancellation and the
 watchdog inspect the exact receipt, token, labels, plan, and incarnation before
-adopting its runtime ID for a scoped stop. A mismatched resource stays unknown.
+adopting its runtime ID for a scoped stop. The adapter durably saves that
+positively verified ID in the private receipt before exposing it to the
+supervisor, so later review and archive absence checks retain the same identity.
+A mismatched resource stays unknown.
 
 The journal records one active controller lease and monotonically increasing
 generation, immutable attempt/operation IDs, a plan hash, runtime identity,
@@ -139,8 +142,17 @@ that result to normal exit observation or artifact handling. That atomic
 store transition records a failed outcome, or cancelled when cancel intent is
 already sticky, and permits explicit retry as a new attempt. An absent or
 mismatched receipt, `create_pending` or later phase, Docker outage, or
-ambiguous lookup remains unknown and cannot be retried. This proof does not
-archive the retained partial worktree. The adapter resolves
+ambiguous lookup remains unknown and cannot be retried. For
+`workspace_setup_failed` attempts, the existing owner-only `review` and
+`archive` commands return a distinct `no_start_retention` result. Review
+requires committed no-start evidence and a fresh exact precreate absence
+check, then hashes a bounded, symlink-safe inventory including the partial
+workspace and private runtime receipt. Archive records the approved review
+digest and operation ID before copying those bytes into a private, fsynced
+`archive/no-start` snapshot. An interrupted copy replays the same operation.
+The original workspace and Git administrative entry remain in place; this
+path performs no runtime deletion or Git cleanup. `prelaunch_abandon` has no
+allocated workspace to retain and is not eligible. The adapter resolves
 symbolic profile/workspace references from administrator configuration, uses
 the existing runner's digest-pinned image/environment and restricted create
 verification, and checks exact labels/token/ID, plan hash, and incarnation on
