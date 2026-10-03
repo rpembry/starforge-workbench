@@ -1,6 +1,6 @@
 /* Status shell only. Sensitive API responses are never intercepted or cached. */
 const CACHE_PREFIX = 'workbench-status-shell-';
-const CACHE_NAME = `${CACHE_PREFIX}v4`;
+const CACHE_NAME = `${CACHE_PREFIX}v5`;
 const SHELL = '/status/';
 const STATIC = new Set([SHELL, '/status/manifest.webmanifest', '/assets/status.js',
   '/status/icon-192.png', '/status/icon-512.png']);

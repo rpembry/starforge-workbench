@@ -103,6 +103,7 @@
     section.replaceChildren(el('h2', names[widget]), el('p', 'Checking…', 'muted'));
     try {
       const response = await fetch(`/api/status/${widget}`, {signal: controller.signal, cache: 'no-store', credentials: 'same-origin'});
+      if (token !== generation || controller.signal.aborted) return;
       if (response.status === 401 || response.status === 403) { authenticationExpired(); return; }
       if (!response.ok) throw new Error(`Source unavailable (${response.status})`);
       const data = await response.json();
@@ -156,6 +157,7 @@
     pending.set('config', configController);
     try {
       const response = await fetch('/api/status/config', {signal: configController.signal, cache: 'no-store', credentials: 'same-origin'});
+      if (token !== generation || configController.signal.aborted) return;
       if (response.status === 401 || response.status === 403) { authenticationExpired(); return; }
       if (!response.ok) throw new Error('Configuration unavailable');
       const config = await response.json();

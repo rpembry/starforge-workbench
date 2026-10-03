@@ -25,6 +25,7 @@ async function run() {
   stores.set('workbench-status-shell-v1', new Map());
   stores.set('workbench-status-shell-v2', new Map());
   stores.set('workbench-status-shell-v3', new Map());
+  stores.set('workbench-status-shell-v4', new Map());
   stores.set('other-application-cache', new Map());
   const self = {location: {origin: 'https://example.invalid'}, clients: {claim: async () => { claimed++; }},
     skipWaiting: () => { skipped++; }, addEventListener: (name, handler) => { handlers[name] = handler; }};
@@ -53,7 +54,8 @@ async function run() {
   assert.equal((await request('/status/')).path, '/status/');
   assert.equal(network, 0); // shell served from static allowlist cache
   await lifecycle('activate');
-  assert.deepEqual(removed, ['workbench-status-shell-v1', 'workbench-status-shell-v2', 'workbench-status-shell-v3']);
+  assert.deepEqual(removed, ['workbench-status-shell-v1', 'workbench-status-shell-v2',
+    'workbench-status-shell-v3', 'workbench-status-shell-v4']);
   assert.equal(stores.has('other-application-cache'), true);
   assert.equal(claimed, 1);
   handlers.message({data: 'ACTIVATE_UPDATE', source: {url: 'https://evil.example/status/'}});

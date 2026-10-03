@@ -40,13 +40,16 @@ async function run() {
   const fetches = [];
   let configStatus = 200;
   let currentProfile = 'synthetic-fixture';
+  let percent = 101.25;
+  let deferred = null;
   const fetch = (url, options) => {
     fetches.push({url, options});
+    if (deferred?.url === url) return new Promise(resolve => { deferred.resolve = resolve; });
     if (url === '/api/status/config') return Promise.resolve({ok: configStatus === 200, status: configStatus,
       json: () => Promise.resolve({profile: currentProfile, timezone: 'America/Indiana/Indianapolis'})});
     return Promise.resolve({ok: true, json: () => Promise.resolve({source: 'manual observation',
       checked_at: '2026-10-03T12:00:00Z', items: [{provider: 'ExampleAI', product: 'Assistant', profile: 'personal',
-        bucket: 'default', window: 'five-hour', remaining_percent: 101.25,
+        bucket: 'default', window: 'five-hour', remaining_percent: percent,
         observed_at: '2026-10-03T12:00:00Z', reset_at: '2026-10-03T12:02:00Z'}]})});
   };
   const script = fs.readFileSync('src/workbench/static/status.js', 'utf8');
@@ -90,6 +93,38 @@ async function run() {
   boxes[3].checked = false; boxes[3].fire('change');
   assert.equal(cards.allText().includes('101.25'), false);
   assert.equal(fetches.length, afterExpiry); // unselected widget makes no request
+
+  // A canceled request may still settle in a nonconforming adapter. Its old 401
+  // must not erase a newer authenticated result.
+  configStatus = 200;
+  percent = 37;
+  boxes[3].checked = true; boxes[3].fire('change');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(cards.allText(), /37%/);
+  deferred = {url: '/api/status/config'};
+  refresh.fire('click');
+  const oldConfig = deferred;
+  deferred = null;
+  refresh.fire('click');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(cards.allText(), /37%/);
+  oldConfig.resolve({ok: false, status: 401});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(cards.allText(), /37%/);
+  assert.doesNotMatch(cards.allText(), /Sign-in required/);
+
+  deferred = {url: '/api/status/allowances'};
+  refresh.fire('click');
+  await new Promise(resolve => setImmediate(resolve));
+  const oldWidget = deferred;
+  deferred = null;
+  refresh.fire('click');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(cards.allText(), /37%/);
+  oldWidget.resolve({ok: false, status: 401});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(cards.allText(), /37%/);
+  assert.doesNotMatch(connection.textContent, /Session expired/);
 }
 
 run().catch(error => { console.error(error); process.exitCode = 1; });
