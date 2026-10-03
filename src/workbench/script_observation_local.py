@@ -19,6 +19,8 @@ from .script_observation import ScriptIdentity, read_status, validate_event
 MAX_EVENTS = 128
 MAX_TOTAL_BYTES = 512 * 1024
 MAX_EVENT_BYTES = 4096
+MAX_GAP_BYTES = 1024
+GAP_NAME = ".observation.gap"
 EVENT_NAME = re.compile(r"[a-f0-9]{32}-[12]-[a-f0-9]{32}\.json\Z")
 
 
@@ -64,7 +66,7 @@ def _files(fd: int) -> list[tuple[str, os.stat_result]]:
     with os.scandir(fd) as entries:
         for entry in entries:
             name = entry.name
-            if name == ".observation.lock":
+            if name in {".observation.lock", GAP_NAME}:
                 continue
             if not EVENT_NAME.fullmatch(name):
                 raise ObservationBufferError("unexpected_observation_entry")
@@ -95,6 +97,55 @@ def _read(fd: int, name: str) -> bytes:
         os.close(item_fd)
 
 
+def _gap(fd: int, identity: ScriptIdentity) -> tuple[int, datetime] | None:
+    try:
+        info = os.stat(GAP_NAME, dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > MAX_GAP_BYTES):
+        raise ObservationBufferError("unsafe_observation_gap")
+    value = json.loads(_read(fd, GAP_NAME))
+    if (not isinstance(value, dict) or set(value) != {"version", "identity", "blocked_event_id", "blocked_at"}
+            or value["version"] != 1 or value["identity"] != [identity.script_id,
+            identity.revision, identity.adapter_id] or not isinstance(value["blocked_event_id"], str)
+            or not re.fullmatch(r"[a-f0-9]{32}", value["blocked_event_id"])
+            or not isinstance(value["blocked_at"], str) or len(value["blocked_at"]) > 40
+            or not value["blocked_at"].endswith("Z")):
+        raise ObservationBufferError("invalid_observation_gap")
+    return info.st_mtime_ns, datetime.fromisoformat(value["blocked_at"].replace("Z", "+00:00"))
+
+
+def _record_gap(fd: int, identity: ScriptIdentity, event: dict) -> None:
+    # One bounded marker survives a later retention/archive of old event files.
+    prior = _gap(fd, identity)  # reject an unsafe or foreign marker before replacement
+    blocked_at = datetime.fromisoformat(event["occurred_at"].replace("Z", "+00:00"))
+    if prior is not None:
+        blocked_at = max(blocked_at, prior[1])
+    payload = json.dumps({"version": 1, "identity": [identity.script_id, identity.revision,
+                          identity.adapter_id], "blocked_event_id": event["event_id"],
+                          "blocked_at": blocked_at.isoformat().replace("+00:00", "Z")},
+                         separators=(",", ":")).encode()
+    if len(payload) > MAX_GAP_BYTES:
+        raise ObservationBufferError("oversized_observation_gap")
+    temp = ".observation-gap-" + uuid.uuid4().hex
+    temp_fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                      0o600, dir_fd=fd)
+    try:
+        with os.fdopen(temp_fd, "wb", closefd=False) as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, GAP_NAME, src_dir_fd=fd, dst_dir_fd=fd)
+        os.fsync(fd)
+    finally:
+        os.close(temp_fd)
+        try:
+            os.unlink(temp, dir_fd=fd)
+        except FileNotFoundError:
+            pass
+
+
 def write_event(directory: Path, identity: ScriptIdentity, event: dict) -> None:
     """Atomically append one validated event; exact replay is idempotent."""
     validate_event(event, identity)
@@ -104,12 +155,14 @@ def write_event(directory: Path, identity: ScriptIdentity, event: dict) -> None:
     name = f'{event["run_id"]}-{event["seq"]}-{event["event_id"]}.json'
     with _protected_directory(directory) as fd:
         records = _files(fd)
+        _gap(fd, identity)
         for prior_name, _ in records:
             if prior_name.endswith(f'-{event["event_id"]}.json'):
                 if prior_name == name and _read(fd, prior_name) == payload:
                     return
                 raise ObservationBufferError("conflicting_observation_replay")
         if len(records) >= MAX_EVENTS or sum(info.st_size for _, info in records) + len(payload) > MAX_TOTAL_BYTES:
+            _record_gap(fd, identity, event)
             raise ObservationBufferError("observation_buffer_full")
         temp = ".observation-" + uuid.uuid4().hex
         temp_fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -134,6 +187,7 @@ def status_from_spool(directory: Path, identity: ScriptIdentity, *, now: datetim
     try:
         with _protected_directory(directory, create_lock=False) as fd:
             records = _files(fd)
+            gap_stamp = _gap(fd, identity)
             events = []
             seen_ids = set()
             for name, info in records:
@@ -156,9 +210,19 @@ def status_from_spool(directory: Path, identity: ScriptIdentity, *, now: datetim
             if (len(records) >= MAX_EVENTS
                     or sum(info.st_size for _, info in records) + MAX_EVENT_BYTES > MAX_TOTAL_BYTES):
                 return {**unknown, "reporting": "full"}
-            received = (datetime.fromtimestamp(max(stamp for _, stamp in events) / 1e9, timezone.utc)
-                        if events else None)
-            status = read_status([event for event, _ in events], identity=identity,
+            current_events = [(event, stamp) for event, stamp in events
+                              if gap_stamp is None or (stamp > gap_stamp[0] and
+                                  datetime.fromisoformat(event["occurred_at"].replace("Z", "+00:00")) > gap_stamp[1])]
+            if gap_stamp is not None and not current_events:
+                return {**unknown, "reporting": "gap"}
+            current_runs = {}
+            for event, _ in current_events:
+                current_runs.setdefault(event["run_id"], {})[event["seq"]] = event["kind"]
+            if any(kinds.get(2) == "exited" and kinds.get(1) != "started" for kinds in current_runs.values()):
+                return {**unknown, "reporting": "gap"}
+            received = (datetime.fromtimestamp(max(stamp for _, stamp in current_events) / 1e9, timezone.utc)
+                        if current_events else None)
+            status = read_status([event for event, _ in current_events], identity=identity,
                                  received_at=received, now=now, freshness_seconds=freshness_seconds)
             status["reporting"] = "available"
             return status

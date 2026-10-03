@@ -32,7 +32,8 @@ The local writer uses a private lock, an owner-only temporary regular file,
 file fsync, an atomic hard link to the immutable event name, and directory
 fsync. Exact event replay returns without a second record; conflicting event
 identity is rejected. Each event is at most 4 KiB; the directory holds at most
-128 events and 512 KiB. Capacity exhaustion retains prior evidence and rejects
+128 event records and 512 KiB of event data, plus a gap marker of at most
+1 KiB. Capacity exhaustion retains prior evidence and rejects
 new writes; it never reruns the script. There is no automatic pruning,
 acknowledgement, delivery transport or restart retry. A crash with a leftover
 temporary file makes status unknown until the buffer is reconciled by a later
@@ -43,10 +44,19 @@ status or a rejected write, without delaying the child.
 At the record limit, or with less than one maximum-size event of byte capacity
 remaining, status is `unknown` with `reporting: full`. A new start might have
 been rejected, so an older successful run must not remain the apparent current
-result. Recovery requires a separately reviewed retention step that preserves
-old records outside the active buffer, followed by new run evidence. The
-synthetic test archives old records before admitting a new final event; the
-CLI does not prune or archive real observations automatically.
+result. A rejected write also persists a bounded owner-only gap marker, bound
+to the configured source. Archiving older records may free capacity, but the
+marker keeps status `unknown` until a newer validated observation arrives.
+Both durable file order and the event's UTC occurrence time must follow the
+blocked event, so replaying an older archived record cannot clear the gap;
+an exit without a newer start remains a gap. The marker stays in the active
+buffer during any supported retention step. A separately reviewed process
+must preserve old records outside that buffer, then wait for new run evidence.
+Synthetic tests cover an archive that retains the prior success in the active
+buffer and a later recovery after fresh evidence. The CLI does not prune or
+archive real observations automatically. If the filesystem cannot durably
+record the gap marker, this prototype cannot prove recovery after external
+file removal; such a state requires separate reconciliation before use.
 
 The wrapper allows at most 100 ms per publication call. A late or failed
 publication cannot change the child exit code. Its daemon thread may be lost
