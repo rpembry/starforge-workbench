@@ -14,8 +14,12 @@ does not, the lease remains pending. There is no process-name search,
 arbitrary PID signal, `SIGSTOP`, or global GPU reset. A second observation can report
 absence only after the unit is inactive, its captured cgroup is empty, every
 captured process generation has exited, and none of the captured PIDs retains
-a KFD GPU context. A changed invocation blocks a grant even if the previous
-processes are gone. An unrelated desktop or model process may still hold VRAM.
+a KFD GPU context. Every remaining KFD PID must be positively attributed to
+a currently supervised higher-priority workload scope. This catches a GPU
+child that appears after the initial capture and escapes the old cgroup. A
+changed invocation blocks a grant even if the previous processes are gone.
+Unrelated desktop VRAM may remain; an unassigned KFD compute process keeps
+the grant pending rather than being assumed harmless.
 Missing systemd, `/proc`, cgroup, or ROCm evidence yields UNKNOWN. A captured
 generation held only in memory is lost on controller restart; an already
 inactive unit then stays UNKNOWN and cannot grant a lease or restart without
@@ -27,7 +31,13 @@ user-unit watcher remains the authority for display, lock, and input idle
 conditions after START. An optional time-window policy can still restrict
 eligibility, but the default remains any hour. Higher-priority workload
 end proof comes from an injected supervised-scope probe; there is no default
-probe that equates parent PID death with job completion.
+probe that equates parent PID death with job completion. The scope probe must
+return a fresh, generation-aware set of PIDs from active authorized leases;
+it cannot trust client-supplied names or a static allowlist. If that evidence
+is unavailable, a nonempty KFD list is UNKNOWN. No code in this slice claims
+to detect GPU contexts omitted by the ROCm KFD probe or arbitrary descendants
+outside the inspected unit and supervised scopes; production suitability
+requires validating those host-specific boundaries.
 
 The backend requires Linux pidfd support through the host libc. If that entry
 point is unavailable, exact stop fails closed. The provided source is not a

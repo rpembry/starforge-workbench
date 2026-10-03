@@ -58,15 +58,21 @@ class FakeUnit:
 
 class FakeGpu:
     def __init__(self):
-        self.visible = {102, 909}  # Another app may use the GPU.
+        self.visible = {102, 909}  # 909 belongs to another supervised scope.
 
     def pids(self):
         return self.visible
 
 
 class FakeScopes:
+    def __init__(self):
+        self.permitted = {909}
+
     def ended(self, _owner):
         return None
+
+    def permitted_gpu_pids(self):
+        return self.permitted
 
 
 def test_exact_stop_requires_full_cgroup_generation_and_gpu_context_exit(tmp_path):
@@ -86,7 +92,7 @@ def test_exact_stop_requires_full_cgroup_generation_and_gpu_context_exit(tmp_pat
     unit.alive.clear()
     assert adapter.tick() == 'STOP'  # Captured miner GPU PID persists.
     assert not adapter.status('supervised-scope', acquired['token'])['granted']
-    gpu.visible = {909}  # Unrelated GPU context is allowed.
+    gpu.visible = {909}  # A positively attributed scope may use the GPU.
     assert adapter.tick() == 'HOLD'
     assert adapter.status('supervised-scope', acquired['token'])['granted']
     adapter.release('supervised-scope', acquired['token'])
@@ -141,6 +147,31 @@ def test_replacement_invocation_during_stop_cannot_be_mistaken_for_old_exit(tmp_
     assert adapter.tick() == 'STOP'  # B still owns a GPU context.
     assert not adapter.status('supervised-scope', acquired['token'])['granted']
     gpu.visible.discard(202)
+    assert adapter.tick() == 'HOLD'
+    assert adapter.status('supervised-scope', acquired['token'])['granted']
+    registry.close()
+
+
+def test_late_escaped_gpu_child_blocks_grant_until_context_gone(tmp_path):
+    private = tmp_path / 'private'
+    private.mkdir(mode=0o700)
+    registry = Registry(private / 'state.sqlite', 'boot-one')
+    unit, gpu, scopes = FakeUnit(), FakeGpu(), FakeScopes()
+    adapter = LocalAdapter(registry, ExactUnitController(unit, gpu, scopes),
+                           clock_id='boot-one', clock=lambda: 0.)
+    acquired = adapter.acquire('supervised-scope', 'request-one', 60)
+    assert adapter.tick() == 'STOP'
+    # A new child appears after capture, leaves the old unit cgroup, and
+    # retains KFD context. It was never among the originally captured PIDs.
+    unit.remaining = ()
+    unit.alive.clear()
+    gpu.visible = {103, 909}
+    assert adapter.tick() == 'HOLD'
+    assert not adapter.status('supervised-scope', acquired['token'])['granted']
+    gpu.visible = {909}
+    scopes.permitted = None
+    assert adapter.tick() == 'HOLD'  # Scope evidence itself is required.
+    scopes.permitted = {909}
     assert adapter.tick() == 'HOLD'
     assert adapter.status('supervised-scope', acquired['token'])['granted']
     registry.close()
