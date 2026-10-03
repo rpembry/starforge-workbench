@@ -344,6 +344,10 @@ class DockerRuntime:
             raise WorkerError("archived container reappeared")
         return True
 
+    def inspect_archive_absent(self, plan, runtime_id, review_sha256, operation_id):
+        from .disposition import archive_absent
+        return archive_absent(self, plan, runtime_id, review_sha256, operation_id)
+
     def stop(self, plan, runtime_id):
         observed = self.inspect(plan, runtime_id)
         if not observed["stopped"]:

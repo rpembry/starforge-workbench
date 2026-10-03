@@ -55,6 +55,13 @@ Unix account. Keep the owner socket path out of ordinary client configuration.
 Repeated reconciliation after a committed exact archive preserves the stopped
 state after the container is removed; it rechecks the private disposition,
 archived content, and exact absence before accepting that terminal evidence.
+If Docker removes the stopped container but its reply is lost during an
+approved archive, reconciliation also preserves stopped state for the matching
+durable `archiving` intent, committed collection, reviewed content, and exact
+runtime absence. A journal previously marked unknown by that sequence can be
+restored to stopped only after those same checks; replaying the original archive
+operation then completes retention. Changed content or uncertain Docker
+observation remains unknown.
 The tick loop runs every 250 ms independently of coordinator availability and
 reports changed uncertainty without unbounded repeated error lines. The
 service refuses existing socket paths rather than replacing a possibly live

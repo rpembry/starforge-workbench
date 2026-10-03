@@ -6,6 +6,7 @@ evidence before invoking either operation.
 """
 
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -49,6 +50,52 @@ def review(runtime, plan, runtime_id):
     atomic(attempt / "review.json", data)
     return {"attempt_id": receipt["attempt_id"], "review_sha256": _hash(attempt / "review.json"),
             "entries": len(entries), "review_manifest": str(attempt / "review.json")}
+
+
+def archive_absent(runtime, plan, runtime_id, review_sha256, operation_id):
+    """Read-only proof that an approved archive removed its exact runtime."""
+    receipt = runtime._read(plan["attempt_id"])
+    if (receipt["job_id"] != plan["job_id"] or
+            receipt["incarnation"] != plan["incarnation"] or
+            receipt["plan_hash"] != hashlib.sha256(
+                json.dumps(plan, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+            ).hexdigest() or receipt["container_id"] != runtime_id):
+        raise WorkerError("archive runtime identity changed")
+    attempt = private_directory(receipt["attempt_path"])
+    review_path, disposition_path = attempt / "review.json", attempt / "disposition.json"
+    if not disposition_path.exists():
+        return False
+    approved = read_private(review_path)
+    disposition = read_private(disposition_path)
+    if (_hash(review_path) != review_sha256 or
+            any(approved.get(key) != value for key, value in _identity(receipt, runtime_id).items()) or
+            disposition.get("runtime_id") != runtime_id or
+            disposition.get("review_sha256") != review_sha256 or
+            disposition.get("operation_id") != operation_id or
+            disposition.get("phase") not in {"archiving", "complete"}):
+        raise WorkerError("approved archive identity changed")
+    if disposition["phase"] == "archiving":
+        if (attempt / "archive").is_symlink():
+            raise WorkerError("archive path changed")
+        roots = {}
+        for name in ROOTS:
+            source, target = attempt / name, attempt / "archive" / name
+            if name == "artifacts":
+                roots[name] = source
+            elif source.exists() and target.exists():
+                raise WorkerError("ambiguous archive ownership")
+            else:
+                roots[name] = target if target.exists() else source
+    else:
+        if disposition.get("archive") != str(attempt / "archive"):
+            raise WorkerError("archive destination changed")
+        if any((attempt / name).exists() or (attempt / name).is_symlink()
+               for name in ("worktree", "scratch")):
+            raise WorkerError("disposed allocation reappeared")
+        roots = _roots(attempt, archived=True)
+    if inventory(roots) != approved["entries"]:
+        raise WorkerError("reviewed archive content changed")
+    return runtime.inspect_optional(plan, runtime_id) is None
 
 
 def archive(runtime, plan, runtime_id, review_sha256, operation_id):
