@@ -503,6 +503,41 @@ def attach(c):
     if pending.exists():
         pending.unlink()
 
+def resolve_connect_context(contexts, words):
+    if not words:
+        raise ValueError('Give a context name, for example aiw c Example Support; use aiw list to see names')
+    name = ' '.join(words).casefold()
+    matches = [c for c in contexts if name in {c['id'].casefold(), c['title'].casefold(),
+               *(alias.casefold() for alias in ALIASES.get(c['id'], []))}]
+    if len(matches) > 1:
+        raise ValueError('Ambiguous context name; matching IDs: '+', '.join(c['id'] for c in matches))
+    if not matches:
+        raise ValueError('Unknown context name; use aiw list to see configured names')
+    return matches[0]
+
+def connect(c):
+    """Connect this terminal to an existing managed session, without starting one."""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise ValueError('connect requires an interactive terminal on the Workbench host (SSH there first)')
+    state = live(c)
+    if not state or state['dead']:
+        raise ValueError(c['title']+': no live managed tmux session; use aiw status '+c['id']+' or start it separately')
+    identity = state['identity']
+    current = os.environ.get('TMUX')
+    if current:
+        socket = probe('display-message', '-p', '-t', identity, '#{socket_path}')
+        if not re.fullmatch(r'/[^\n]+\n', socket):
+            raise TmuxUnknown('malformed_socket_path')
+        if current.split(',', 1)[0] != socket.strip():
+            raise ValueError('Already inside a different tmux server; detach from it before connecting to Workbench')
+        tmux('switch-client', '-t', identity)
+    else:
+        # A second client may attach while a desktop client remains connected.
+        try:
+            run(tmux_command('attach-session', '-t', identity), cwd=TMUX_CLIENT_CWD, check=True)
+        except subprocess.CalledProcessError:
+            raise TmuxUnknown('attach_failed') from None
+
 def checkout_keys(c):
     keys = []
     for p in directories(c):
@@ -774,13 +809,18 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--manifest', type=Path, default=default_manifest())
     p.add_argument('--dry-run', action='store_true')
-    p.add_argument('command', choices=['doctor','list','plan','up','attach','status','bind','_attach','_menu'])
+    p.add_argument('command', choices=['doctor','list','plan','up','attach','c','connect','status','bind','_attach','_menu'])
     p.add_argument('contexts', nargs='*')
     p.add_argument('--headless', action='store_true', help='Create/reuse detached menu sessions without windows')
     p.add_argument('--session-id')
     args = p.parse_args(argv)
     manifest = args.manifest.resolve()
     data = load(manifest)
+    if args.command in ('c', 'connect'):
+        if args.dry_run or args.headless or args.session_id:
+            raise ValueError('c/connect accepts only a context name and optional --manifest')
+        connect(resolve_connect_context(data['contexts'], args.contexts))
+        return
     byid = {c['id']: c for c in data['contexts']}
     selected = [byid[k] for k in args.contexts] if args.contexts else list(byid.values())
     if args.command in ['attach','_attach','_menu','bind'] and len(args.contexts) != 1:
