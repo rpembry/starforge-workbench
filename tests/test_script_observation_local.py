@@ -97,7 +97,58 @@ def test_buffer_limit_does_not_discard_prior_evidence(tmp_path, monkeypatch):
         write_event(spool, IDENTITY, second)
     assert len(list(spool.glob("*.json"))) == 1
     status = status_from_spool(spool, IDENTITY, now=datetime.now(timezone.utc), freshness_seconds=300)
+    assert status["state"] == "unknown" and status["reporting"] == "full"
+
+
+def test_full_buffer_cannot_present_old_success_as_current(tmp_path, monkeypatch):
+    _, spool = private_descriptor(tmp_path)
+    monkeypatch.setattr(local, "MAX_EVENTS", 2)
+    old_run = "1" * 32
+    start = observed_event(IDENTITY, old_run, 1, "started", {"pid_known": True})
+    exit_event = observed_event(IDENTITY, old_run, 2, "exited",
+                                {"exit_code": 0, "signal": None, "duration_ms": 1})
+    write_event(spool, IDENTITY, start)
+    write_event(spool, IDENTITY, exit_event)
+    newer_start = observed_event(IDENTITY, "2" * 32, 1, "started", {"pid_known": True})
+    with pytest.raises(ObservationBufferError):
+        write_event(spool, IDENTITY, newer_start)
+    status = status_from_spool(spool, IDENTITY,
+                               now=datetime.now(timezone.utc), freshness_seconds=300)
+    assert status["state"] == "unknown"
+    assert status["freshness"] == "unknown"
     assert status["reporting"] == "full"
+    assert len(list(spool.glob("*.json"))) == 2
+
+
+def test_retained_archive_and_new_evidence_restore_status(tmp_path, monkeypatch):
+    _, spool = private_descriptor(tmp_path)
+    monkeypatch.setattr(local, "MAX_EVENTS", 3)
+    old_run, new_run = "3" * 32, "4" * 32
+    for event in (
+        observed_event(IDENTITY, old_run, 1, "started", {"pid_known": True}),
+        observed_event(IDENTITY, old_run, 2, "exited",
+                       {"exit_code": 0, "signal": None, "duration_ms": 1}),
+        observed_event(IDENTITY, new_run, 1, "started", {"pid_known": True}),
+    ):
+        write_event(spool, IDENTITY, event)
+    new_exit = observed_event(IDENTITY, new_run, 2, "exited",
+                              {"exit_code": 0, "signal": None, "duration_ms": 1})
+    with pytest.raises(ObservationBufferError):
+        write_event(spool, IDENTITY, new_exit)
+    assert status_from_spool(spool, IDENTITY,
+                             now=datetime.now(timezone.utc), freshness_seconds=300)["state"] == "unknown"
+    archive = tmp_path / "synthetic-archive"
+    archive.mkdir(mode=0o700)
+    old_files = [path for path in spool.glob("*.json") if path.name.startswith(old_run)]
+    old_bytes = [path.read_bytes() for path in old_files]
+    for path in old_files:
+        path.rename(archive / path.name)
+    write_event(spool, IDENTITY, new_exit)
+    status = status_from_spool(spool, IDENTITY,
+                               now=datetime.now(timezone.utc), freshness_seconds=300)
+    assert status["state"] == "process_exit_zero" and status["reporting"] == "available"
+    assert [path.read_bytes() for path in sorted(archive.glob("*.json"))] == [
+        payload for _, payload in sorted(zip(old_files, old_bytes))]
 
 
 def test_missing_directory_is_unknown(tmp_path):

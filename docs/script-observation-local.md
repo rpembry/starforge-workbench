@@ -40,6 +40,14 @@ reviewed maintenance path. Missing final evidence stays unknown after the
 freshness window. Lock acquisition is nonblocking; contention yields unknown
 status or a rejected write, without delaying the child.
 
+At the record limit, or with less than one maximum-size event of byte capacity
+remaining, status is `unknown` with `reporting: full`. A new start might have
+been rejected, so an older successful run must not remain the apparent current
+result. Recovery requires a separately reviewed retention step that preserves
+old records outside the active buffer, followed by new run evidence. The
+synthetic test archives old records before admitting a new final event; the
+CLI does not prune or archive real observations automatically.
+
 The wrapper allows at most 100 ms per publication call. A late or failed
 publication cannot change the child exit code. Its daemon thread may be lost
 when the wrapper exits, so this prototype does **not** guarantee a durable

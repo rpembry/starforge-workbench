@@ -151,11 +151,16 @@ def status_from_spool(directory: Path, identity: ScriptIdentity, *, now: datetim
                 kinds[event["seq"]] = event["kind"]
             if any(kinds.get(2) == "exited" and kinds.get(1) != "started" for kinds in by_run.values()):
                 raise ObservationBufferError("observation_sequence_gap")
+            # A rejected new start leaves no event to distinguish it from the
+            # prior run. Never keep advertising that prior success as current.
+            if (len(records) >= MAX_EVENTS
+                    or sum(info.st_size for _, info in records) + MAX_EVENT_BYTES > MAX_TOTAL_BYTES):
+                return {**unknown, "reporting": "full"}
             received = (datetime.fromtimestamp(max(stamp for _, stamp in events) / 1e9, timezone.utc)
                         if events else None)
             status = read_status([event for event, _ in events], identity=identity,
                                  received_at=received, now=now, freshness_seconds=freshness_seconds)
-            status["reporting"] = "full" if len(records) == MAX_EVENTS else "available"
+            status["reporting"] = "available"
             return status
     except (ObservationBufferError, OSError, ValueError, TypeError, KeyError):
         return {**unknown, "reporting": "unavailable"}
