@@ -1,7 +1,7 @@
 """System-Python GObject bridge; emits only a verified state as JSON."""
 import json
+from pathlib import Path
 import sys
-import time
 
 from gi.repository import Gio, GLib
 
@@ -9,11 +9,22 @@ from gi.repository import Gio, GLib
 BUS = 'org.starforge.Workbench.FavoritePresence'
 PATH = '/org/starforge/Workbench/FavoritePresence'
 IFACE = BUS
+SCHEMA_ID = 'org.gnome.shell.extensions.starforge-favorite-presence'
+SCHEMA_DIR = Path.home() / '.local/share/gnome-shell/extensions/favorite-presence@rpembry.github.io/schemas'
 
 
 def call(bus, destination, path, interface, method, parameters=None):
     return bus.call_sync(destination, path, interface, method, parameters,
                          None, Gio.DBusCallFlags.NONE, 1500, None).unpack()
+
+
+def allowlist_settings():
+    source = Gio.SettingsSchemaSource.new_from_directory(
+        str(SCHEMA_DIR), Gio.SettingsSchemaSource.get_default(), False)
+    schema = source.lookup(SCHEMA_ID, False)
+    if schema is None:
+        raise ValueError('Presence allowlist schema is unavailable')
+    return Gio.Settings.new_full(schema, None, None)
 
 
 def snapshot(desktop_id):
@@ -32,8 +43,8 @@ def snapshot(desktop_id):
                                 GLib.Variant('(s)', (name,)))[0]
     if get_pid(owner) != get_pid(shell_owner):
         raise ValueError('Presence service is not owned by GNOME Shell')
-    settings = Gio.Settings.new('org.gnome.shell.extensions.starforge-favorite-presence')
-    matches = [row for row in settings.get_value('favorites').deep_unpack()
+    settings = allowlist_settings()
+    matches = [row for row in settings.get_value('favorites').unpack()
                if row[1] == desktop_id]
     if len(matches) != 1:
         raise ValueError('Desktop ID is not uniquely allowlisted')
