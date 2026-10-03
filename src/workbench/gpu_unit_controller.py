@@ -255,8 +255,15 @@ class SystemdUserUnit:
             raise EvidenceUnavailable("Invalid main PID") from None
         state = fields['ActiveState']
         job = fields['Job']
-        start_job = False if job == '0' else (True if re.fullmatch(r'[1-9][0-9]*(?:/.*)?', job)
-                                                else None)
+        # systemctl show prints Job= (empty) when no job exists on this host.
+        # An omitted property is rejected above; a malformed value remains
+        # unknown rather than being mistaken for the observed empty form.
+        if job in ('', '0'):
+            start_job = False
+        elif re.fullmatch(r'[1-9][0-9]*(?:/.*)?', job):
+            start_job = True
+        else:
+            start_job = None
         cgroup = fields['ControlGroup']
         processes = self.cgroup_processes(cgroup) if state == 'active' else ()
         if state == 'active' and (processes is None or main_pid <= 0 or

@@ -218,7 +218,8 @@ def test_systemd_backend_uses_fixed_user_unit_argv(monkeypatch):
 
 
 @pytest.mark.parametrize(('job', 'expected'), [
-    ('0', False), ('17/start', True), ('unavailable', None),
+    ('', False), ('0', False), ('17', True), ('17/start', True),
+    ('unavailable', None), (' ', None), ('00', None),
 ])
 def test_systemd_snapshot_fences_unknown_or_pending_start_job(monkeypatch, job, expected):
     unit = SystemdUserUnit('fixture-idle.service')
@@ -226,6 +227,27 @@ def test_systemd_snapshot_fences_unknown_or_pending_start_job(monkeypatch, job, 
               f'InvocationID=generation-one\nJob={job}\n')
     monkeypatch.setattr(unit, '_run', lambda *_args: output)
     assert unit.snapshot().start_job is expected
+
+
+def test_systemd_snapshot_missing_job_property_is_not_known_empty(monkeypatch):
+    unit = SystemdUserUnit('fixture-idle.service')
+    output = ('ActiveState=inactive\nMainPID=0\nControlGroup=\n'
+              'InvocationID=generation-one\n')
+    monkeypatch.setattr(unit, '_run', lambda *_args: output)
+    with pytest.raises(EvidenceUnavailable, match='Incomplete user unit'):
+        unit.snapshot()
+
+
+def test_inactive_unit_with_cleared_invocation_keeps_grant_unknown():
+    """The observed host behavior needs a new completion proof, not a guess."""
+    unit, gpu = FakeUnit(), FakeGpu()
+    controller = ExactUnitController(unit, gpu, FakeScopes())
+    controller.apply('STOP')
+    unit.invocation = ''
+    unit.remaining = ()
+    unit.alive.clear()
+    gpu.visible = set()
+    assert controller.observe()[:2] == (O.UNKNOWN, O.UNKNOWN)
 
 
 def test_start_job_appearing_during_exit_observation_blocks_grant(monkeypatch):
