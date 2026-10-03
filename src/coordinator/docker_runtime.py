@@ -313,6 +313,26 @@ class DockerRuntime:
         from .disposition import archive
         return archive(self, plan, runtime_id, review_sha256, operation_id)
 
+    def inspect_archived(self, plan, runtime_id):
+        """Positive disposed-resource proof for repeated supervisor reconcile."""
+        from starforge_workbench.worker_disposition import read_private
+        receipt = self._read(plan["attempt_id"])
+        if (receipt["plan_hash"] != hashlib.sha256(_json(plan).encode()).hexdigest() or
+                receipt["incarnation"] != plan["incarnation"] or
+                receipt["job_id"] != plan["job_id"] or
+                receipt["container_id"] != runtime_id):
+            raise WorkerError("archived attempt identity mismatch")
+        path = Path(receipt["attempt_path"]) / "disposition.json"
+        if not path.exists():
+            return False
+        disposition = read_private(path)
+        if disposition.get("phase") != "complete" or disposition.get("runtime_id") != runtime_id:
+            return False
+        self.archive(plan, runtime_id, disposition["review_sha256"], disposition["operation_id"])
+        if self._inspect(receipt) is not None:
+            raise WorkerError("archived container reappeared")
+        return True
+
     def stop(self, plan, runtime_id):
         observed = self.inspect(plan, runtime_id)
         if not observed["stopped"]:

@@ -29,6 +29,10 @@ non-stopped attempt under its launch lock; a full budget fails before a new
 intent or Docker create. A stopped attempt releases its reservation. The
 operator must choose a slice that leaves capacity for other local workloads;
 Docker host capacity alone does not measure their current resource use.
+Each allocation's resolved reservation is persisted with its launch intent.
+Changing or revoking a profile cannot shrink an existing worker's accounting.
+An older active journal row without a provable reservation blocks new starts
+until it is positively stopped and reconciled.
 The service's private Unix
 `control.sock` accepts fenced acquire/renew/launch/reconcile/cancel/inspect;
 `owner.sock` accepts owner stop, inspect, explicit takeover, `review`, and
@@ -48,6 +52,9 @@ ID is replayable after a lost response. The control socket rejects
 DIR/owner.sock ATTEMPT_ID OPERATION_ID` exits successfully only after confirmed
 stop. Both sockets require the same local UID; this first profile trusts that
 Unix account. Keep the owner socket path out of ordinary client configuration.
+Repeated reconciliation after a committed exact archive preserves the stopped
+state after the container is removed; it rechecks the private disposition,
+archived content, and exact absence before accepting that terminal evidence.
 The tick loop runs every 250 ms independently of coordinator availability and
 reports changed uncertainty without unbounded repeated error lines. The
 service refuses existing socket paths rather than replacing a possibly live

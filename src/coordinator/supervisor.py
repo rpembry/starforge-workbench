@@ -74,12 +74,13 @@ CREATE TABLE attempts(
  launch_op TEXT NOT NULL UNIQUE, runtime_id TEXT, state TEXT NOT NULL,
  cancel INTEGER NOT NULL DEFAULT 0, deadline REAL NOT NULL,
  orphan_deadline REAL NOT NULL, policy TEXT NOT NULL, grace REAL NOT NULL,
- observation_seq INTEGER NOT NULL DEFAULT 0);
+ observation_seq INTEGER NOT NULL DEFAULT 0,
+ reserved_cpu_millis INTEGER, reserved_memory_mb INTEGER);
 CREATE TABLE operations(
  id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL REFERENCES attempts(id),
  kind TEXT NOT NULL, status TEXT NOT NULL, response TEXT);
 CREATE TABLE evidence(attempt_id TEXT PRIMARY KEY REFERENCES attempts(id), response TEXT NOT NULL);
-PRAGMA user_version=3;
+PRAGMA user_version=4;
 COMMIT;
 """
 
@@ -94,6 +95,14 @@ MIGRATE_2_TO_3 = """
 BEGIN IMMEDIATE;
 ALTER TABLE meta ADD COLUMN recovery_required INTEGER NOT NULL DEFAULT 0;
 PRAGMA user_version=3;
+COMMIT;
+"""
+
+MIGRATE_3_TO_4 = """
+BEGIN IMMEDIATE;
+ALTER TABLE attempts ADD COLUMN reserved_cpu_millis INTEGER;
+ALTER TABLE attempts ADD COLUMN reserved_memory_mb INTEGER;
+PRAGMA user_version=4;
 COMMIT;
 """
 
@@ -134,9 +143,13 @@ class Supervisor:
                 elif version == 1:
                     db.executescript(MIGRATE_1_TO_2)
                     db.executescript(MIGRATE_2_TO_3)
+                    db.executescript(MIGRATE_3_TO_4)
                 elif version == 2:
                     db.executescript(MIGRATE_2_TO_3)
-                elif version != 3:
+                    db.executescript(MIGRATE_3_TO_4)
+                elif version == 3:
+                    db.executescript(MIGRATE_3_TO_4)
+                elif version != 4:
                     raise Unavailable("unsupported supervisor schema")
                 if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                     raise Unavailable("supervisor journal failed integrity check")
@@ -263,14 +276,15 @@ class Supervisor:
             self.runtime.validate(plan)  # current policy gates only NEW runtime allocations
             reservation = getattr(self.runtime, "reservation", None)
             host_budget = getattr(self.runtime, "host_budget", None)
+            requested = reservation(plan) if reservation is not None else None
             if reservation is not None and host_budget is not None:
-                active = db.execute("SELECT plan FROM attempts WHERE state!='stopped'").fetchall()
+                active = db.execute("SELECT reserved_cpu_millis,reserved_memory_mb FROM attempts WHERE state!='stopped'").fetchall()
                 used_cpu = used_memory = 0
                 for item in active:
-                    allocated = reservation(json.loads(item["plan"]))
-                    used_cpu += allocated["cpu_millis"]
-                    used_memory += allocated["memory_mb"]
-                requested = reservation(plan)
+                    if item["reserved_cpu_millis"] is None or item["reserved_memory_mb"] is None:
+                        raise Conflict("existing allocation reservation unknown")
+                    used_cpu += item["reserved_cpu_millis"]
+                    used_memory += item["reserved_memory_mb"]
                 if (len(active) >= host_budget["max_active"] or
                         used_cpu + requested["cpu_millis"] > host_budget["cpu_millis"] or
                         used_memory + requested["memory_mb"] > host_budget["memory_mb"]):
@@ -279,10 +293,12 @@ class Supervisor:
             orphan_deadline = (min(deadline, now + policy["max_orphan_seconds"])
                                if policy["mode"] == "trusted_local"
                                else min(deadline, meta["lease_until"] + policy["grace_seconds"]))
-            db.execute("INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+            db.execute("INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                 plan["attempt_id"], plan["job_id"], plan["incarnation"], digest, _json(plan),
                 generation, operation_id, None, "launch_pending", 0, deadline,
-                orphan_deadline, policy["mode"], policy["grace_seconds"], 0))
+                orphan_deadline, policy["mode"], policy["grace_seconds"], 0,
+                requested["cpu_millis"] if requested else None,
+                requested["memory_mb"] if requested else None))
             db.execute("INSERT INTO operations VALUES(?,?,?,?,?)", (
                 operation_id, plan["attempt_id"], "launch", "pending", None))
         # Recheck fencing at the actual mutation boundary, after durable intent.
@@ -340,10 +356,11 @@ class Supervisor:
                 orphan_deadline = (min(deadline, now + policy["max_orphan_seconds"])
                                    if policy["mode"] == "trusted_local"
                                    else min(deadline, meta["lease_until"] + policy["grace_seconds"]))
-                db.execute("INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+                db.execute("INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                     plan["attempt_id"], plan["job_id"], plan["incarnation"], digest, _json(plan),
                     generation, operation_id, None, "stopped", 1, deadline,
-                    orphan_deadline, policy["mode"], policy["grace_seconds"], 1))
+                    orphan_deadline, policy["mode"], policy["grace_seconds"], 1,
+                    None, None))
                 db.execute("INSERT INTO operations VALUES(?,?,?,?,?)", (
                     operation_id, plan["attempt_id"], "launch", "confirmed",
                     _json({"state": "stopped", "no_start": True})))
@@ -528,6 +545,10 @@ class Supervisor:
         item = self.inspect(attempt_id)
         if item["state"] == "stopped" and item["cancel"] and not item["runtime_id"]:
             return item  # durable prelaunch tombstone; no runtime to reattach
+        if item["state"] == "stopped" and item["runtime_id"]:
+            archived = getattr(self.runtime, "inspect_archived", None)
+            if archived is not None and archived(item["plan"], item["runtime_id"]):
+                return item  # exact committed archive, not a missing live runtime
         try:
             observed = self.runtime.inspect(item["plan"], item["runtime_id"])
             if not observed["identity_ok"] or (item["runtime_id"] and observed["runtime_id"] != item["runtime_id"]):

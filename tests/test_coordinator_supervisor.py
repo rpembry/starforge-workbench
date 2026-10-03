@@ -198,6 +198,42 @@ def test_supervisor_reserves_resolved_host_profiles_under_launch_lock(setup):
     assert runtime.starts == 3
 
 
+def test_restart_keeps_original_reservation_after_profile_change_or_revocation(setup):
+    supervisor, runtime, clock = setup
+    runtime.host_budget = {"max_active": 2, "cpu_millis": 2000, "memory_mb": 128}
+    sizes = {"attempt-1": 2000, "attempt-2": 1000}
+    runtime.reservation = lambda item: {"cpu_millis": sizes[item["attempt_id"]], "memory_mb": 64}
+    lease = supervisor.acquire("old")
+    supervisor.launch(plan("attempt-1"), controller="old",
+                      generation=lease["generation"], operation_id="launch-1")
+    sizes["attempt-1"] = 1000  # edited operator profile must not shrink live reservation
+    restarted = Supervisor(supervisor.root, runtime, clock=lambda: clock[0])
+    restarted.recover_startup()
+    with pytest.raises(Conflict, match="reservation full"):
+        restarted.launch(plan("attempt-2"), controller="old",
+                         generation=lease["generation"], operation_id="launch-2")
+    del sizes["attempt-1"]  # revoked profile cannot erase a live reservation
+    with pytest.raises(Conflict, match="reservation full"):
+        restarted.launch(plan("attempt-2"), controller="old",
+                         generation=lease["generation"], operation_id="launch-2")
+    assert runtime.starts == 1
+
+
+def test_migrated_active_attempt_without_reservation_fails_closed(setup):
+    supervisor, runtime, clock = setup
+    runtime.host_budget = {"max_active": 2, "cpu_millis": 2000, "memory_mb": 128}
+    runtime.reservation = lambda item: {"cpu_millis": 1000, "memory_mb": 64}
+    lease = supervisor.acquire("old")
+    supervisor.launch(plan("attempt-1"), controller="old",
+                      generation=lease["generation"], operation_id="launch-1")
+    with sqlite3.connect(supervisor.path) as db:
+        db.execute("UPDATE attempts SET reserved_cpu_millis=NULL,reserved_memory_mb=NULL WHERE id='attempt-1'")
+    with pytest.raises(Conflict, match="reservation unknown"):
+        supervisor.launch(plan("attempt-2"), controller="old",
+                          generation=lease["generation"], operation_id="launch-2")
+    assert runtime.starts == 1
+
+
 def test_identity_mismatch_blocks_stop(setup):
     supervisor, runtime, clock = setup
     lease = supervisor.acquire("a")
@@ -392,11 +428,13 @@ def test_supervisor_schema_two_migrates_without_losing_identity(setup):
     identity = supervisor.acquire("controller")["supervisor_id"]
     with sqlite3.connect(supervisor.path) as db:
         db.execute("ALTER TABLE meta DROP COLUMN recovery_required")
+        db.execute("ALTER TABLE attempts DROP COLUMN reserved_cpu_millis")
+        db.execute("ALTER TABLE attempts DROP COLUMN reserved_memory_mb")
         db.execute("PRAGMA user_version=2")
     reopened = Supervisor(supervisor.root, runtime, clock=lambda: clock[0])
     assert reopened.acquire("controller")["supervisor_id"] == identity
     with sqlite3.connect(supervisor.path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_owner_stop_confirms_no_start_from_committed_launch_pending(setup):
@@ -405,7 +443,7 @@ def test_owner_stop_confirms_no_start_from_committed_launch_pending(setup):
     pending_plan = plan()
     digest = hashlib.sha256(json.dumps(pending_plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     with supervisor._tx() as db:
-        db.execute("INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+        db.execute("INSERT INTO attempts(id,job_id,incarnation,plan_hash,plan,generation,launch_op,runtime_id,state,cancel,deadline,orphan_deadline,policy,grace,observation_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
             "attempt-1", "job-1", "inc-1", digest,
             json.dumps(pending_plan, sort_keys=True, separators=(",", ":")),
             lease["generation"], "launch-op", None, "launch_pending", 0,

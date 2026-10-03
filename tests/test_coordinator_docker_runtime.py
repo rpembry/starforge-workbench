@@ -53,7 +53,7 @@ class FakeDocker:
                 if part == "--label":
                     key, value = argv[index + 1].split("=", 1)
                     labels[key] = value
-            self.item = {"Id": "container-1", "Name": "/swb-" + "a" * 32,
+            self.item = {"Id": "container-1", "Name": "/" + argv[argv.index("--name") + 1],
                          "Config": {"Labels": labels}, "Mounts": [],
                          "State": {"Status": "created", "Running": False, "ExitCode": 0}}
             for index, part in enumerate(argv):
@@ -337,6 +337,15 @@ def test_owner_review_archive_retains_exact_scratch_bytes(runtime, tmp_path):
     assert (attempt / "artifacts" / "manifest.json").exists()
     assert not (attempt / "worktree").exists()
     assert fake.item is None
+    assert supervisor.reconcile("a" * 32, controller="controller",
+                                generation=lease["generation"])["state"] == "stopped"
+    restarted = Supervisor(journal, adapter)
+    assert restarted.reconcile("a" * 32, controller="controller",
+                               generation=lease["generation"])["state"] == "stopped"
+    second = {**plan(), "attempt_id": "b" * 32, "incarnation": "next"}
+    assert restarted.launch(second, controller="controller", generation=lease["generation"],
+                            operation_id="launch-second")["state"] == "running"
+    assert fake.create_count == 2  # archived stopped allocation released host reservation
     (attempt / "archive" / "scratch" / "note.txt").write_text("tampered\n")
     with pytest.raises(WorkerError, match="archived content changed"):
         supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],
