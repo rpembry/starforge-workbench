@@ -6,7 +6,7 @@ import secrets
 from pathlib import Path
 
 from fastapi import Depends, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 
 from coordinator.client import CoordinatorClient, CoordinatorError
@@ -44,10 +44,12 @@ def install(app, operator, socket: str, *, factory=None):
     async def local_browser_only(request: Request, call_next):
         local_hosts = {"localhost", "127.0.0.1", "::1", "testserver"}
         local_clients = {"localhost", "127.0.0.1", "::1", "testclient"}
+        forwarded = any(name in request.headers for name in (
+            "forwarded", "x-forwarded-for", "x-forwarded-host", "cf-connecting-ip"))
         if (request.url.path.startswith("/coordinator") or
                 request.url.path.startswith("/ui/coordinator")) and (
                     request.url.hostname not in local_hosts or
-                    not request.client or request.client.host not in local_clients):
+                    not request.client or request.client.host not in local_clients or forwarded):
             return JSONResponse({"error": {"code": "local_only"}}, status_code=403)
         return await call_next(request)
 
@@ -82,14 +84,31 @@ def install(app, operator, socket: str, *, factory=None):
             job = call("get", job_id)["job"]
             recovery = call("recovery", job_id)
             capabilities = call("capabilities")
+            capacity = call("capacity")
             events = call("events", job_id, after_seq=max(0, cursor), limit=50)
             error = None
         except CoordinatorError as exc:
-            job = recovery = capabilities = events = None
+            job = recovery = capabilities = capacity = events = None
             error = _error(exc)
         return page(request, mode="detail", job=job, recovery=recovery,
-                    capabilities=capabilities, events=events, error=error,
+                    capabilities=capabilities, capacity=capacity, events=events, error=error,
                     action_keys={name: secrets.token_urlsafe(24) for name in ("cancel", "retry", "reattach")})
+
+    @app.get("/ui/coordinator/jobs/{job_id}/status", dependencies=[Depends(operator)])
+    async def job_status(job_id: str):
+        if not ID.fullmatch(job_id):
+            return JSONResponse({"error": "invalid_job_id"}, status_code=404)
+        try:
+            job = call("get", job_id)["job"]
+        except CoordinatorError as exc:
+            return JSONResponse({"error": exc.code}, status_code=exc.status)
+        return {field: job[field] for field in ("id", "version", "phase", "intent", "outcome",
+                                                 "visibility", "reason", "updated_at")}
+
+    @app.get("/assets/coordinator-poll.js", dependencies=[Depends(operator)])
+    async def coordinator_poll_script():
+        return FileResponse(Path(__file__).with_name("static") / "coordinator-poll.js",
+                            media_type="application/javascript")
 
     @app.post("/ui/coordinator/validate", response_class=HTMLResponse)
     async def validate(request: Request, spec: str = Form(""), who=Depends(operator)):

@@ -102,8 +102,13 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
 
     # The owner socket is never reachable from a public Workbench deployment.
     # This explicit local opt-in mounts only the browser adapter, not a worker.
+    from urllib.parse import urlsplit
     coordinator_socket = os.environ.get('WB_COORDINATOR_UI_SOCKET')
-    if coordinator_socket and os.environ.get('WB_AUTH_MODE', 'local') == 'local':
+    public_origin = os.environ.get('WB_PUBLIC_ORIGIN')
+    local_origin = not public_origin or urlsplit(public_origin).hostname in {'localhost', '127.0.0.1', '::1'}
+    coordinator_ui_enabled = bool(coordinator_socket and os.environ.get('WB_AUTH_MODE', 'local') == 'local'
+                                  and not isinstance(auth, CloudflareAuth) and local_origin)
+    if coordinator_ui_enabled:
         from .coordinator_ui import install as install_coordinator_ui
         install_coordinator_ui(app, operator, coordinator_socket)
 
@@ -491,7 +496,7 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     @app.get('/', response_class=HTMLResponse, dependencies=[Depends(operator)])
     def view(request: Request):
         return templates.TemplateResponse(request=request, name='dashboard.html', context={
-            'dashboard': repository.dashboard(), 'coordinator_ui': bool(coordinator_socket and os.environ.get('WB_AUTH_MODE', 'local') == 'local')})
+            'dashboard': repository.dashboard(), 'coordinator_ui': coordinator_ui_enabled})
 
     @app.get('/guide', response_class=HTMLResponse, dependencies=[Depends(operator)])
     def everyday_guide(request: Request):

@@ -31,7 +31,8 @@ class FakeCoordinator:
         return {"reattach": True, "logs": True, "artifacts": True}
 
     def capacity(self):
-        return {"reservations": {"state": "unknown", "reason": "bounded read"}}
+        return {"limits": {"max_pending": 4, "max_active": 2, "cpu_millis": 2000, "memory_mb": 512},
+                "reservations": {"state": "unknown", "reason": "bounded read"}}
 
     def list(self, limit):
         return {"jobs": [{"id": JOB_ID, "phase": "active", "intent": "run", "outcome": None,
@@ -42,9 +43,17 @@ class FakeCoordinator:
         assert job_id == JOB_ID
         return {"job": {"id": JOB_ID, "phase": "terminal" if self.stopped else "active", "intent": "run",
                         "outcome": None, "visibility": "unknown", "reason": "observation_unavailable",
-                        "version": 7, "updated_at": "now", "attempts": [{"id": ATTEMPT_ID, "ordinal": 1,
+                        "version": 7, "updated_at": "now", "attempt_id": ATTEMPT_ID, "spec": {
+                        "worker_type": "command", "profile_ref": "offline", "workspace_ref": "scratch",
+                        "worker_contract": "worker.v1", "deadline_seconds": 30,
+                        "resources": {"cpu_millis": 1000, "memory_mb": 128},
+                        "orphan_policy": {"mode": "strict", "grace_seconds": 10,
+                                          "max_orphan_seconds": 0}, "consumer_ref": None, "parent_ref": None},
+                        "attempts": [{"id": ATTEMPT_ID, "ordinal": 1,
                         "phase": "stopped" if self.stopped else "unknown", "outcome": None,
-                        "stopped": self.stopped}]}}
+                        "stopped": self.stopped, "incarnation": "i1", "supervisor_id": None,
+                        "runtime_id": None, "observation_seq": 0, "last_observed_at": None,
+                        "exit_code": None}]}}
 
     def recovery(self, job_id):
         return {"reattach_available": True}
@@ -54,6 +63,8 @@ class FakeCoordinator:
 
     def cancel(self, job_id, version, key):
         self.calls.append(("cancel", job_id, version, key))
+        if version != 7:
+            raise CoordinatorError("conflict", 409)
         if self.unavailable:
             raise CoordinatorError("unavailable", 503)
         return {"job": self.get(job_id)["job"], "operation": {"key": key, "state": "pending"}}
@@ -120,7 +131,11 @@ def test_unknown_state_and_version_checked_controls():
         detail = browser.get(f"/coordinator/jobs/{JOB_ID}")
         assert detail.status_code == 200
         assert "Version 7" in detail.text
+        assert "Orphan mode: strict" in detail.text
         assert "View bounded post-stop evidence" not in detail.text
+        status = browser.get(f"/ui/coordinator/jobs/{JOB_ID}/status")
+        assert status.json()["version"] == 7
+        assert "spec" not in status.json() and "attempts" not in status.json()
         assert browser.post(f"/ui/coordinator/jobs/{JOB_ID}/cancel", data={"version": 7, "key": KEY,
                             "confirmed": "yes"}).status_code == 200
         assert fake.calls == [("cancel", JOB_ID, 7, KEY)]
@@ -148,11 +163,64 @@ def test_uncertain_response_repeats_exact_request_and_post_stop_gate():
         assert "output.txt" in evidence.text
 
 
+def test_cancel_back_replay_and_stale_version():
+    fake = FakeCoordinator()
+    with client(fake) as browser:
+        first = browser.post(f"/ui/coordinator/jobs/{JOB_ID}/cancel", data={
+            "version": 7, "key": KEY, "confirmed": "yes"})
+        assert "Operation:" in first.text and "pending" in first.text
+        assert browser.get(f"/coordinator/jobs/{JOB_ID}").status_code == 200
+        repeated = browser.post(f"/ui/coordinator/jobs/{JOB_ID}/cancel", data={
+            "version": 7, "key": KEY, "confirmed": "yes"})
+        assert repeated.status_code == 200
+        assert fake.calls[-2:] == [("cancel", JOB_ID, 7, KEY)] * 2
+        stale = browser.post(f"/ui/coordinator/jobs/{JOB_ID}/cancel", data={
+            "version": 6, "key": "fresh-request-key-123", "confirmed": "yes"})
+        assert "Version or idempotency conflict" in stale.text
+        assert "Retry same cancel request" not in stale.text
+
+
+def test_lost_response_replay_and_escaped_evidence():
+    fake = FakeCoordinator()
+    with client(fake) as browser:
+        fake.unavailable = True
+        lost = browser.post(f"/ui/coordinator/jobs/{JOB_ID}/cancel", data={
+            "version": 7, "key": KEY, "confirmed": "yes"})
+        assert "Retry same cancel request" in lost.text
+        fake.unavailable = False
+        replay = browser.post(f"/ui/coordinator/jobs/{JOB_ID}/cancel", data={
+            "version": 7, "key": KEY, "confirmed": "yes"})
+        assert "pending" in replay.text
+        assert fake.calls[-2:] == [("cancel", JOB_ID, 7, KEY)] * 2
+        fake.stopped = True
+        fake.logs = lambda *_args, **_kwargs: {"text": "<script>alert(1)</script>", "total": 25,
+                                             "next_cursor": 25, "possible_prefix_gap": True}
+        fake.artifacts = lambda *_args: {"execution_ok": None,
+                                        "items": [{"path": "<img src=x onerror=alert(1)>", "bytes": 25}]}
+        evidence = browser.get(f"/coordinator/jobs/{JOB_ID}/attempts/{ATTEMPT_ID}/evidence")
+        assert evidence.status_code == 200
+        assert "&lt;script&gt;" in evidence.text and "<script>alert(1)</script>" not in evidence.text
+        assert "&lt;img" in evidence.text and "<img src=x" not in evidence.text
+
+
+def test_close_and_reopen_only_reads_same_attempt():
+    fake = FakeCoordinator()
+    with client(fake) as browser:
+        assert browser.get(f"/coordinator/jobs/{JOB_ID}").status_code == 200
+    with client(fake) as reopened:
+        detail = reopened.get(f"/coordinator/jobs/{JOB_ID}")
+        assert detail.status_code == 200
+        assert ATTEMPT_ID in detail.text
+    assert fake.calls == []
+
+
 def test_remote_host_rejected_before_socket_access():
     fake = FakeCoordinator()
     with client(fake) as browser:
         response = browser.get("/coordinator", headers={"host": "public.example"})
         assert response.status_code == 403
+        forwarded = browser.get("/coordinator", headers={"x-forwarded-for": "203.0.113.20"})
+        assert forwarded.status_code == 403
         assert fake.calls == []
 
 
@@ -187,3 +255,45 @@ def test_main_mount_requires_local_opt_in(monkeypatch, tmp_path):
     assert "/coordinator" in {route.path for route in create_app(repo, auth).routes}
     monkeypatch.setenv("WB_AUTH_MODE", "cloudflare")
     assert "/coordinator" not in {route.path for route in create_app(repo, auth).routes}
+    monkeypatch.setenv("WB_AUTH_MODE", "local")
+    monkeypatch.setenv("WB_PUBLIC_ORIGIN", "https://public.example")
+    assert "/coordinator" not in {route.path for route in create_app(repo, auth).routes}
+
+
+def test_two_job_api_cli_ui_identity_parity(tmp_path, capsys):
+    from coordinator import CoordinatorStore, JobSpec, Limits, Policy, cli
+    from coordinator.api import create_app
+
+    root = tmp_path / "coordinator"
+    root.mkdir(mode=0o700)
+    store = CoordinatorStore(root, Policy(profiles=frozenset({"offline"}),
+        workspaces=frozenset({"scratch"}), worker_types=frozenset({"command"}),
+        limits=Limits(max_pending=4, max_active=2, cpu_millis=2000, memory_mb=512)))
+    spec = JobSpec(worker_type="command", profile_ref="offline", workspace_ref="scratch",
+                   payload={"argv": ["true"]}, deadline_seconds=30,
+                   resources={"cpu_millis": 1000, "memory_mb": 128})
+    first = store.submit(spec, principal="owner", key="first")
+    second = store.submit(spec, principal="owner", key="second")
+
+    async def api_list():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(create_app(store)),
+                                     base_url="http://coordinator") as api:
+            return (await api.get("/v1/jobs")).json()["jobs"]
+    api_ids = {job["id"] for job in asyncio.run(api_list())}
+
+    class StoreClient(FakeCoordinator):
+        def list(self, limit):
+            fields = ("id", "phase", "intent", "outcome", "visibility", "reason",
+                      "attempt_id", "version", "updated_at")
+            return {"jobs": [{name: job[name] for name in fields} for job in store.list(limit)]}
+
+    adapter = StoreClient()
+    args = cli.parser().parse_args(["--json", "list"])
+    assert cli.run(args, adapter) == 0
+    cli_ids = {job["id"] for job in json.loads(capsys.readouterr().out)["jobs"]}
+    with client(adapter) as browser:
+        response = browser.get("/coordinator")
+        assert response.status_code == 200
+        for identity in api_ids:
+            assert identity in response.text
+    assert api_ids == cli_ids == {first["id"], second["id"]}
