@@ -61,24 +61,25 @@ class ReservationPolicy:
     """Single-owner-controller state machine; persist snapshots before acknowledging.
 
     `owned_process` and `owned_context` concern only the background process.
-    Other users of the GPU may legitimately hold memory. `owner_alive` is
-    authoritative adapter evidence (for example a supervised pidfd), not a
-    caller assertion. Unknown liveness retains a stale hold after expiry.
+    Other users of the GPU may legitimately hold memory. `workload_ended`
+    is authoritative adapter evidence that the client's entire supervised
+    workload scope has ended, not merely its parent process. Unknown scope
+    state retains a stale hold after expiry.
     """
 
     def __init__(self, leases=()):
-        self.leases = {lease.token: Lease(**vars(lease)) for lease in leases}
+        self._leases = {lease.token: Lease(**vars(lease)) for lease in leases}
 
     def acquire(self, owner: str, now: float, ttl: float) -> Lease:
         if not owner or not (0 < ttl <= 3600):
             raise ValueError("An owner and bounded TTL are required")
         token = secrets.token_urlsafe(32)
         lease = Lease(owner, token, now + ttl)
-        self.leases[token] = lease
-        return lease
+        self._leases[token] = lease
+        return Lease(**vars(lease))
 
     def _get(self, owner: str, token: str) -> Lease:
-        lease = self.leases.get(token)
+        lease = self._leases.get(token)
         if lease is None or not secrets.compare_digest(lease.owner, owner):
             raise PermissionError("Unknown reservation")
         return lease
@@ -87,37 +88,42 @@ class ReservationPolicy:
         lease = self._get(owner, token)
         if not (0 < ttl <= 3600) or now >= lease.expires_at or lease.stale:
             raise ValueError("Reservation is expired or TTL is invalid")
-        lease.expires_at = now + ttl
-        return lease
+        # A wall-clock rollback must never shorten an already acknowledged hold.
+        lease.expires_at = max(lease.expires_at, now + ttl)
+        return Lease(**vars(lease))
+
+    def view(self, owner: str, token: str) -> Lease:
+        """Return a detached status value for the authenticated owner."""
+        return Lease(**vars(self._get(owner, token)))
 
     def release(self, owner: str, token: str) -> None:
         self._get(owner, token)
-        del self.leases[token]
+        del self._leases[token]
 
     def reconcile(self, *, now: float, owned_process: Observation,
-                  owned_context: Observation, owner_alive, idle_allowed: bool) -> str:
+                  owned_context: Observation, workload_ended, idle_allowed: bool) -> str:
         """Return STOP, HOLD, or START; never a process-control instruction to a client.
 
         The adapter acts on STOP and calls reconcile again after observing exit.
         It must persist updated leases before exposing any newly granted result.
         """
-        for token, lease in tuple(self.leases.items()):
+        for token, lease in tuple(self._leases.items()):
             if now >= lease.expires_at:
-                if owner_alive(lease.owner) is False:
-                    del self.leases[token]
+                if workload_ended(lease.owner) is True:
+                    del self._leases[token]
                 else:
                     lease.stale = True
-        if self.leases:
+        if self._leases:
             if owned_process is Observation.PRESENT or owned_context is Observation.PRESENT:
-                for lease in self.leases.values():
+                for lease in self._leases.values():
                     lease.granted = False
                 return "STOP"
             if owned_process is Observation.ABSENT and owned_context is Observation.ABSENT:
-                for lease in self.leases.values():
+                for lease in self._leases.values():
                     if not lease.stale:
                         lease.granted = True
             else:
-                for lease in self.leases.values():
+                for lease in self._leases.values():
                     lease.granted = False
             return "HOLD"
         if owned_process is Observation.UNKNOWN or owned_context is Observation.UNKNOWN:
@@ -127,4 +133,4 @@ class ReservationPolicy:
         return "START" if idle_allowed else "HOLD"
 
     def snapshot(self) -> tuple[Lease, ...]:
-        return tuple(Lease(**vars(lease)) for lease in self.leases.values())
+        return tuple(Lease(**vars(lease)) for lease in self._leases.values())
