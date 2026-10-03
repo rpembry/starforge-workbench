@@ -12,6 +12,9 @@ and explicitly choose **I checked; retry** after a duplicate-window warning.
 Each deliberate retry is recorded in a private audit file before it is sent to
 the desktop launcher. The entry never starts apps at login. Back to the list
 refreshes status without requesting a launch or discarding a receipt.
+The result dialog says when all selected apps were already open, when no app
+could be opened, or how many desktop launch requests were made and verified
+ready. Launcher acceptance alone is never described as an opened app.
 
 `uv run wb-apps` is a local, manual desktop-entry restorer. It invokes only the
 selected installed desktop entry. A `workbench` favorite can therefore open a
@@ -90,6 +93,15 @@ closed for operator review. The CLI has no force-retry or pending-state reset
 command. Missing, ambiguous, changed, or
 unverifiable identities fail closed. A target that cannot be verified does not
 block a separate exact target in the same selection.
+
+The graphical launcher also keeps up to 64 recent private attempt summaries in
+`favorite-app-attempts.json` beside the favorites file. Each summary contains a
+timestamp, boot ID, selected and action counts, outcome phase, and a limited
+failure category. It stores no favorite names, desktop IDs, titles, URLs, or
+content. Closing the checklist records a cancellation; a preview that cannot
+open anything records a no-launch outcome. An audit write failure is reported
+in the result dialog after an ordinary launch attempt. An unsafe retry-audit
+file prevents the retry before a launcher request is sent.
 
 The X11 observation adapter requires `wmctrl`, `gtk-launch`, exact window
 class, and matching `/proc` process identity. On GNOME Wayland, the optional

@@ -279,6 +279,66 @@ class FavoriteRestore:
         self.state_path = self.config.with_name('favorite-app-restore-state.json')
         self.lock_path = self.config.with_name('favorite-app-restore.lock')
         self.retry_audit_path = self.config.with_name('favorite-app-retries.jsonl')
+        self.attempts_path = self.config.with_name('favorite-app-attempts.json')
+
+    def record_attempt(self, *, phase: str, selected_count: int, preview_counts: dict,
+                       result_counts: dict, failure_reason: str | None = None):
+        """Keep only recent privacy-minimal UI outcomes; no names or app IDs."""
+        if phase not in {'cancelled', 'completed', 'no_launch', 'error', 'empty_configuration'}:
+            raise ValueError('Invalid favorite attempt phase')
+        allowed_preview = {'launch', 'preserve', 'skip', 'refuse', 'unknown'}
+        allowed_result = {'launch_requested', 'launcher_accepted', 'verified_ready',
+                          'already_present', 'unresolved', 'refused'}
+        if (not isinstance(selected_count, int) or selected_count < 0 or
+                set(preview_counts) != allowed_preview or set(result_counts) != allowed_result or
+                any(not isinstance(n, int) or n < 0 for n in (*preview_counts.values(), *result_counts.values())) or
+                failure_reason not in {None, 'display_error', 'identity_changed',
+                                       'apply_error', 'configuration_error'}):
+            raise ValueError('Invalid favorite attempt counts')
+        parent = self.config.parent
+        if parent.is_symlink() or not parent.is_dir() or parent.stat().st_uid != os.getuid() or parent.stat().st_mode & 0o077:
+            raise ValueError('Favorites directory must be owned by you with mode 0700')
+        fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            if os.fstat(fd).st_uid != os.getuid() or os.fstat(fd).st_mode & 0o077:
+                raise ValueError('Unsafe favorites restore lock')
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            if self.attempts_path.is_symlink():
+                raise ValueError('Private attempt history must not be a symlink')
+            events = []
+            if self.attempts_path.exists():
+                _private_file(self.attempts_path)
+                try:
+                    history = json.loads(self.attempts_path.read_text())
+                except (OSError, UnicodeError, ValueError):
+                    raise ValueError('Cannot read private attempt history') from None
+                if (not isinstance(history, dict) or set(history) != {'version', 'events'} or
+                        history['version'] != 1 or not isinstance(history['events'], list) or
+                        len(history['events']) > 64):
+                    raise ValueError('Invalid private attempt history')
+                events = history['events']
+            events = [*events[-63:], {'at_epoch': int(time.time()), 'boot_id': self.generation(),
+                                       'phase': phase, 'selected_count': selected_count,
+                                       'same_boot_receipt_count': preview_counts['skip'],
+                                       'preview': preview_counts, 'result': result_counts,
+                                       'failure_reason': failure_reason}]
+            temporary = self.attempts_path.with_name('.favorite-app-attempts-' + str(os.getpid()))
+            out_fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+            try:
+                with os.fdopen(out_fd, 'w') as stream:
+                    json.dump({'version': 1, 'events': events}, stream)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, self.attempts_path)
+                dir_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            finally:
+                temporary.unlink(missing_ok=True)
+        finally:
+            os.close(fd)
 
     def _record_explicit_retry(self, desktop_id: str, digest: str, boot_id: str):
         """Persist user-confirmed same-boot retries before requesting the launch."""
