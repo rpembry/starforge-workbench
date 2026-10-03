@@ -1,0 +1,441 @@
+"""Synthetic exact-ID title reconciliation; never touches live Codex records."""
+from copy import deepcopy
+from pathlib import Path
+import uuid
+
+import pytest
+
+from starforge_workbench.title_reconcile import CodexCatalog, Reconciler
+import starforge_workbench.title_reconcile as title_module
+
+A = str(uuid.UUID('11111111-1111-4111-8111-111111111111'))
+B = str(uuid.UUID('22222222-2222-4222-8222-222222222222'))
+
+
+class Catalog:
+    guarded_rename = True
+    practical_rename = True
+
+    def __init__(self):
+        self.rows = {A: {'id': A, 'title': '', 'cwd': '/synthetic/a', 'archived': False, 'source': 'cli'},
+                     B: {'id': B, 'title': '', 'cwd': '/synthetic/b', 'archived': False, 'source': 'cli'}}
+        self.writes = []
+        self.outcomes = {}
+
+    def read(self, identity):
+        return deepcopy(self.rows.get(identity))
+
+    def rename_if_title(self, identity, expected, desired):
+        self.writes.append((identity, expected, desired))
+        outcome = self.outcomes.pop(identity, None)
+        if outcome == 'timeout':
+            raise TimeoutError()
+        if outcome == 'blocked':
+            raise PermissionError()
+        if self.rows[identity]['title'] != expected:
+            return 'conflict'
+        self.rows[identity]['title'] = desired
+        return 'applied'
+
+    def rename_practical(self, identity, desired):
+        self.writes.append((identity, None, desired))
+        self.rows[identity]['title'] = desired
+        return 'applied'
+
+
+@pytest.fixture
+def fixture(tmp_path):
+    cat = Catalog()
+    contexts = [dict(id='alpha', provider='codex', title='Alpha ✨', cwd='/synthetic/a'),
+                dict(id='beta', provider='codex', title='Beta', cwd='/synthetic/b')]
+    bindings = {'alpha': dict(id=A, provider='codex', cwd='/synthetic/a', source_cwd='/synthetic/a'),
+                'beta': dict(id=B, provider='codex', cwd='/synthetic/b', source_cwd='/synthetic/b')}
+    observed = {}
+    service = Reconciler(lambda: deepcopy(contexts), lambda identity: deepcopy(bindings.get(identity)),
+                         cat, tmp_path / 'private', lambda context: observed.get(context['id']))
+    return service, cat, contexts, bindings, observed
+
+
+def test_preview_selected_apply_readback_and_repeat(fixture):
+    service, cat, contexts, bindings, _ = fixture
+    before_binding = deepcopy(bindings)
+    before_contexts = deepcopy(contexts)
+    before_records = deepcopy(cat.rows)
+    plan = service.preview(['alpha', 'beta'])
+    assert [r['status'] for r in plan['rows']] == ['eligible', 'eligible']
+    assert cat.writes == []
+    applied = service.apply(plan['plan_id'], selected=['alpha'])
+    assert applied['results']['alpha']['status'] == 'applied'
+    assert cat.rows[A]['title'] == 'Alpha ✨'
+    assert cat.rows[B]['title'] == ''
+    assert service.apply(plan['plan_id'], selected=['alpha'])['results']['alpha']['status'] == 'already_matched'
+    assert len(cat.writes) == 1
+    assert service.apply(plan['plan_id'], all_eligible=True)['results']['beta']['status'] == 'applied'
+    assert len(cat.writes) == 2
+    assert service.status(plan['plan_id'])['results']['beta']['status'] == 'applied'
+    assert bindings == before_binding and contexts == before_contexts
+    for identity in (A, B):
+        assert {key: value for key, value in cat.rows[identity].items() if key != 'title'} == {
+            key: value for key, value in before_records[identity].items() if key != 'title'}
+
+
+def test_duplicate_labels_on_distinct_threads_are_not_alias_conflict(fixture):
+    service, cat, contexts, *_ = fixture
+    contexts[1]['title'] = contexts[0]['title']
+    plan = service.preview(['alpha', 'beta'])
+    assert [row['status'] for row in plan['rows']] == ['eligible', 'eligible']
+    assert cat.writes == []
+
+
+@pytest.mark.parametrize('mutation,reason', [
+    (lambda c,b,o,k: c[0].update(title='Changed'), 'plan_changed'),
+    (lambda c,b,o,k: b['alpha'].update(id=B), 'stale_binding'),
+    (lambda c,b,o,k: k.rows[A].update(title='Manual'), 'title_changed'),
+    (lambda c,b,o,k: o.update(alpha='Observed other'), 'label_disagreement'),
+])
+def test_rechecks_expected_state_and_identity(fixture, mutation, reason):
+    service, cat, contexts, bindings, observed = fixture
+    plan = service.preview(['alpha'])
+    mutation(contexts, bindings, observed, cat)
+    result = service.apply(plan['plan_id'], selected=['alpha'])['results']['alpha']
+    assert result['status'] == 'conflict'
+    assert result['reason'] in (reason, 'plan_changed', 'ambiguous_alias')
+    assert cat.writes == []
+
+
+def test_conflicts_and_custom_name_choice(fixture):
+    service, cat, contexts, bindings, observed = fixture
+    contexts[0]['title'] = ' '
+    assert service.preview(['alpha'])['rows'][0]['reason'] == 'blank_label'
+    contexts[0]['title'] = 'x' * 201
+    assert service.preview(['alpha'])['rows'][0]['reason'] == 'invalid_label'
+    contexts[0]['title'] = 'Alpha'
+    cat.rows[A]['title'] = 'Custom'
+    plan = service.preview(['alpha'])
+    assert plan['rows'][0]['status'] == 'needs_choice'
+    with pytest.raises(ValueError):
+        service.apply(plan['plan_id'], all_eligible=True)
+    assert service.apply(plan['plan_id'], selected=['alpha'])['results']['alpha']['status'] == 'applied'
+    contexts[1]['title'] = 'Other'
+    bindings['beta'] = dict(bindings['alpha'])
+    assert [r['reason'] for r in service.preview(['alpha', 'beta'])['rows']] == ['ambiguous_alias', 'ambiguous_alias']
+    assert service.preview(['alpha'])['rows'][0]['reason'] == 'ambiguous_alias'
+
+
+def test_missing_archived_and_blocked_provider(fixture):
+    service, cat, contexts, bindings, observed = fixture
+    bindings.pop('alpha')
+    assert service.preview(['alpha'])['rows'][0]['reason'] == 'missing_binding'
+    bindings['alpha'] = dict(id=A, provider='codex', cwd='/synthetic/a')
+    cat.rows[A]['archived'] = True
+    assert service.preview(['alpha'])['rows'][0]['reason'] == 'missing_or_archived_thread'
+    cat.rows[A]['archived'] = False
+    cat.guarded_rename = False
+    plan = service.preview(['alpha'])
+    assert service.apply(plan['plan_id'], selected=['alpha'])['results']['alpha']['status'] == 'blocked'
+    assert not cat.writes
+
+
+def test_historical_source_cwd_accepts_exact_current_configured_cwd(fixture):
+    service, cat, contexts, bindings, _ = fixture
+    bindings['alpha']['source_cwd'] = '/synthetic/historical'
+    assert service.preview(['alpha'])['rows'][0]['status'] == 'eligible'
+    cat.rows[A]['cwd'] = '/synthetic/unrelated'
+    assert service.preview(['alpha'])['rows'][0]['reason'] == 'stale_binding'
+
+
+def test_partial_failure_retry_and_uncertain_ack(fixture):
+    service, cat, *_ = fixture
+    plan = service.preview(['alpha', 'beta'])
+    cat.outcomes[A] = 'blocked'
+    cat.outcomes[B] = 'timeout'
+    results = service.apply(plan['plan_id'], all_eligible=True)['results']
+    assert results['alpha']['status'] == 'blocked'
+    assert results['beta']['status'] == 'unknown'
+    assert len(cat.writes) == 2
+    retried = service.apply(plan['plan_id'], all_eligible=True)['results']
+    assert retried['alpha']['status'] == 'applied'
+    assert retried['beta']['status'] == 'conflict'
+    assert retried['beta']['reason'] == 'unresolved_provider_outcome'
+    assert len(cat.writes) == 3
+    assert service.preview(['beta'])['rows'][0]['reason'] == 'unresolved_provider_outcome'
+
+
+def test_definitive_conflict_never_owns_racing_manual_title(fixture):
+    service, cat, *_ = fixture
+    plan = service.preview(['alpha'])
+    def conflict(identity, expected, desired):
+        cat.rows[identity]['title'] = desired  # another writer, not Workbench
+        return 'conflict'
+    cat.rename_if_title = conflict
+    result = service.apply(plan['plan_id'], selected=['alpha'])
+    assert result['results']['alpha']['status'] == 'conflict'
+    assert 'alpha' not in result.get('verified_writes', {})
+    assert service.undo(plan['plan_id'], 'alpha')['undo_results']['alpha']['reason'] == 'no_verified_write'
+
+
+def test_each_row_is_refreshed_immediately_before_write(fixture):
+    service, cat, contexts, *_ = fixture
+    plan = service.preview(['alpha', 'beta'])
+    original = cat.rename_if_title
+    def change_second_while_first_writes(identity, expected, desired):
+        if identity == A:
+            contexts[1]['title'] = 'Changed by operator'
+        return original(identity, expected, desired)
+    cat.rename_if_title = change_second_while_first_writes
+    results = service.apply(plan['plan_id'], all_eligible=True)['results']
+    assert results['alpha']['status'] == 'applied'
+    assert results['beta']['status'] == 'conflict'
+    assert len(cat.writes) == 1
+
+
+def test_removed_unselected_context_does_not_abort_selected_row(fixture):
+    service, cat, contexts, *_ = fixture
+    plan = service.preview(['alpha', 'beta'])
+    contexts.pop()
+    result = service.apply(plan['plan_id'], selected=['alpha'])
+    assert result['results']['alpha']['status'] == 'applied'
+
+
+def test_repeated_status_keeps_write_evidence_for_undo(fixture):
+    service, cat, *_ = fixture
+    cat.rows[A]['title'] = 'Prior'
+    plan = service.preview(['alpha'])
+    assert service.apply(plan['plan_id'], selected=['alpha'])['results']['alpha']['status'] == 'applied'
+    for _ in range(2):
+        assert service.apply(plan['plan_id'], selected=['alpha'])['results']['alpha']['status'] == 'already_matched'
+    assert service.undo(plan['plan_id'], 'alpha')['undo_results']['alpha']['status'] == 'applied'
+
+
+def test_practical_mode_requires_confirmation_and_reports_verified_write(fixture):
+    service, cat, *_ = fixture
+    cat.guarded_rename = False
+    plan = service.preview(['alpha'])
+    with pytest.raises(ValueError):
+        service.apply(plan['plan_id'], selected=['alpha'], mode='practical')
+    result = service.apply(plan['plan_id'], selected=['alpha'], mode='practical', confirm_non_atomic=True)
+    assert result['results']['alpha']['status'] == 'applied'
+    assert result['verified_writes']['alpha']['mode'] == 'practical'
+
+
+def test_delayed_unknown_request_blocks_retry_and_undo(fixture):
+    service, cat, *_ = fixture
+    cat.rows[A]['title'] = 'Prior'
+    plan = service.preview(['alpha'])
+    def timeout_after_send(identity, expected, desired):
+        cat.writes.append((identity, expected, desired))
+        raise TimeoutError()
+    cat.rename_if_title = timeout_after_send
+    assert service.apply(plan['plan_id'], selected=['alpha'])['results']['alpha']['status'] == 'unknown'
+    assert service.apply(plan['plan_id'], selected=['alpha'])['results']['alpha']['status'] == 'conflict'
+    assert service.undo(plan['plan_id'], 'alpha')['undo_results']['alpha']['status'] == 'conflict'
+    assert len(cat.writes) == 1
+
+
+def test_real_catalog_write_capability_is_explicitly_blocked(tmp_path):
+    assert CodexCatalog(tmp_path).guarded_rename is False
+    with pytest.raises(NotImplementedError):
+        CodexCatalog(tmp_path).rename_if_title(A, '', 'Alpha')
+
+
+def test_supported_app_server_rename_request_uses_exact_id(tmp_path):
+    fake = tmp_path / 'fake-codex'
+    fake.write_text('''#!/usr/bin/env python3
+import json, sys
+first=json.loads(sys.stdin.readline())
+assert first['method']=='initialize'
+print(json.dumps({'id':first['id'],'result':{}}), flush=True)
+assert json.loads(sys.stdin.readline())['method']=='initialized'
+second=json.loads(sys.stdin.readline())
+assert second['method']=='thread/name/set'
+assert second['params']=={'threadId':'11111111-1111-4111-8111-111111111111','name':'Alpha'}
+print(json.dumps({'id':second['id'],'result':{}}), flush=True)
+''')
+    fake.chmod(0o700)
+    assert CodexCatalog(tmp_path, str(fake)).rename_practical(A, 'Alpha') == 'applied'
+
+
+def test_codex_home_is_shared_by_catalog_and_supported_rename(tmp_path, monkeypatch):
+    first, second = tmp_path / 'first', tmp_path / 'second'
+    for root, title in ((first, 'Wrong store'), (second, 'Reviewed store')):
+        root.mkdir()
+        with __import__('sqlite3').connect(root / 'state_test.sqlite') as db:
+            db.execute('CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, archived INTEGER, source TEXT)')
+            db.execute('INSERT INTO threads VALUES (?,?,?,?,?)', (A, '/synthetic/a', title, 0, 'cli'))
+    fake = tmp_path / 'fake-codex'
+    fake.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, sys
+first=json.loads(sys.stdin.readline())
+print(json.dumps({'id':first['id'],'result':{}}), flush=True)
+json.loads(sys.stdin.readline())
+second=json.loads(sys.stdin.readline())
+pathlib.Path(os.environ['CODEX_HOME']).joinpath('renamed.txt').write_text(second['params']['name'])
+print(json.dumps({'id':second['id'],'result':{}}), flush=True)
+''')
+    fake.chmod(0o700)
+    monkeypatch.setenv('CODEX_HOME', str(second))
+    catalog = CodexCatalog(tmp_path / 'irrelevant-home', str(fake))
+    assert catalog.read(A)['title'] == 'Reviewed store'
+    assert catalog.rename_practical(A, 'Alpha') == 'applied'
+    assert (second / 'renamed.txt').read_text() == 'Alpha'
+    assert not (first / 'renamed.txt').exists()
+
+
+def test_catalog_uses_saved_name_over_generated_title(tmp_path, monkeypatch):
+    root = tmp_path / 'codex-home'
+    root.mkdir()
+    with __import__('sqlite3').connect(root / 'state_test.sqlite') as db:
+        db.execute('CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, name TEXT, archived INTEGER, source TEXT, history_mode TEXT, first_user_message TEXT)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)', (A, '/synthetic/a', 'Generated title', 'Chosen name', 0, 'cli', 'paginated', 'First prompt'))
+    monkeypatch.setenv('CODEX_HOME', str(root))
+    assert CodexCatalog().read(A)['title'] == 'Chosen name'
+
+
+def test_legacy_title_ignores_stale_paginated_name_column(tmp_path, monkeypatch):
+    root = tmp_path / 'codex-home'
+    root.mkdir()
+    with __import__('sqlite3').connect(root / 'state_test.sqlite') as db:
+        db.execute('CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, name TEXT, archived INTEGER, source TEXT, history_mode TEXT, first_user_message TEXT)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)', (A, '/synthetic/a', 'Manual legacy title', 'Stale unused name', 0, 'cli', 'legacy', 'First prompt'))
+    monkeypatch.setenv('CODEX_HOME', str(root))
+    assert CodexCatalog().read(A)['title'] == 'Manual legacy title'
+
+
+def test_legacy_manual_edit_blocks_practical_write_even_with_stale_name(tmp_path, monkeypatch):
+    root = tmp_path / 'codex-home'
+    root.mkdir()
+    path = root / 'state_test.sqlite'
+    with __import__('sqlite3').connect(path) as db:
+        db.execute('CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, name TEXT, archived INTEGER, source TEXT, history_mode TEXT, first_user_message TEXT)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)', (A, '/synthetic/a', 'Initial legacy title', 'Stale unused name', 0, 'cli', 'legacy', 'First prompt'))
+    monkeypatch.setenv('CODEX_HOME', str(root))
+    catalog = CodexCatalog(executable='synthetic-provider')
+    writes = []
+    catalog.rename_practical = lambda identity, desired: writes.append((identity, desired)) or 'applied'
+    context = {'id': 'alpha', 'title': 'Desired', 'provider': 'codex', 'cwd': '/synthetic/a'}
+    binding = {'id': A, 'provider': 'codex', 'cwd': '/synthetic/a'}
+    service = Reconciler(lambda: [context], lambda _: binding, catalog, tmp_path / 'workbench-state')
+    plan = service.preview(['alpha'])
+    with __import__('sqlite3').connect(path) as db:
+        db.execute('UPDATE threads SET title=? WHERE id=?', ('Later manual title', A))
+    result = service.apply(plan['plan_id'], selected=['alpha'], mode='practical', confirm_non_atomic=True)
+    assert result['results']['alpha']['status'] == 'conflict'
+    assert writes == []
+
+
+def test_legacy_derived_title_uses_supported_read_for_index(tmp_path, monkeypatch):
+    root = tmp_path / 'codex-home'
+    root.mkdir()
+    with __import__('sqlite3').connect(root / 'state_test.sqlite') as db:
+        db.execute('CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, name TEXT, archived INTEGER, source TEXT, history_mode TEXT, first_user_message TEXT)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)', (A, '/synthetic/a', 'First prompt', 'Stale unused name', 0, 'cli', 'legacy', 'First prompt'))
+    monkeypatch.setenv('CODEX_HOME', str(root))
+    monkeypatch.setattr(CodexCatalog, '_read_supported_name', lambda self, _: 'Indexed legacy name')
+    assert CodexCatalog().read(A)['title'] == 'Indexed legacy name'
+
+
+def test_legacy_derived_title_supported_read_requests_exact_metadata_only(tmp_path, monkeypatch):
+    root = tmp_path / 'codex-home'
+    root.mkdir()
+    with __import__('sqlite3').connect(root / 'state_test.sqlite') as db:
+        db.execute('CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, name TEXT, archived INTEGER, source TEXT, history_mode TEXT, first_user_message TEXT)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)', (A, '/synthetic/a', 'First prompt', None, 0, 'cli', 'legacy', 'First prompt'))
+    fake = tmp_path / 'fake-codex'
+    fake.write_text('''#!/usr/bin/env python3
+import json, sys
+first=json.loads(sys.stdin.readline())
+print(json.dumps({'id':first['id'],'result':{}}), flush=True)
+json.loads(sys.stdin.readline())
+second=json.loads(sys.stdin.readline())
+assert second['method']=='thread/read'
+assert second['params']=={'threadId':'11111111-1111-4111-8111-111111111111','includeTurns':False}
+print(json.dumps({'id':second['id'],'result':{'thread':{'id':second['params']['threadId'],'name':'Indexed legacy name'}}}), flush=True)
+''')
+    fake.chmod(0o700)
+    monkeypatch.setenv('CODEX_HOME', str(root))
+    assert CodexCatalog(executable=str(fake)).read(A)['title'] == 'Indexed legacy name'
+
+
+def test_paginated_unset_name_does_not_pretend_generated_title_is_saved(tmp_path, monkeypatch):
+    root = tmp_path / 'codex-home'
+    root.mkdir()
+    with __import__('sqlite3').connect(root / 'state_test.sqlite') as db:
+        db.execute('CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, name TEXT, archived INTEGER, source TEXT, history_mode TEXT, first_user_message TEXT)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)', (A, '/synthetic/a', 'Generated title', None, 0, 'cli', 'paginated', 'First prompt'))
+    monkeypatch.setenv('CODEX_HOME', str(root))
+    assert CodexCatalog().read(A)['title'] == ''
+
+
+def test_provider_root_change_invalidates_preview(fixture, tmp_path):
+    service, cat, contexts, bindings, observed = fixture
+    cat.codex_root = tmp_path / 'provider-one'
+    plan = service.preview(['alpha'])
+    cat.codex_root = tmp_path / 'provider-two'
+    result = service.apply(plan['plan_id'], selected=['alpha'])
+    assert result['results']['alpha']['status'] == 'conflict'
+    assert cat.writes == []
+    assert 'provider_root' not in plan['rows'][0]
+
+
+def test_audit_write_failure_leaves_fence_after_actual_rename(fixture, monkeypatch):
+    service, cat, *_ = fixture
+    plan = service.preview(['alpha'])
+    original_write = title_module._write
+    def fail_plan(path, value):
+        if path.name == plan['plan_id'] + '.json':
+            raise OSError('synthetic audit failure')
+        return original_write(path, value)
+    monkeypatch.setattr(title_module, '_write', fail_plan)
+    with pytest.raises(OSError):
+        service.apply(plan['plan_id'], selected=['alpha'])
+    assert cat.rows[A]['title'] == 'Alpha ✨'
+    assert (service.state / 'uncertain' / (A + '.json')).exists()
+    monkeypatch.setattr(title_module, '_write', original_write)
+    assert service.preview(['alpha'])['rows'][0]['reason'] == 'unresolved_provider_outcome'
+
+
+def test_new_uncertain_directory_parent_is_synced_before_provider_send(fixture, monkeypatch):
+    service, cat, *_ = fixture
+    plan = service.preview(['alpha'])
+    synced = []
+    original_fsync = title_module.os.fsync
+    def record_fsync(fd):
+        synced.append(Path(__import__('os').readlink(f'/proc/self/fd/{fd}')))
+        return original_fsync(fd)
+    monkeypatch.setattr(title_module.os, 'fsync', record_fsync)
+    original_rename = cat.rename_if_title
+    def verify_order(identity, expected, desired):
+        assert service.state / 'uncertain' in synced
+        assert service.state in synced  # parent entry for uncertain/ is durable
+        return original_rename(identity, expected, desired)
+    cat.rename_if_title = verify_order
+    assert service.apply(plan['plan_id'], selected=['alpha'])['results']['alpha']['status'] == 'applied'
+
+
+def test_malformed_matching_ack_after_send_is_unknown(tmp_path):
+    fake = tmp_path / 'fake-codex'
+    fake.write_text('''#!/usr/bin/env python3
+import json, sys
+first=json.loads(sys.stdin.readline())
+print(json.dumps({'id':first['id'],'result':{}}), flush=True)
+json.loads(sys.stdin.readline())
+second=json.loads(sys.stdin.readline())
+print(json.dumps({'id':second['id'],'unexpected':'not an acknowledgement'}), flush=True)
+''')
+    fake.chmod(0o700)
+    with pytest.raises(ConnectionError):
+        CodexCatalog(tmp_path, str(fake)).rename_practical(A, 'Alpha')
+
+
+def test_undo_requires_verified_write_and_unchanged_current_title(fixture):
+    service, cat, *_ = fixture
+    cat.rows[A]['title'] = 'Prior'
+    plan = service.preview(['alpha'])
+    assert plan['rows'][0]['status'] == 'needs_choice'
+    assert service.apply(plan['plan_id'], selected=['alpha'])['results']['alpha']['status'] == 'applied'
+    cat.rows[A]['title'] = 'Later manual edit'
+    assert service.undo(plan['plan_id'], 'alpha')['undo_results']['alpha']['status'] == 'conflict'
+    assert len(cat.writes) == 1
+    cat.rows[A]['title'] = 'Alpha ✨'
+    assert service.undo(plan['plan_id'], 'alpha')['undo_results']['alpha']['status'] == 'applied'
+    assert cat.rows[A]['title'] == 'Prior'

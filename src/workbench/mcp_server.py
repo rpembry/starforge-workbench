@@ -91,7 +91,7 @@ def _contexts(path: Path) -> list[dict[str, object]]:
 
 def build_server(api_factory=client, manifest_path=_manifest_path, context_loader=_contexts,
                  restore=None, flow_profile=None, flow_write=None,
-                 flow_prepare=None, flow_disclose_paths=None) -> MCPServer:
+                 flow_prepare=None, flow_disclose_paths=None, title_service=None) -> MCPServer:
     """Build a server with injectable dependencies for isolated tests."""
     selected_flow_profile = flow_profile or os.environ.get('WB_MCP_FLOW_PROFILE')
     selected_flow_write = flow_write if flow_write is not None else os.environ.get('WB_MCP_FLOW_WRITE') == '1'
@@ -128,7 +128,8 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
             'evidence': 'running-server',
             'tool_families': ['configured-contexts', 'browser-desired-state',
                               'bounded-worklog', 'standup', 'registered-session-status',
-                              'session-restore-preview',
+                              'session-restore-preview', 'codex-title-preview-status',
+                              *(['opt-in-codex-title-apply'] if os.environ.get('WB_MCP_ALLOW_TITLE_APPLY') == '1' else []),
                               *(['opt-in-session-restore'] if os.environ.get('WB_MCP_ALLOW_RESTORE') == '1' else [])],
             'flow': ('local-read-write' if selected_flow_profile and selected_flow_write else
                      'local-read' if selected_flow_profile else 'unavailable'),
@@ -140,6 +141,46 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
     def list_contexts() -> list[dict[str, object]]:
         """List configured launcher contexts without disclosing commands or filesystem paths."""
         return context_loader(manifest_path())
+
+    def reconcile():
+        if title_service is not None:
+            return title_service
+        from starforge_workbench.cli import title_reconciler
+        return title_reconciler(manifest_path())
+
+    @server.tool(name='codex_title_preview', structured_output=True)
+    def codex_title_preview(context_ids: list[str]) -> dict[str, object]:
+        """Preview exact configured Codex context bindings and desired titles; read-only for provider state."""
+        if not context_ids or len(context_ids) > 50 or len(context_ids) != len(set(context_ids)):
+            raise ValueError('Select 1..50 distinct exact context IDs')
+        allowed = {item['id'] for item in context_loader(manifest_path()) if item.get('provider') == 'codex'}
+        if any(identity not in allowed for identity in context_ids):
+            raise ValueError('Select configured Codex context IDs')
+        return reconcile().preview(context_ids)
+
+    @server.tool(name='codex_title_status', structured_output=True)
+    def codex_title_status(plan_id: str) -> dict[str, object]:
+        """Read a private reconciliation plan and its per-row outcomes by exact plan ID."""
+        return reconcile().status(plan_id)
+
+    @server.tool(name='codex_title_apply', structured_output=True)
+    def codex_title_apply(plan_id: str, context_ids: list[str] | None = None,
+                          all_eligible: bool = False, mode: Literal['strict', 'practical'] = 'strict',
+                          confirm_non_atomic: bool = False) -> dict[str, object]:
+        """Apply exact preview rows; practical mode needs explicit acknowledgement of its title race."""
+        if os.environ.get('WB_MCP_ALLOW_TITLE_APPLY') != '1':
+            return {'plan_id': plan_id, 'status': 'denied', 'reason': 'WB_MCP_ALLOW_TITLE_APPLY is not enabled'}
+        return reconcile().apply(plan_id, selected=context_ids, all_eligible=all_eligible,
+                                 mode=mode, confirm_non_atomic=confirm_non_atomic)
+
+    @server.tool(name='codex_title_undo', structured_output=True)
+    def codex_title_undo(plan_id: str, context_id: str, mode: Literal['strict', 'practical'] = 'strict',
+                         confirm_non_atomic: bool = False) -> dict[str, object]:
+        """Restore one verified prior title; practical mode acknowledges the non-atomic title race."""
+        if os.environ.get('WB_MCP_ALLOW_TITLE_APPLY') != '1':
+            return {'plan_id': plan_id, 'status': 'denied', 'reason': 'WB_MCP_ALLOW_TITLE_APPLY is not enabled'}
+        return reconcile().undo(plan_id, context_id, mode=mode,
+                                confirm_non_atomic=confirm_non_atomic)
 
     @server.tool(name='browser_workspace_list', structured_output=True)
     def browser_workspace_list() -> dict[str, object]:

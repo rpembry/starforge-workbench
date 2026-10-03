@@ -707,8 +707,58 @@ def menu(c):
         retry_start(c, lambda: run(provider_argv(c, choice), cwd=cwd(c)).returncode)
 
 
+def title_reconciler(manifest, catalog=None, state=None):
+    """Use the launcher's private exact bindings without starting a provider."""
+    from starforge_workbench.title_reconcile import CodexCatalog, Reconciler
+    if state is None:
+        secure_dir(STATE)
+    def contexts():
+        return [{**c, 'cwd': str(cwd(c))} for c in load(manifest)['contexts']]
+    def binding(context_id):
+        return read_state(STATE / 'sessions' / (context_id + '.json'))
+    return Reconciler(contexts, binding, catalog or CodexCatalog(), state or STATE / 'title-reconcile')
+
+
+def titles_main(argv=None):
+    p = argparse.ArgumentParser(description='Preview exact Codex title mappings; guarded apply is provider gated')
+    p.add_argument('--manifest', type=Path, default=default_manifest())
+    commands = p.add_subparsers(dest='command', required=True)
+    preview = commands.add_parser('preview')
+    preview.add_argument('contexts', nargs='+')
+    apply = commands.add_parser('apply')
+    apply.add_argument('plan_id')
+    choice = apply.add_mutually_exclusive_group(required=True)
+    choice.add_argument('--all-eligible', action='store_true')
+    choice.add_argument('--context', action='append')
+    apply.add_argument('--mode', choices=['strict', 'practical'], default='strict')
+    apply.add_argument('--confirm-non-atomic', action='store_true')
+    status = commands.add_parser('status')
+    status.add_argument('plan_id')
+    undo = commands.add_parser('undo')
+    undo.add_argument('plan_id')
+    undo.add_argument('context')
+    undo.add_argument('--mode', choices=['strict', 'practical'], default='strict')
+    undo.add_argument('--confirm-non-atomic', action='store_true')
+    args = p.parse_args(argv)
+    service = title_reconciler(args.manifest.resolve())
+    if args.command == 'preview':
+        result = service.preview(args.contexts)
+    elif args.command == 'apply':
+        result = service.apply(args.plan_id, selected=args.context, all_eligible=args.all_eligible,
+                               mode=args.mode, confirm_non_atomic=args.confirm_non_atomic)
+    elif args.command == 'undo':
+        result = service.undo(args.plan_id, args.context, mode=args.mode,
+                              confirm_non_atomic=args.confirm_non_atomic)
+    else:
+        result = service.status(args.plan_id)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return result
+
+
 def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] == 'titles':
+        return titles_main(raw_argv[1:])
     if raw_argv and raw_argv[0] == 'chrome':
         from starforge_workbench.browser import main as browser_main
         return browser_main(raw_argv[1:])
