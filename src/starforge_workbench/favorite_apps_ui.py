@@ -25,7 +25,9 @@ def run_gui(restorer):
     if not favorites:
         _dialog('--info', '--title=Favorite Apps', '--text=No favorite apps are configured yet.')
         return 0
-    selected = []
+    # A visible default selection is still only a proposal: no launch happens
+    # until the user previews and confirms it.
+    selected = [row['name'] for row in favorites]
     while True:
         preview = restorer.preview([row['name'] for row in favorites])
         rows = []

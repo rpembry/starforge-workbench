@@ -38,6 +38,7 @@ def test_gui_requires_review_then_uses_exact_preview_token(monkeypatch):
     restorer = Restorer()
     assert run_gui(restorer) == 0
     assert restorer.applied == [(['Editor', 'PWA'], 'synthetic-token', True)]
+    assert calls[0].count('TRUE') == 2
     assert 'PWA: refuse' in next(arg for arg in calls[1] if arg.startswith('--text='))
 
 
@@ -49,6 +50,21 @@ def test_gui_cancel_does_not_apply(monkeypatch):
     restorer = Restorer()
     assert run_gui(restorer) == 0
     assert not restorer.applied
+
+
+def test_default_checkmarks_never_open_apps_without_confirmation(monkeypatch):
+    import starforge_workbench.favorite_apps_ui as ui
+    monkeypatch.setattr(ui, 'load_config', lambda _: [{'name': 'Editor'}, {'name': 'PWA'}])
+    monkeypatch.setattr(ui.shutil, 'which', lambda _: '/usr/bin/zenity')
+    shown = []
+    def dialog(*args):
+        shown.append(args)
+        return SimpleNamespace(returncode=1, stdout='')
+    monkeypatch.setattr(ui, '_dialog', dialog)
+    restorer = Restorer()
+    assert run_gui(restorer) == 0
+    assert shown[0].count('TRUE') == 2
+    assert restorer.applied == []
 
 
 def test_preview_back_preserves_selected_rows(monkeypatch):
