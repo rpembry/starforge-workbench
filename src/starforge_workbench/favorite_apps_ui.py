@@ -30,11 +30,13 @@ def run_gui(restorer):
     if not favorites:
         _dialog('--info', '--title=Favorite Apps', '--text=No favorite apps are configured yet.')
         return 0
-    # A visible default selection is still only a proposal: no launch happens
-    # until the user previews and confirms it.
-    selected = [row['name'] for row in favorites]
+    # Preselect only verified absent apps. Back keeps the user's selection.
+    selected = None
     while True:
         preview = restorer.preview([row['name'] for row in favorites])
+        if selected is None:
+            selected = [item['name'] for item in preview['items']
+                        if item['action'] == 'launch']
         rows = []
         for item in preview['items']:
             label = {'launch': 'Ready to open', 'preserve': 'Already open',
@@ -45,7 +47,7 @@ def run_gui(restorer):
             rows.extend(['TRUE' if item['name'] in selected else 'FALSE',
                          item['name'], label, item['evidence']])
         picked = _dialog('--list', '--checklist', '--title=Favorite Apps',
-                         '--text=Select apps to open, then choose Preview. Already open apps stay open.',
+                         '--text=Ready to open apps are checked. Select others if needed, then choose Preview. Already open apps stay open.',
                          '--width=900', '--height=580', '--ok-label=Preview',
                          '--separator=\n', '--column=Open', '--column=Favorite',
                          '--column=Status', '--column=Reason', *rows)

@@ -2,8 +2,9 @@
 
 The **Favorite Apps** application-menu entry opens a manual checklist. It
 shows which configured favorites are already open, ready to open, or have an
-unknown running status. All favorites are checked by default, but nothing is
-opened until the user previews and confirms. The user can go Back
+unknown running status. Only favorites verified absent are checked by default;
+already open, unresolved, and unknown-status apps can be selected manually.
+Nothing is opened until the user previews and confirms. The user can go Back
 to change the selection, and confirms
 before opening them. Unknown status requires an explicit **Open anyway** choice
 because another window may already exist. An unresolved same-boot launch is

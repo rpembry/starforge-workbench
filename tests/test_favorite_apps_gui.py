@@ -39,7 +39,7 @@ def test_gui_requires_review_then_uses_exact_preview_token(monkeypatch):
     restorer = Restorer()
     assert run_gui(restorer) == 0
     assert restorer.applied == [(['Editor', 'PWA'], 'synthetic-token', True, False)]
-    assert calls[0].count('TRUE') == 2
+    assert calls[0].count('TRUE') == 1
     assert 'PWA: refuse' in next(arg for arg in calls[1] if arg.startswith('--text='))
 
 
@@ -64,7 +64,34 @@ def test_default_checkmarks_never_open_apps_without_confirmation(monkeypatch):
     monkeypatch.setattr(ui, '_dialog', dialog)
     restorer = Restorer()
     assert run_gui(restorer) == 0
-    assert shown[0].count('TRUE') == 2
+    assert shown[0].count('TRUE') == 1
+    assert restorer.applied == []
+
+
+def test_only_verified_absent_apps_start_checked(monkeypatch):
+    import starforge_workbench.favorite_apps_ui as ui
+    names = ['Absent', 'Present', 'Pending', 'Unknown']
+    class Mixed(Restorer):
+        def preview(self, selected):
+            actions = {'Absent': 'launch', 'Present': 'preserve',
+                       'Pending': 'skip', 'Unknown': 'refuse'}
+            return {'selection': selected, 'token': 'synthetic-token', 'items': [
+                {'name': name, 'action': actions[name],
+                 'can_open_anyway': name == 'Unknown', 'evidence': 'synthetic'}
+                for name in selected]}
+    monkeypatch.setattr(ui, 'load_config', lambda _: [{'name': name} for name in names])
+    monkeypatch.setattr(ui.shutil, 'which', lambda _: '/usr/bin/zenity')
+    calls = []
+    def dialog(*args):
+        calls.append(args)
+        return SimpleNamespace(returncode=1, stdout='')
+    monkeypatch.setattr(ui, '_dialog', dialog)
+    restorer = Mixed()
+    assert run_gui(restorer) == 0
+    rows = calls[0][calls[0].index('--column=Reason') + 1:]
+    assert [(rows[i + 1], rows[i]) for i in range(0, len(rows), 4)] == [
+        ('Absent', 'TRUE'), ('Present', 'FALSE'),
+        ('Pending', 'FALSE'), ('Unknown', 'FALSE')]
     assert restorer.applied == []
 
 
