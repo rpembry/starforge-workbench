@@ -6,6 +6,7 @@ It never adopts legacy receipts, pulls an image, or accepts host paths from a jo
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -49,7 +50,8 @@ class DockerRuntime:
     """
 
     def __init__(self, state_root, *, profiles: dict, workspaces: dict,
-                 worker_types=frozenset({"command", "protocol_example"}), command_fn=command):
+                 worker_types=frozenset({"command", "protocol_example"}),
+                 host_budget=None, command_fn=command):
         self.root = private_directory(state_root)
         self.profiles = {}
         for name, raw in profiles.items():
@@ -60,6 +62,18 @@ class DockerRuntime:
                 raise ValueError("Docker profile UID/GID must match non-root host caller")
             self.profiles[name] = profile
         self.workspaces = dict(workspaces)
+        if host_budget is None:
+            # Safe single-allocation default until the operator assigns an
+            # explicit slice of host capacity to this supervisor.
+            host_budget = {"max_active": 1,
+                           "cpu_millis": max((math.ceil(p.cpus * 1000) for p in self.profiles.values()), default=0),
+                           "memory_mb": max((p.memory_mb for p in self.profiles.values()), default=0)}
+        if (not isinstance(host_budget, dict) or set(host_budget) !=
+                {"max_active", "cpu_millis", "memory_mb"} or
+                any(type(host_budget[key]) is not int or host_budget[key] < 0 for key in host_budget) or
+                host_budget["max_active"] < 1):
+            raise ValueError("invalid host reservation budget")
+        self.host_budget = dict(host_budget)
         self.worker_types = frozenset(worker_types)
         self.command = command_fn
         self.docker = docker_prefix(False)  # no implicit sudo or remote context
@@ -71,6 +85,14 @@ class DockerRuntime:
         binding = self._workspace_binding(plan["workspace_ref"])
         if binding["kind"] == "git_worktree":
             self._verify_git_source(binding)
+        request = self.reservation(plan)
+        if (request["cpu_millis"] > self.host_budget["cpu_millis"] or
+                request["memory_mb"] > self.host_budget["memory_mb"]):
+            raise WorkerError("approved profile exceeds supervisor host reservation")
+        capacity = json.loads(self.command(self.docker + ["info", "--format", "{{json .}}"] ))
+        if (self.host_budget["cpu_millis"] > capacity["NCPU"] * 1000 or
+                self.host_budget["memory_mb"] * 1024 * 1024 > capacity["MemTotal"]):
+            raise WorkerError("supervisor reservation exceeds daemon host capacity")
         kind = plan["worker_type"]
         if kind not in {"command", "protocol_example"} or kind not in self.worker_types:
             raise ValueError("unregistered worker adapter")
@@ -105,6 +127,11 @@ class DockerRuntime:
         if "input" in payload and (not isinstance(payload["input"], dict) or
                                    len(_json(payload["input"]).encode()) > 65_536):
             raise ValueError("invalid bounded input")
+
+    def reservation(self, plan):
+        profile = self.profiles[plan["profile_ref"]]
+        return {"cpu_millis": math.ceil(profile.cpus * 1000),
+                "memory_mb": profile.memory_mb}
 
     def _workspace_binding(self, reference):
         binding = self.workspaces.get(reference)

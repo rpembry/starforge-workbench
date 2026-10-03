@@ -180,6 +180,24 @@ def test_lost_launch_response_does_not_duplicate(setup):
     assert runtime.starts == 1
 
 
+def test_supervisor_reserves_resolved_host_profiles_under_launch_lock(setup):
+    supervisor, runtime, clock = setup
+    runtime.host_budget = {"max_active": 2, "cpu_millis": 2000, "memory_mb": 128}
+    runtime.reservation = lambda plan: {"cpu_millis": 1000, "memory_mb": 64}
+    lease = supervisor.acquire("a")
+    for index in (1, 2):
+        supervisor.launch(plan(f"attempt-{index}"), controller="a",
+                          generation=lease["generation"], operation_id=f"launch-{index}")
+    with pytest.raises(Conflict, match="reservation full"):
+        supervisor.launch(plan("attempt-3"), controller="a",
+                          generation=lease["generation"], operation_id="launch-3")
+    assert runtime.starts == 2
+    supervisor.owner_stop("attempt-1", operation_id="stop-1")
+    supervisor.launch(plan("attempt-3"), controller="a",
+                      generation=supervisor.acquire("a")["generation"], operation_id="launch-3")
+    assert runtime.starts == 3
+
+
 def test_identity_mismatch_blocks_stop(setup):
     supervisor, runtime, clock = setup
     lease = supervisor.acquire("a")

@@ -9,7 +9,7 @@ import subprocess
 import pytest
 
 from coordinator.docker_runtime import DockerRuntime
-from coordinator.supervisor import OwnershipUnknown, Supervisor
+from coordinator.supervisor import Conflict, OwnershipUnknown, Supervisor
 from coordinator.worker_sdk import WorkerClient
 from starforge_workbench.docker_worker import WorkerError
 
@@ -137,6 +137,23 @@ def test_unapproved_reference_rejected_before_docker(runtime):
     with pytest.raises(ValueError, match="workspace"):
         adapter.validate(bad)
     assert fake.calls == []
+
+
+def test_default_host_reservation_blocks_second_allocation(runtime, tmp_path):
+    adapter, fake = runtime
+    journal = tmp_path / "journal"
+    journal.mkdir(mode=0o700)
+    supervisor = Supervisor(journal, adapter)
+    lease = supervisor.acquire("controller")
+    supervisor.launch(plan(), controller="controller", generation=lease["generation"],
+                      operation_id="launch-one")
+    second = {**plan(), "attempt_id": "b" * 32, "incarnation": "different"}
+    with pytest.raises(Conflict, match="reservation full"):
+        supervisor.launch(second, controller="controller", generation=lease["generation"],
+                          operation_id="launch-two")
+    assert fake.create_count == 1
+    with pytest.raises(KeyError):
+        supervisor.inspect("b" * 32)
 
 
 def test_approved_git_worktree_exports_patch_and_retains_all_work(runtime, tmp_path):

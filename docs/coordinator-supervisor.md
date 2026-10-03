@@ -20,6 +20,15 @@ workspace entry uses
 `"reviewed_repo":{"kind":"git_worktree","repository":"/absolute/repository","revision":"<full-commit-id>"}`
 in `workspaces`; the service state directory must be outside that repository.
 The repository and revision are operator configuration, not job input.
+Optional `host_budget` has exact integer keys `max_active`, `cpu_millis`, and
+`memory_mb`. Without it, the supervisor reserves room for one allocation.
+For example, `{"max_active":2,"cpu_millis":2000,"memory_mb":128}` permits
+two reviewed 1-CPU/64-MiB profiles only when the daemon reports at least that
+capacity. The supervisor sums resolved profile reservations for every
+non-stopped attempt under its launch lock; a full budget fails before a new
+intent or Docker create. A stopped attempt releases its reservation. The
+operator must choose a slice that leaves capacity for other local workloads;
+Docker host capacity alone does not measure their current resource use.
 The service's private Unix
 `control.sock` accepts fenced acquire/renew/launch/reconcile/cancel/inspect;
 `owner.sock` accepts owner stop, inspect, explicit takeover, `review`, and

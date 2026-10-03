@@ -34,9 +34,11 @@ def _private_file(path):
 
 def load_service(state_root, config_file, *, command_fn=None):
     config = json.loads(_private_file(config_file).read_text())
-    if set(config) != {"profiles", "workspaces"}:
+    if set(config) not in ({"profiles", "workspaces"}, {"profiles", "workspaces", "host_budget"}):
         raise ValueError("unsupported supervisor configuration")
     arguments = dict(profiles=config["profiles"], workspaces=config["workspaces"])
+    if "host_budget" in config:
+        arguments["host_budget"] = config["host_budget"]
     if command_fn is not None:
         arguments["command_fn"] = command_fn
     runtime = DockerRuntime(state_root, **arguments)

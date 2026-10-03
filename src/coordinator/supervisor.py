@@ -261,6 +261,20 @@ class Supervisor:
                 # A lost launch response must be reconciled, never repeated.
                 return self._attempt(old)
             self.runtime.validate(plan)  # current policy gates only NEW runtime allocations
+            reservation = getattr(self.runtime, "reservation", None)
+            host_budget = getattr(self.runtime, "host_budget", None)
+            if reservation is not None and host_budget is not None:
+                active = db.execute("SELECT plan FROM attempts WHERE state!='stopped'").fetchall()
+                used_cpu = used_memory = 0
+                for item in active:
+                    allocated = reservation(json.loads(item["plan"]))
+                    used_cpu += allocated["cpu_millis"]
+                    used_memory += allocated["memory_mb"]
+                requested = reservation(plan)
+                if (len(active) >= host_budget["max_active"] or
+                        used_cpu + requested["cpu_millis"] > host_budget["cpu_millis"] or
+                        used_memory + requested["memory_mb"] > host_budget["memory_mb"]):
+                    raise Conflict("supervisor host reservation full")
             deadline = now + plan["deadline_seconds"]
             orphan_deadline = (min(deadline, now + policy["max_orphan_seconds"])
                                if policy["mode"] == "trusted_local"
