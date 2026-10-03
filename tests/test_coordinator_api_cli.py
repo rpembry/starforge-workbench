@@ -158,3 +158,96 @@ def test_evidence_routes_scope_attempt_and_advertise_log_gap(fixture):
     assert api.get(other + "/artifacts").status_code == 404
     assert api.get(path + "/artifacts/%2e%2e").status_code in {404, 422}
     assert api.get("/openapi.json").json()["info"]["version"] == "1.0.0"
+
+
+@pytest.mark.parametrize("failure", ["read", "write"])
+def test_transport_reset_after_commit_requires_same_key(fixture, failure):
+    import httpx
+    from coordinator.client import CoordinatorClient, CoordinatorError
+
+    _, store, spec = fixture
+    calls = [0]
+    error_type = httpx.ReadError if failure == "read" else httpx.WriteError
+
+    def handler(request):
+        calls[0] += 1
+        body = json.loads(request.content)
+        job = store.submit(spec, principal="local-owner", key=body["idempotency_key"])
+        if calls[0] == 1:
+            raise error_type("connection reset", request=request)
+        return httpx.Response(201, json={"job": job,
+                              "operation": {"key": body["idempotency_key"], "state": "confirmed"}})
+
+    with CoordinatorClient("/unused", transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(CoordinatorError) as error:
+            client.submit(spec, "same-key")
+        assert error.value.code == "unavailable"
+        assert "same key" in error.value.message
+        assert calls[0] == 1  # no hidden automatic retry
+        replay = client.submit(spec, "same-key")
+    assert replay["job"]["id"] == store.list()[0]["id"]
+    assert len(store.list()) == 1 and calls[0] == 2
+
+
+@pytest.mark.parametrize("error_type", ["ReadError", "WriteError"])
+def test_cli_transport_reset_is_structured_unavailable(monkeypatch, tmp_path, capsys, error_type):
+    import httpx
+    from coordinator.client import CoordinatorClient
+
+    def handler(request):
+        raise getattr(httpx, error_type)("reset", request=request)
+
+    client = CoordinatorClient("/unused", transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(cli, "CoordinatorClient", lambda *_args, **_kwargs: client)
+    path = tmp_path / "job.json"
+    path.write_text(JobSpec(worker_type="command", profile_ref="offline",
+                            workspace_ref="scratch", payload={"argv": ["true"]},
+                            deadline_seconds=30,
+                            resources={"cpu_millis": 1000, "memory_mb": 128}).model_dump_json())
+    assert cli.main(["--socket", "/unused", "--json", "submit", str(path),
+                     "--key", "same-key"]) == 6
+    stderr = capsys.readouterr().err
+    assert "same key" in stderr and "Traceback" not in stderr
+
+
+def test_streamed_body_cap_without_or_with_false_length(fixture):
+    api, _, _ = fixture
+
+    async def chunks():
+        yield b"x" * 70_000
+        yield b"y" * 70_000
+
+    streamed = api.post("/v1/jobs/validate", content=chunks(),
+                        headers={"Content-Type": "application/json"})
+    assert streamed.status_code == 413
+    assert streamed.json()["code"] == "oversized_request"
+    falsified = api.post("/v1/jobs/validate", content=b"x" * 131_073,
+                         headers={"Content-Type": "application/json", "Content-Length": "2"})
+    assert falsified.status_code == 413
+
+
+def test_client_uses_fd_relative_address_for_deep_socket(tmp_path, monkeypatch):
+    import os
+    import httpx
+    from coordinator.client import CoordinatorClient
+
+    parent = tmp_path / ("a" * 55) / ("b" * 55)
+    parent.mkdir(parents=True, mode=0o700)
+    path = parent / "coord.sock"
+    assert len(str(path).encode()) > 108
+    seen = {}
+
+    def transport(*, uds):
+        seen["address"] = uds
+        return httpx.MockTransport(lambda _request: httpx.Response(200, json={"api": "ready"}))
+
+    monkeypatch.setattr(httpx, "HTTPTransport", transport)
+    with CoordinatorClient(path) as client:
+        assert client.health()["api"] == "ready"
+        assert seen["address"].startswith("/proc/self/fd/")
+        assert seen["address"].endswith("/coord.sock")
+        assert len(seen["address"].encode()) < 108
+        held_fd = client._directory_fd
+        os.fstat(held_fd)
+    with pytest.raises(OSError):
+        os.fstat(held_fd)

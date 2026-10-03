@@ -50,16 +50,23 @@ class SupervisorControl:
         wire = json.dumps({"method": method, "args": args}, separators=(",", ":"), allow_nan=False).encode() + b"\n"
         if len(wire) > 131_072:
             raise ValueError("supervisor request exceeds limit")
+        directory_fd = None
         try:
             self._check_socket()
+            path = Path(self.path)
+            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            address = f"/proc/self/fd/{directory_fd}/{path.name}"
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                 connection.settimeout(self.timeout)
-                connection.connect(self.path)
+                connection.connect(address)
                 connection.sendall(wire)
                 with connection.makefile("rb") as stream:
                     response = stream.readline(131_073)
         except (OSError, TimeoutError) as exc:
             raise Unavailable("supervisor control unavailable; operation outcome unknown") from exc
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
         if not response or len(response) > 131_072 or not response.endswith(b"\n"):
             raise Unavailable("supervisor response incomplete; operation outcome unknown")
         try:

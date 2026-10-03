@@ -55,16 +55,21 @@ def run(state_root: Path, socket_path: Path, policy_path: Path,
     dispatcher = (Dispatcher(store, SupervisorControl(supervisor_socket))
                   if supervisor_socket is not None else None)
     app = create_app(store, adapter=SupervisorEvidence(dispatcher) if dispatcher else None)
+    parent_fd = os.open(socket_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    old_mask = os.umask(0o177)
-    try:
-        listener.bind(str(socket_path))
-    finally:
-        os.umask(old_mask)
+    socket_inode = None
     stop = threading.Event()
     thread = None
     try:
+        old_mask = os.umask(0o177)
+        try:
+            # A short fd-relative alias works even when the private state path
+            # exceeds Linux's AF_UNIX sockaddr length.
+            listener.bind(f"/proc/self/fd/{parent_fd}/{socket_path.name}")
+        finally:
+            os.umask(old_mask)
         os.chmod(socket_path, stat.S_IRUSR | stat.S_IWUSR)
+        socket_inode = socket_path.stat().st_ino
         listener.listen(128)
         if dispatcher is not None:
             thread = threading.Thread(target=_dispatch_loop, args=(dispatcher, stop), daemon=True)
@@ -75,8 +80,10 @@ def run(state_root: Path, socket_path: Path, policy_path: Path,
         if thread is not None:
             thread.join(timeout=6)
         listener.close()
-        if socket_path.is_socket() and socket_path.stat().st_uid == os.getuid():
+        if (socket_path.is_socket() and socket_path.stat().st_uid == os.getuid() and
+                socket_path.stat().st_ino == socket_inode):
             socket_path.unlink()
+        os.close(parent_fd)
 
 
 def main(argv=None) -> int:

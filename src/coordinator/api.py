@@ -21,6 +21,54 @@ class EvidenceAdapter(Protocol):
     def artifact(self, job: dict[str, Any], attempt_id: str, artifact_id: str,
                  offset: int, limit: int) -> dict[str, Any]: ...
 
+class RequestBodyLimit:
+    """Bound ASGI input before FastAPI parses it, even without Content-Length."""
+
+    def __init__(self, app, *, limit: int = 131_072):
+        self.app = app
+        self.limit = limit
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        for name, raw in scope.get("headers", []):
+            if name.lower() == b"content-length":
+                try:
+                    if int(raw) > self.limit:
+                        return await JSONResponse({"code": "oversized_request"}, status_code=413)(
+                            scope, receive, send)
+                except ValueError:
+                    return await JSONResponse({"code": "invalid_length"}, status_code=400)(
+                        scope, receive, send)
+        chunks = []
+        size = 0
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            if message["type"] != "http.request":
+                continue
+            chunk = message.get("body", b"")
+            size += len(chunk)
+            if size > self.limit:
+                return await JSONResponse({"code": "oversized_request"}, status_code=413)(
+                    scope, receive, send)
+            chunks.append(chunk)
+            if not message.get("more_body", False):
+                break
+        body = b"".join(chunks)
+        delivered = False
+
+        async def replay():
+            nonlocal delivered
+            if not delivered:
+                delivered = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+
+        return await self.app(scope, replay, send)
+
+
 class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -47,8 +95,6 @@ def create_app(store: CoordinatorStore, *, adapter: EvidenceAdapter | None = Non
             return JSONResponse({"code": "forbidden_origin"}, status_code=403)
         if request.url.hostname not in {"localhost", "127.0.0.1", "::1", "coordinator", "testserver"}:
             return JSONResponse({"code": "nonlocal_host"}, status_code=403)
-        if request.headers.get("content-length") and int(request.headers["content-length"]) > 131_072:
-            return JSONResponse({"code": "oversized_request"}, status_code=413)
         return await call_next(request)
 
     @app.exception_handler(Conflict)
@@ -203,4 +249,5 @@ def create_app(store: CoordinatorStore, *, adapter: EvidenceAdapter | None = Non
         result = checked_attempt(job_id, attempt_id)
         return evidence().artifact(result, attempt_id, artifact_id, offset, limit)
 
+    app.add_middleware(RequestBodyLimit)
     return app

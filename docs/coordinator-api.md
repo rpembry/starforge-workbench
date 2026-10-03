@@ -17,10 +17,14 @@ coord --socket /private/run/coord.sock --json health
 coord --socket /private/run/coord.sock --json submit job.json --key submit-2026-01
 ```
 
+Both server and client use fd-relative Unix socket addresses so an owner-private
+runtime directory can have a pathname longer than the Linux socket address
+limit. The directory descriptor stays open for each client connection lifetime.
 The protected socket is the local authentication boundary. Browser `Origin` and
 cross-site requests and nonlocal Host values are rejected. Do not expose the
 ASGI app through a TCP listener without a separate origin-bound authentication
-adapter. API request bodies over 128 KiB are rejected; `JobSpec` bounds the
+adapter. API request bodies over 128 KiB are rejected while streaming, even with a missing
+or false `Content-Length`; `JobSpec` bounds the
 payload to 64 KiB and accepts registered policy keys, not host paths.
 
 ## Routes

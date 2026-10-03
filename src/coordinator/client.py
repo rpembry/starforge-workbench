@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import os
 from typing import Any
 
 import httpx
@@ -25,8 +26,30 @@ class CoordinatorClient:
                  transport: httpx.BaseTransport | None = None):
         if not 0 < timeout <= 60:
             raise ValueError("timeout must be between 0 and 60 seconds")
-        self._http = httpx.Client(base_url="http://coordinator", timeout=timeout,
-                                  transport=transport or httpx.HTTPTransport(uds=str(socket)))
+        self._directory_fd = None
+        if transport is None:
+            path = Path(socket).absolute()
+            try:
+                self._directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                address = f"/proc/self/fd/{self._directory_fd}/{path.name}"
+            except OSError:
+                # Keep missing-socket errors in the request path so normal CLI
+                # commands return the stable unavailable exit code.
+                address = str(path)
+            try:
+                transport = httpx.HTTPTransport(uds=address)
+            except BaseException:
+                if self._directory_fd is not None:
+                    os.close(self._directory_fd)
+                raise
+        try:
+            self._http = httpx.Client(base_url="http://coordinator", timeout=timeout,
+                                      transport=transport)
+        except BaseException:
+            if self._directory_fd is not None:
+                os.close(self._directory_fd)
+                self._directory_fd = None
+            raise
 
     def __enter__(self):
         return self
@@ -35,13 +58,21 @@ class CoordinatorClient:
         self.close()
 
     def close(self):
-        self._http.close()
+        try:
+            self._http.close()
+        finally:
+            if self._directory_fd is not None:
+                os.close(self._directory_fd)
+                self._directory_fd = None
 
     def _call(self, method: str, path: str, *, json: Any = None, params: dict | None = None) -> dict:
         try:
             response = self._http.request(method, path, json=json, params=params)
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
-            raise CoordinatorError("unavailable", 503, "coordinator unavailable; reconcile with the same key") from exc
+        except httpx.TransportError as exc:
+            # A reset may occur after the server committed the command. Never
+            # invent a fresh key or auto-repeat a mutation here.
+            raise CoordinatorError("unavailable", 503,
+                                   "coordinator response uncertain; reconcile with the same key") from exc
         if response.is_error:
             try:
                 body = response.json()
@@ -52,7 +83,11 @@ class CoordinatorClient:
                 detail = {}
             raise CoordinatorError(detail.get("code", "http_error"), response.status_code,
                                    detail.get("message", ""))
-        return response.json()
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise CoordinatorError("unavailable", 503,
+                                   "coordinator response invalid; reconcile with the same key") from exc
 
     def health(self) -> dict:
         return self._call("GET", "/v1/health")

@@ -148,7 +148,7 @@ def test_stopped_without_result_is_finalizing(tmp_path):
     assert result["phase"] == "finalizing" and result["outcome"] is None
 
 
-def test_bounded_supervisor_wire_and_error(monkeypatch):
+def test_bounded_supervisor_wire_and_error(monkeypatch, tmp_path):
     import io
     from coordinator.dispatch import SupervisorControl
     from coordinator import dispatch
@@ -164,7 +164,7 @@ def test_bounded_supervisor_wire_and_error(monkeypatch):
         def settimeout(self, timeout):
             assert timeout == 2
         def connect(self, path):
-            assert path == "/private/control.sock"
+            assert path.startswith("/proc/self/fd/") and path.endswith("/control.sock")
         def sendall(self, data):
             self.wire = data
         def makefile(self, mode):
@@ -172,7 +172,7 @@ def test_bounded_supervisor_wire_and_error(monkeypatch):
 
     fake = Socket()
     monkeypatch.setattr(dispatch.socket, "socket", lambda *_: fake)
-    control = SupervisorControl("/private/control.sock", timeout=2)
+    control = SupervisorControl(tmp_path / "control.sock", timeout=2)
     monkeypatch.setattr(control, "_check_socket", lambda: None)
     assert control.call("acquire", controller="one", lease_seconds=15)["generation"] == 3
     assert b'"method":"acquire"' in fake.wire
