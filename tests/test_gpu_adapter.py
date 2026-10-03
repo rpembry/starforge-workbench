@@ -62,11 +62,46 @@ def test_pending_stop_confirmed_exit_and_durable_restore(tmp_path):
     registry = Registry(tmp_path / 'private' / 'leases.sqlite', 'boot-one')
     recovered = LocalAdapter(registry, control, clock_id='boot-one', clock=lambda: clock[0])
     assert recovered.acquire('scope-a', 'request-a', 60)['token'] == acquired['token']
+    assert not recovered.status('scope-a', acquired['token'])['granted']
+    recovered.tick()
     assert recovered.status('scope-a', acquired['token'])['granted']
     recovered.release('scope-a', acquired['token'])
     recovered.release('scope-a', acquired['token'])  # Lost release response.
     assert recovered.tick() == 'START'
     registry.close()
+
+
+def test_restored_grant_is_fenced_before_fresh_miner_observation(tmp_path):
+    control = FakeController()
+    registry, adapter, clock = setup(tmp_path, control)
+    acquired = adapter.acquire('scope-a', 'request-a', 60)
+    adapter.tick()
+    adapter.tick()
+    assert adapter.status('scope-a', acquired['token'])['granted']
+    registry.close()
+    # The background process unexpectedly returned while the adapter was down.
+    control.process = control.context = O.PRESENT
+    registry = Registry(tmp_path / 'private' / 'leases.sqlite', 'boot-one')
+    recovered = LocalAdapter(registry, control, clock_id='boot-one', clock=lambda: clock[0])
+    assert not recovered.status('scope-a', acquired['token'])['granted']
+    assert recovered.tick() == 'STOP'
+    assert not recovered.status('scope-a', acquired['token'])['granted']
+    assert recovered.tick() == 'HOLD'
+    assert recovered.status('scope-a', acquired['token'])['granted']
+    registry.close()
+
+
+def test_exclusive_registry_owner_prevents_snapshot_overwrite(tmp_path):
+    control = FakeController()
+    registry, adapter, _ = setup(tmp_path, control)
+    first = adapter.acquire('scope-a', 'request-a', 60)
+    with pytest.raises(RegistryError, match='Another adapter'):
+        Registry(tmp_path / 'private' / 'leases.sqlite', 'boot-one')
+    registry.close()
+    reopened = Registry(tmp_path / 'private' / 'leases.sqlite', 'boot-one')
+    recovered = LocalAdapter(reopened, control, clock_id='boot-one', clock=lambda: 0)
+    assert recovered.status('scope-a', first['token'])['token'] == first['token']
+    reopened.close()
 
 
 def test_crash_after_stop_effect_reobserves_before_grant(tmp_path):
@@ -197,3 +232,30 @@ def test_private_socket_binds_peer_and_rejects_caller_owner(tmp_path):
         server.server_close()
         registry.close()
     assert not path.exists()
+
+
+def test_stale_socket_recovery_rejects_live_and_non_socket_paths(tmp_path):
+    registry, adapter, _ = setup(tmp_path)
+    root = tmp_path / 'private'
+    path = root / 'adapter.sock'
+    resolver = lambda _pid, _uid, _gid: 'scope'
+    stale = socket.socket(socket.AF_UNIX)
+    stale.bind(str(path))
+    os.chmod(path, 0o600)
+    stale.close()  # Leaves an owned, unbound socket filesystem entry.
+    server = ReservationSocket(path, adapter, resolver)
+    try:
+        with pytest.raises(RegistryError, match='active'):
+            ReservationSocket(path, adapter, resolver)
+    finally:
+        server.server_close()
+    assert not path.exists()
+    ordinary = root / 'ordinary'
+    ordinary.write_text('fixture')
+    with pytest.raises(RegistryError, match='not an owned'):
+        ReservationSocket(ordinary, adapter, resolver)
+    path.symlink_to(ordinary)
+    with pytest.raises(RegistryError, match='not an owned'):
+        ReservationSocket(path, adapter, resolver)
+    assert path.is_symlink() and ordinary.read_text() == 'fixture'
+    registry.close()

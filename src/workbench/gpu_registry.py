@@ -1,6 +1,7 @@
 """Private transactional state for a single host-local GPU policy adapter."""
 
 from dataclasses import asdict
+import fcntl
 import json
 import math
 import os
@@ -91,7 +92,17 @@ class Registry:
             fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             os.close(fd)
         private_file(self.path)
-        self.db = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
+        self._lock_fd = os.open(self.path, os.O_RDWR | os.O_NOFOLLOW)
+        try:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(self._lock_fd)
+            raise RegistryError("Another adapter owns the registry") from exc
+        try:
+            self.db = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
+        except sqlite3.Error as exc:
+            os.close(self._lock_fd)
+            raise RegistryError("Cannot open private policy registry") from exc
         try:
             self.db.execute('PRAGMA journal_mode=DELETE')
             self.db.execute('PRAGMA synchronous=FULL')
@@ -107,10 +118,12 @@ class Registry:
                 decode(row[0])
         except (sqlite3.DatabaseError, RegistryError) as exc:
             self.db.close()
+            os.close(self._lock_fd)
             raise RegistryError("Invalid private policy registry") from exc
 
     def close(self):
         self.db.close()
+        os.close(self._lock_fd)
 
     def load(self) -> tuple[PolicySnapshot, int]:
         row = self.db.execute('SELECT snapshot,revision FROM policy WHERE id=1').fetchone()

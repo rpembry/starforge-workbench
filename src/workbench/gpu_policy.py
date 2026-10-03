@@ -163,6 +163,15 @@ class ReservationPolicy:
         """Return a detached status value for the authenticated owner."""
         return Lease(**vars(self._get(owner, token)))
 
+    def revoke_unverified_grants(self) -> bool:
+        """Fence restored grants until a fresh owned-process observation."""
+        changed = False
+        for lease in self._leases.values():
+            if lease.granted:
+                lease.granted = False
+                changed = True
+        return changed
+
     def release(self, owner: str, token: str, now: float) -> None:
         if token not in self._leases:
             if any(r.owner == owner and r.token == token and r.retain_until is not None

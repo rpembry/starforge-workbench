@@ -1,5 +1,6 @@
 """Opt-in local adapter boundary; no installed runtime or process commands."""
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -33,7 +34,8 @@ class LocalAdapter:
         self.broken = False
         persisted, _ = registry.load()
         self.policy = ReservationPolicy(persisted, clock_id=clock_id, now=clock())
-        if persisted.clock_id != clock_id:
+        revoked = self.policy.revoke_unverified_grants()
+        if persisted.clock_id != clock_id or revoked:
             registry.save(self.policy.snapshot())
 
     def _persist(self, effect: str | None = None) -> int:
@@ -145,7 +147,20 @@ class ReservationSocket(socketserver.ThreadingUnixStreamServer):
             raise ValueError("Socket path must be absolute")
         private_parent(path)
         if path.exists() or path.is_symlink():
-            raise RegistryError("Socket path already exists")
+            info = path.lstat()
+            if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid() or
+                    info.st_mode & 0o777 != 0o600):
+                raise RegistryError("Socket path is not an owned private socket")
+            with socket.socket(socket.AF_UNIX) as probe:
+                probe.settimeout(0.25)
+                code = probe.connect_ex(str(path))
+            if code != errno.ECONNREFUSED:
+                raise RegistryError("Socket is active or its state is unknown")
+            current = path.lstat()
+            if (current.st_ino != info.st_ino or not stat.S_ISSOCK(current.st_mode) or
+                    current.st_uid != os.getuid()):
+                raise RegistryError("Socket path changed during recovery")
+            path.unlink()
         if identity_resolver is None:
             raise ValueError("A supervised peer identity resolver is required")
         self.adapter = adapter
