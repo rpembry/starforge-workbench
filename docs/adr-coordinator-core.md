@@ -21,8 +21,10 @@ for the service loop. `set_command_status()` records delivery uncertainty; it
 does not set a job result. The API layer must use the operation ID when calling
 the supervisor and reconcile the same attempt after a lost response.
 `reattach(job_id, expected_version, principal, key)` records a distinct
-same-attempt reconciliation command. It never allocates an attempt, and a
-replayed key returns the original logical command after a lost response.
+same-attempt reconciliation command. It returns immutable `operation_id`,
+`job_id`, `attempt_id`, and command `outcome`, rather than a mutable job view.
+It never allocates an attempt, and a replayed key still targets the original
+attempt after an explicit later retry creates another attempt.
 
 The store requires an existing private, caller-owned state directory, creates a
 private SQLite database, checks schema version and integrity on open, and uses

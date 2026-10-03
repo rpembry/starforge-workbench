@@ -199,3 +199,21 @@ def test_reattach_replays_same_attempt_and_command(store, spec):
         submitted["id"], expected_version=active["version"], principal="client", key="reattach")
     assert replay["attempt_id"] == active["attempt_id"]
     assert [item["id"] for item in store.pending_commands() if item["kind"] == "reattach"] == [commands[0]["id"]]
+
+
+def test_old_reattach_key_never_targets_explicit_retry(store, spec):
+    job = store.submit(spec, principal="client", key="submit")
+    active = store.admit_next(principal="scheduler", key="admit")
+    original = store.reattach(job["id"], expected_version=active["version"],
+                              principal="client", key="reattach-old")
+    attempt = active["attempts"][0]
+    ended = store.observe(job["id"], attempt_id=attempt["id"], incarnation=attempt["incarnation"],
+                          supervisor_id="host", observation_seq=1, phase="stopped", stopped=True,
+                          exit_code=1, result_ok=False)
+    retried = store.retry(job["id"], expected_version=ended["version"],
+                          principal="client", key="retry")
+    assert retried["attempt_id"] != original["attempt_id"]
+    replay = store.reattach(job["id"], expected_version=active["version"],
+                            principal="client", key="reattach-old")
+    assert replay == original
+    assert replay["attempt_id"] != store.get(job["id"])["attempt_id"]

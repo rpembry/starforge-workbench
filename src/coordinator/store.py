@@ -168,8 +168,10 @@ class CoordinatorStore:
 
     @staticmethod
     def _record_op(db, principal, key, kind, digest, job_id, outcome, response):
+        operation_id = uuid.uuid4().hex
         db.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,?,?)", (
-            uuid.uuid4().hex, principal, key, kind, digest, job_id, outcome, _json(response)))
+            operation_id, principal, key, kind, digest, job_id, outcome, _json(response)))
+        return operation_id
 
     @staticmethod
     def _view(db, job_id):
@@ -294,16 +296,19 @@ class CoordinatorStore:
         with self._tx() as db:
             old, digest = self._operation(db, principal, key, "reattach", body)
             if old:
-                return self._view(db, old["job_id"])
+                response = json.loads(old["response"])
+                return {"operation_id": old["id"], "job_id": old["job_id"],
+                        "attempt_id": response["attempt_id"], "outcome": old["outcome"]}
             job = self._view(db, job_id)
             if job["version"] != expected_version:
                 raise Conflict("job version changed")
             if job["phase"] not in {"active", "finalizing"} or not job["attempt_id"]:
                 raise Conflict("only an existing live or uncertain attempt can reattach")
             self._event(db, job_id, "reattach_requested", {"attempt_id": job["attempt_id"]})
-            self._record_op(db, principal, key, "reattach", digest, job_id, "pending", {
+            operation_id = self._record_op(db, principal, key, "reattach", digest, job_id, "pending", {
                 "job_id": job_id, "attempt_id": job["attempt_id"]})
-            return self._view(db, job_id)
+            return {"operation_id": operation_id, "job_id": job_id,
+                    "attempt_id": job["attempt_id"], "outcome": "pending"}
 
     def admit_next(self, *, principal: str, key: str):
         """Durably allocate one attempt and launch intent; caller sends it to supervisor once.
