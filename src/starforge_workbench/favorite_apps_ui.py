@@ -87,14 +87,14 @@ def _run_gui(restorer, context):
                                 result_counts={key: 0 for key in RESULT_KEYS})
         _dialog('--info', '--title=Favorite Apps', '--text=No favorite apps are configured yet.')
         return 0
-    # Default to apps whose absence was verified. Back keeps later choices.
+    # Leave verified open and unsafe identities unchecked. Back keeps later choices.
     selected = None
     while True:
         preview = restorer.preview([row['name'] for row in favorites])
         context['preview'] = preview
         if selected is None:
             selected = [item['name'] for item in preview['items']
-                        if item['action'] == 'launch']
+                        if item['action'] in ('launch', 'skip') or item.get('can_open_anyway')]
             context['selected_count'] = len(selected)
         rows = []
         for item in preview['items']:
@@ -106,7 +106,7 @@ def _run_gui(restorer, context):
             rows.extend(['TRUE' if item['name'] in selected else 'FALSE',
                          item['name'], label, item['evidence']])
         picked = _dialog('--list', '--checklist', '--title=Favorite Apps',
-                         '--text=Ready to open apps are checked. Select others if needed, then choose Preview. Already open apps stay open.',
+                         '--text=Ready apps and apps with unverified running status are checked. Review the selection, then choose Preview. Already open apps stay open.',
                          '--width=900', '--height=580', '--ok-label=Preview',
                          '--separator=\n', '--column=Open', '--column=Favorite',
                          '--column=Status', '--column=Reason', *rows)
@@ -127,7 +127,7 @@ def _run_gui(restorer, context):
             _dialog('--info', '--title=Favorite Apps', '--width=700',
                     '--ok-label=Back to favorites',
                     '--text=No apps are selected, so nothing was opened. '
-                    'Only apps verified closed start checked. Select an app and choose Preview. '
+                    'Ready apps and apps with unverified running status start checked. Select an app and choose Preview. '
                     'An app marked Running status unknown may already be open; opening it requires a separate confirmation.')
             continue
         selected_preview = restorer.preview(selected)

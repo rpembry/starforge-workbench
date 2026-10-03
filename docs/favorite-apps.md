@@ -2,8 +2,10 @@
 
 The **Favorite Apps** application-menu entry opens a manual checklist. It
 shows which configured favorites are already open, ready to open, or have an
-unknown running status. Only favorites verified absent are checked by default;
-already open, unresolved, and unknown-status apps can be selected manually.
+unknown running status. Favorites verified absent or whose running status is
+unknown start checked. Verified open apps and entries with unsafe identities
+start unchecked. An unresolved prior launch also starts checked but requires a
+separate duplicate-risk retry confirmation.
 Nothing is opened until the user previews and confirms. The user can go Back
 to change the selection, and confirms
 before opening them. Unknown status requires an explicit **Open anyway** choice
@@ -13,9 +15,9 @@ and explicitly choose **I checked; retry** after a duplicate-window warning.
 Each deliberate retry is recorded in a private audit file before it is sent to
 the desktop launcher. The entry never starts apps at login. Back to the list
 refreshes status without requesting a launch or discarding a receipt.
-If no app can be verified absent, nothing starts checked. Choosing Preview
-without selecting anything explains this and returns to the list. Unknown apps
-can be selected deliberately and require a separate duplicate-risk confirmation.
+Choosing Preview without selecting anything explains that no app was opened
+and returns to the list. Unknown apps require a separate duplicate-risk
+confirmation before a launch request.
 The result dialog says when all selected apps were already open, when no app
 could be opened, or how many desktop launch requests were made and verified
 ready. Launcher acceptance alone is never described as an opened app.

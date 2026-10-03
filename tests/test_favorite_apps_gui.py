@@ -46,7 +46,7 @@ def test_gui_requires_review_then_uses_exact_preview_token(monkeypatch):
     assert restorer.applied == [(['Editor', 'PWA'], 'synthetic-token', True, False)]
     assert restorer.attempts[-1]['phase'] == 'completed'
     assert restorer.attempts[-1]['result_counts']['launch_requested'] == 1
-    assert calls[0].count('TRUE') == 1
+    assert calls[0].count('TRUE') == 2
     assert 'PWA: refuse' in next(arg for arg in calls[1] if arg.startswith('--text='))
 
 
@@ -72,18 +72,18 @@ def test_default_checkmarks_never_open_apps_without_confirmation(monkeypatch):
     monkeypatch.setattr(ui, '_dialog', dialog)
     restorer = Restorer()
     assert run_gui(restorer) == 0
-    assert shown[0].count('TRUE') == 1
+    assert shown[0].count('TRUE') == 2
     assert restorer.applied == []
     assert restorer.attempts[-1]['phase'] == 'cancelled'
 
 
-def test_only_verified_absent_apps_start_checked(monkeypatch):
+def test_ready_and_unverified_apps_start_checked(monkeypatch):
     import starforge_workbench.favorite_apps_ui as ui
-    names = ['Absent', 'Present', 'Pending', 'Unknown']
+    names = ['Absent', 'Present', 'Pending', 'Unknown', 'Unsafe']
     class Mixed(Restorer):
         def preview(self, selected):
             actions = {'Absent': 'launch', 'Present': 'preserve',
-                       'Pending': 'skip', 'Unknown': 'refuse'}
+                       'Pending': 'skip', 'Unknown': 'refuse', 'Unsafe': 'refuse'}
             return {'selection': selected, 'token': 'synthetic-token', 'items': [
                 {'name': name, 'action': actions[name],
                  'can_open_anyway': name == 'Unknown', 'evidence': 'synthetic'}
@@ -100,9 +100,9 @@ def test_only_verified_absent_apps_start_checked(monkeypatch):
     rows = calls[0][calls[0].index('--column=Reason') + 1:]
     assert [(rows[i + 1], rows[i]) for i in range(0, len(rows), 4)] == [
         ('Absent', 'TRUE'), ('Present', 'FALSE'),
-        ('Pending', 'FALSE'), ('Unknown', 'FALSE')]
+        ('Pending', 'TRUE'), ('Unknown', 'TRUE'), ('Unsafe', 'FALSE')]
     assert restorer.applied == []
-    assert restorer.attempts[-1]['selected_count'] == 1
+    assert restorer.attempts[-1]['selected_count'] == 3
 
 
 def test_empty_selection_explains_unknown_status_and_never_applies(monkeypatch):
@@ -124,7 +124,7 @@ def test_empty_selection_explains_unknown_status_and_never_applies(monkeypatch):
     restorer = Unknown()
     assert run_gui(restorer) == 0
     assert restorer.applied == []
-    assert shown[0].count('TRUE') == 0
+    assert shown[0].count('TRUE') == 1
     assert any('No apps are selected' in value for value in shown[1])
     assert any('separate confirmation' in value for value in shown[1])
     assert restorer.attempts[0]['phase'] == 'no_launch'
