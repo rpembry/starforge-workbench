@@ -38,9 +38,19 @@
       }
     }
   }
-  const timer = setInterval(poll, 15000);
+  let timer = setInterval(poll, 15000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
-  addEventListener('pageshow', event => { if (event.persisted) poll(); });
-  addEventListener('pagehide', () => { generation++; clearInterval(timer); if (active) active.abort(); });
+  addEventListener('pageshow', event => {
+    if (event.persisted) {
+      if (timer === null) timer = setInterval(poll, 15000);
+      poll();
+    }
+  });
+  addEventListener('pagehide', () => {
+    generation++;
+    if (timer !== null) clearInterval(timer);
+    timer = null;
+    if (active) active.abort();
+  });
   poll();
 })();

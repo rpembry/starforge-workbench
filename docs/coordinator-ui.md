@@ -1,36 +1,51 @@
-# Local coordinator browser view
+# Opt-in local coordinator view
 
-The Workbench coordinator view is an explicit local opt-in over the versioned
-coordinator Unix socket API. Set `WB_COORDINATOR_UI_SOCKET` to the absolute path
-of the owner's protected coordinator socket when starting a **local-mode**
-Workbench instance. The view is then linked from the dashboard at
-`/coordinator`. It is not mounted in Cloudflare mode or when `WB_PUBLIC_ORIGIN`
-names a nonlocal host. It rejects requests whose Host or direct client address
-is not local, and requests carrying proxy forwarding headers. Keep the owner socket out of public
-proxy configurations. The existing local Workbench browser authentication still
-requires an operator bearer credential.
+The coordinator view reuses Workbench's browser style and the versioned
+coordinator client. It is **not** mounted by the normal Workbench server. A
+remotely deployed Workbench, or a bearer caller of that server, has no
+coordinator routes. The source-only `coord-ui` launcher is a separate, explicit
+local companion; do not add it to an installed service or proxy configuration
+without a separate security and operations review.
 
-The view reads API health, capacity, a bounded job list, job/attempt state,
-recovery capability, and bounded event replay. It sends no request that starts
-work while merely loading a page. The detail page polls a small status response
-as a read-only hint; it never replaces controls or unfinished form input. A
-new version prompts a manual refresh. Closing the page changes no coordinator
-job or worker state. Job submission requires a registered v1 spec
-and explicit confirmation. Cancel, retry, and reattach forms send the displayed
-job version and a unique idempotency key; the coordinator enforces conflicts.
-If a request's delivery is uncertain, the page offers replay with the exact
-same payload, version, and key. An HTTP conflict directs the operator to refresh.
+The launcher accepts an existing owner-owned `0600` coordinator Unix socket,
+an unused local port, and an optional loopback Workbench dashboard origin. It
+binds only `127.0.0.1` and prints a one-use activation URL. The activation
+secret is generated in process memory, expires after five minutes, and is
+carried in the URL fragment, which the browser removes before exchanging it.
+A successful exchange creates one `HttpOnly`, `SameSite=Strict` browser session
+in process memory. The session expires after eight hours or when the process
+stops. No Workbench bearer token grants access. All unsafe UI requests require
+the exact local Origin and a session CSRF token. The coordinator socket remains
+protected by its own owner-only permissions. Browser Host and peer checks are
+defense in depth, not the authorization boundary against a reverse proxy.
 
-The detail view shows the selected worker, registered profile/workspace,
-resources, orphan policy, and attempt ownership and observation identifiers.
-Attempt evidence is offered only after the coordinator reports positive stop
-evidence. Logs read at most 4 KiB per page from the coordinator's post-stop
-bounded export, and the page flags possible missing earlier output. The artifact
-manifest lists verified metadata; the view does not stream artifact contents.
-Unknown visibility and unconfirmed outcomes are shown as such. This view does
-not automate FLOW work or imply that a job completed successfully.
+No service, worker, Docker runtime, or coordinator job starts merely by
+importing these modules. This local companion is never started automatically.
+It is not a general standalone product or a replacement for the Workbench
+conversation. Actual activation and any service setup require separate review.
 
-The browser adapter is intentionally thin: it calls `CoordinatorClient`, with
-no access to the coordinator store, supervisor journal, or Docker. Tests use a
-fake client and synthetic records. Enabling the view does not launch a
-coordinator service or worker.
+The overview reads API health, capacity, a bounded 25-job list, and each listed
+current attempt's last runtime observation timestamp. Record update time is
+labeled separately. The detail page shows immutable job identity, selected
+worker/profile/workspace and resources, orphan policy, attempt ownership and
+observation identifiers, recovery capability, and bounded durable event replay.
+Its read-only status hint never replaces controls or unfinished input. A newer
+version prompts a manual refresh. Closing the page does not change coordinator
+or worker state.
+
+Job submission starts from a v1 JSON template with registered policy keys. The
+API does not publish a profile catalog, so the operator enters keys from the
+local policy. Validation returns a canonical full spec; the operator reviews
+its target and payload before an explicit submission. Cancel, eligible retry,
+and verified reattach forms send the displayed job version and a unique
+idempotency key. After an uncertain response, the page offers replay with the
+exact same payload, version, and key. A conflict requires refreshing the job.
+The coordinator remains the final authority for eligibility and policy.
+
+Attempt evidence is offered only after positive stop evidence. Logs read at
+most 4 KiB per page from the post-stop bounded export and flag possible
+missing earlier output. Artifact manifest metadata and hashes remain visible
+when logs are unavailable; the view does not stream artifact contents. Unknown
+visibility and unconfirmed outcomes remain explicitly unknown. It does not
+automate FLOW work or access the coordinator store, supervisor journal, or
+Docker directly.

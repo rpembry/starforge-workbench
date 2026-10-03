@@ -13,6 +13,8 @@ test('newest status wins without replacing unfinished input or focus', async () 
   const display = { dataset: { jobId: 'a'.repeat(32), version: '7' }, textContent: '' };
   const listeners = {};
   let interval;
+  let intervalStarts = 0;
+  let intervalStops = 0;
   const document = {
     hidden: false,
     activeElement: input,
@@ -23,7 +25,8 @@ test('newest status wins without replacing unfinished input or focus', async () 
   vm.runInNewContext(script, {
     document, location: { href: 'http://localhost/coordinator/jobs/' + display.dataset.jobId },
     fetch: () => new Promise(resolve => pending.push(resolve)),
-    AbortController, setInterval: fn => { interval = fn; }, clearInterval: () => {},
+    AbortController, setInterval: fn => { interval = fn; return ++intervalStarts; },
+    clearInterval: () => { intervalStops++; },
     addEventListener: (name, fn) => { listeners[name] = fn; },
   });
   assert.equal(pending.length, 1);
@@ -44,4 +47,8 @@ test('newest status wins without replacing unfinished input or focus', async () 
   assert.match(display.textContent, /Authentication expired/);
   assert.equal(button.disabled, true);
   listeners.pagehide();
+  assert.equal(intervalStops, 1);
+  listeners.pageshow({ persisted: true });
+  assert.equal(intervalStarts, 2);
+  assert.equal(pending.length, 4);
 });

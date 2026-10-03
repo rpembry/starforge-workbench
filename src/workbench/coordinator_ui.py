@@ -1,6 +1,7 @@
 """Explicit, local owner browser view over the versioned coordinator socket API."""
 from __future__ import annotations
 
+import json
 import re
 import secrets
 from pathlib import Path
@@ -35,6 +36,8 @@ def _error(exc: CoordinatorError) -> str:
 
 def install(app, operator, socket: str, *, factory=None):
     """Mount only when the caller has explicitly opted in to a private socket."""
+    if getattr(app.state, "coordinator_local_boundary", False) is not True:
+        raise RuntimeError("coordinator routes require the separate local browser boundary")
     if not Path(socket).is_absolute():
         raise RuntimeError("WB_COORDINATOR_UI_SOCKET must be absolute")
     factory = factory or client_for
@@ -54,6 +57,8 @@ def install(app, operator, socket: str, *, factory=None):
         return await call_next(request)
 
     def page(request, **context):
+        context.update(csrf_token=getattr(request.state, "csrf_token", ""),
+                       workbench_url=getattr(app.state, "workbench_url", None))
         return templates.TemplateResponse(request=request, name="coordinator.html", context=context)
 
     def call(method, *args, **kwargs):
@@ -66,7 +71,18 @@ def install(app, operator, socket: str, *, factory=None):
             health = call("health")
             capabilities = call("capabilities")
             capacity = call("capacity")
-            jobs = call("list", 100)["jobs"]
+            jobs = call("list", 25)["jobs"]
+            for item in jobs:
+                item["last_observed_at"] = None
+                if item["attempt_id"]:
+                    try:
+                        detail = call("get", item["id"])["job"]
+                        attempt = next((a for a in detail["attempts"]
+                                        if a["id"] == item["attempt_id"]), None)
+                        if attempt:
+                            item["last_observed_at"] = attempt["last_observed_at"]
+                    except CoordinatorError:
+                        pass  # The summary remains visible; freshness is unknown.
             error = None
         except CoordinatorError as exc:
             health = capabilities = capacity = None
@@ -117,6 +133,7 @@ def install(app, operator, socket: str, *, factory=None):
             result = call("validate", parsed)
             message = "Valid registered job spec. Submission still requires an explicit action."
             limits = result.get("capacity")
+            spec = json.dumps(result["spec"], indent=2, sort_keys=True)
             submit_key = secrets.token_urlsafe(24)
         except (ValueError, CoordinatorError) as exc:
             message = _error(exc) if isinstance(exc, CoordinatorError) else "Invalid job spec JSON or fields."

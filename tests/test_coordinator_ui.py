@@ -1,6 +1,7 @@
 """The browser adapter is exercised against a fake versioned API; no worker runs."""
 from fastapi import FastAPI
 import asyncio
+import html
 import httpx
 import json
 
@@ -88,7 +89,8 @@ class FakeCoordinator:
 
     def validate(self, spec):
         self.calls.append(("validate", spec.profile_ref))
-        return {"valid": True, "capacity": {"max_pending": 4, "max_active": 2}}
+        return {"valid": True, "spec": spec.model_dump(mode="json"),
+                "capacity": {"max_pending": 4, "max_active": 2}}
 
     def submit(self, spec, key):
         self.calls.append(("submit", spec.profile_ref, key))
@@ -97,6 +99,7 @@ class FakeCoordinator:
 
 def client(fake):
     app = FastAPI()
+    app.state.coordinator_local_boundary = True
     async def operator():
         return True
     install(app, operator, "/tmp/fake-coordinator.sock", factory=lambda _: fake)
@@ -128,6 +131,7 @@ def test_unknown_state_and_version_checked_controls():
         listing = browser.get("/coordinator")
         assert listing.status_code == 200
         assert "unknown" in listing.text and "bounded read" in listing.text
+        assert "last runtime observation: unknown" in listing.text
         detail = browser.get(f"/coordinator/jobs/{JOB_ID}")
         assert detail.status_code == 200
         assert "Version 7" in detail.text
@@ -141,6 +145,20 @@ def test_unknown_state_and_version_checked_controls():
         assert fake.calls == [("cancel", JOB_ID, 7, KEY)]
         assert browser.post(f"/ui/coordinator/jobs/{JOB_ID}/cancel", data={"version": 7,
                             "key": KEY}).status_code == 422
+
+
+def test_list_uses_attempt_observation_not_record_update():
+    fake = FakeCoordinator()
+    original = fake.get
+    def observed(job_id):
+        result = original(job_id)
+        result["job"]["attempts"][0]["last_observed_at"] = "2026-01-01T00:00:00+00:00"
+        return result
+    fake.get = observed
+    with client(fake) as browser:
+        listing = browser.get("/coordinator")
+        assert "last runtime observation: 2026-01-01T00:00:00+00:00" in listing.text
+        assert "Record update is not runtime freshness" in listing.text
 
 
 def test_uncertain_response_repeats_exact_request_and_post_stop_gate():
@@ -243,8 +261,15 @@ def test_submission_requires_confirmation_and_preserves_key():
                        "payload": {"argv": ["true"]}, "deadline_seconds": 30,
                        "resources": {"cpu_millis": 1000, "memory_mb": 128}})
     with client(fake) as browser:
+        overview = browser.get("/coordinator")
+        assert "Review and validate" in overview.text
+        assert '<button type="submit">Submit job</button>' not in overview.text
         checked = browser.post("/ui/coordinator/validate", data={"spec": spec})
         assert "Submission still requires an explicit action" in checked.text
+        reviewed = html.unescape(checked.text)
+        assert '"profile_ref": "offline"' in reviewed
+        assert '"workspace_ref": "scratch"' in reviewed
+        assert '"argv"' in reviewed
         assert fake.calls == [("validate", "offline")]
         denied = browser.post("/ui/coordinator/submit", data={"spec": spec, "key": KEY})
         assert denied.status_code == 422
@@ -254,7 +279,7 @@ def test_submission_requires_confirmation_and_preserves_key():
         assert ("submit", "offline", KEY) in fake.calls
 
 
-def test_main_mount_requires_local_opt_in(monkeypatch, tmp_path):
+def test_normal_workbench_never_mounts_coordinator(monkeypatch, tmp_path):
     from workbench.auth import Auth
     from workbench.main import create_app
     from workbench.repository import SQLiteRepository
@@ -265,7 +290,7 @@ def test_main_mount_requires_local_opt_in(monkeypatch, tmp_path):
     assert "/coordinator" not in {route.path for route in create_app(repo, auth).routes}
     monkeypatch.setenv("WB_COORDINATOR_UI_SOCKET", "/tmp/fake-coordinator.sock")
     monkeypatch.setenv("WB_AUTH_MODE", "local")
-    assert "/coordinator" in {route.path for route in create_app(repo, auth).routes}
+    assert "/coordinator" not in {route.path for route in create_app(repo, auth).routes}
     monkeypatch.setenv("WB_AUTH_MODE", "cloudflare")
     assert "/coordinator" not in {route.path for route in create_app(repo, auth).routes}
     monkeypatch.setenv("WB_AUTH_MODE", "local")
