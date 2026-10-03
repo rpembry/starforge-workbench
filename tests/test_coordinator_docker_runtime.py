@@ -74,6 +74,9 @@ class FakeDocker:
         if "stop" in argv:
             self.item["State"].update(Status="exited", Running=False, ExitCode=143)
             return b""
+        if "rm" in argv:
+            self.item = None
+            return b""
         if "logs" in argv:
             return b"fixture output\n"
         raise AssertionError(argv)
@@ -153,7 +156,12 @@ def test_approved_git_worktree_exports_patch_and_retains_all_work(runtime, tmp_p
     adapter.workspaces["reviewed_git"] = {"kind": "git_worktree", "repository": str(repository),
                                            "revision": revision}
     spec = {**plan(), "workspace_ref": "reviewed_git", "payload": {"argv": ["true"]}}
-    runtime_id = adapter.launch(spec)
+    journal = tmp_path / "journal"
+    journal.mkdir(mode=0o700)
+    supervisor = Supervisor(journal, adapter)
+    lease = supervisor.acquire("controller")
+    runtime_id = supervisor.launch(spec, controller="controller", generation=lease["generation"],
+                                   operation_id="launch")["runtime_id"]
     worktree = adapter.root / ("a" * 32) / "worktree"
     assert git("worktree", "list", "--porcelain").decode().find(str(worktree)) >= 0
     assert (worktree / "input.txt").read_text() == "before\n"
@@ -165,6 +173,14 @@ def test_approved_git_worktree_exports_patch_and_retains_all_work(runtime, tmp_p
     assert b"+after" in adapter.read_artifact(spec, runtime_id, "changes.patch")
     assert (worktree / "input.txt").read_text() == "after\n"
     assert (adapter.root / ("a" * 32) / "runtime.json").exists()
+    supervisor.reconcile("a" * 32, controller="controller", generation=lease["generation"])
+    supervisor.collect("a" * 32, controller="controller", generation=lease["generation"])
+    reviewed = supervisor.review("a" * 32)
+    archived = supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],
+                                  operation_id="archive")
+    assert archived["phase"] == "complete"
+    assert (adapter.root / ("a" * 32) / "archive" / "worktree" / "input.txt").read_text() == "after\n"
+    assert str(worktree) not in git("worktree", "list", "--porcelain").decode()
 
 
 def test_partial_git_setup_retains_receipt_and_never_creates_container(runtime, tmp_path, monkeypatch):
@@ -259,6 +275,45 @@ def test_supervisor_collect_commits_exit_and_artifact_evidence(runtime, tmp_path
     exported.write_text("tampered\n")
     with pytest.raises(Exception, match="hash changed"):
         supervisor.read_artifact("a" * 32, "file-0")
+
+
+def test_owner_review_archive_retains_exact_scratch_bytes(runtime, tmp_path):
+    adapter, fake = runtime
+    journal = tmp_path / "journal"
+    journal.mkdir(mode=0o700)
+    supervisor = Supervisor(journal, adapter)
+    lease = supervisor.acquire("controller")
+    supervisor.launch(plan(), controller="controller", generation=lease["generation"],
+                      operation_id="launch")
+    attempt = adapter.root / ("a" * 32)
+    (attempt / "worktree" / "result.txt").write_text("retained\n")
+    (attempt / "scratch" / "note.txt").write_text("reviewed\n")
+    fake.item["State"].update(Status="exited", Running=False, ExitCode=0)
+    supervisor.reconcile("a" * 32, controller="controller", generation=lease["generation"])
+    supervisor.collect("a" * 32, controller="controller", generation=lease["generation"])
+    reviewed = supervisor.review("a" * 32)
+    with pytest.raises(WorkerError, match="review identity or digest"):
+        supervisor.archive("a" * 32, review_sha256="0" * 64, operation_id="invalid-archive")
+    (attempt / "scratch" / "note.txt").write_text("changed after review\n")
+    with pytest.raises(WorkerError, match="work changed after review"):
+        supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],
+                           operation_id="changed-archive")
+    assert fake.item is not None
+    (attempt / "scratch" / "note.txt").write_text("reviewed\n")
+    result = supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],
+                                operation_id="archive")
+    assert result["phase"] == "complete"
+    assert supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],
+                              operation_id="archive") == result
+    assert (attempt / "archive" / "worktree" / "result.txt").read_text() == "retained\n"
+    assert (attempt / "archive" / "scratch" / "note.txt").read_text() == "reviewed\n"
+    assert (attempt / "artifacts" / "manifest.json").exists()
+    assert not (attempt / "worktree").exists()
+    assert fake.item is None
+    (attempt / "archive" / "scratch" / "note.txt").write_text("tampered\n")
+    with pytest.raises(WorkerError, match="archived content changed"):
+        supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],
+                           operation_id="archive")
 
 
 @pytest.mark.parametrize("stop_mode", ["abandon", "owner", "deadline"])

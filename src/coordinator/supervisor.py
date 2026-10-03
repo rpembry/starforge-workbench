@@ -422,6 +422,55 @@ class Supervisor:
                 "next_offset": offset + len(chunk), "total": len(data),
                 "sha256": entry["sha256"], "data_base64": base64.b64encode(chunk).decode()}
 
+    def _collected_stopped(self, attempt_id):
+        attempt = self.inspect(attempt_id)
+        if attempt["state"] != "stopped" or not attempt["runtime_id"]:
+            raise OwnershipUnknown("confirmed stopped runtime required")
+        with self._db() as db:
+            saved = db.execute("SELECT 1 FROM evidence WHERE attempt_id=?", (attempt_id,)).fetchone()
+        if not saved:
+            raise OwnershipUnknown("committed artifact and exit evidence required")
+        return attempt
+
+    @_serialized
+    def review(self, attempt_id: str):
+        """Owner-only immutable review snapshot before any archive mutation."""
+        attempt = self._collected_stopped(attempt_id)
+        return self.runtime.review(attempt["plan"], attempt["runtime_id"])
+
+    @_serialized
+    def archive(self, attempt_id: str, *, review_sha256: str, operation_id: str):
+        """Archive only exact reviewed bytes, retaining the original content."""
+        if (not operation_id or not isinstance(review_sha256, str) or
+                len(review_sha256) != 64 or any(c not in "0123456789abcdef" for c in review_sha256)):
+            raise ValueError("review digest and operation identity required")
+        attempt = self._collected_stopped(attempt_id)
+        confirmed_response = None
+        with self._tx() as db:
+            old = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
+            if old:
+                if (old["attempt_id"] != attempt_id or old["kind"] != "archive" or
+                        json.loads(old["response"])["review_sha256"] != review_sha256):
+                    raise Conflict("archive operation identity changed")
+                if old["status"] == "confirmed":
+                    confirmed_response = json.loads(old["response"])
+            else:
+                db.execute("INSERT INTO operations VALUES(?,?,?,?,?)", (
+                    operation_id, attempt_id, "archive", "pending",
+                    _json({"review_sha256": review_sha256})))
+        if confirmed_response is not None:
+            self.runtime.archive(attempt["plan"], attempt["runtime_id"],
+                                 review_sha256, operation_id)
+            return confirmed_response
+        result = self.runtime.archive(attempt["plan"], attempt["runtime_id"],
+                                      review_sha256, operation_id)
+        response = {"attempt_id": attempt_id, "review_sha256": review_sha256,
+                    "phase": result["phase"], "archive": result["archive"]}
+        with self._tx() as db:
+            db.execute("UPDATE operations SET status='confirmed',response=? WHERE id=?", (
+                _json(response), operation_id))
+        return response
+
     def recovery_required(self):
         try:
             with self._db() as db:

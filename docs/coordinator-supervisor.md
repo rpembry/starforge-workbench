@@ -22,8 +22,20 @@ in `workspaces`; the service state directory must be outside that repository.
 The repository and revision are operator configuration, not job input.
 The service's private Unix
 `control.sock` accepts fenced acquire/renew/launch/reconcile/cancel/inspect;
-`owner.sock` accepts only owner stop, inspect, and explicit takeover. The
-control socket rejects `owner_takeover`. `coord-supervisor owner-stop --socket
+`owner.sock` accepts owner stop, inspect, explicit takeover, `review`, and
+`archive`. Review and archive require committed stopped
+runtime and artifact evidence. Run `coord-supervisor review --socket
+DIR/owner.sock ATTEMPT_ID`, inspect the returned private review manifest, then
+run `coord-supervisor archive --socket DIR/owner.sock ATTEMPT_ID REVIEW_SHA256
+OPERATION_ID` to retain exact reviewed bytes under the attempt's `archive/`.
+The archive operation durably records intent before exact stopped-container
+removal and file renames. It keeps `artifacts/` at its evidence path, retains
+dirty Git work and scratch bytes, and removes only the old linked-worktree
+administrative entry using non-force Git removal after the archive is fsynced
+and rechecked. A changed file, unsafe link, ownership mismatch, or uncertain
+runtime leaves the allocation retained for review. The same archive operation
+ID is replayable after a lost response. The control socket rejects
+`owner_takeover`. `coord-supervisor owner-stop --socket
 DIR/owner.sock ATTEMPT_ID OPERATION_ID` exits successfully only after confirmed
 stop. Both sockets require the same local UID; this first profile trusts that
 Unix account. Keep the owner socket path out of ordinary client configuration.
@@ -104,8 +116,8 @@ review. No legacy receipt is adopted automatically. The existing Git-worktree
 runner remains a separate compatibility path, unchanged by this slice.
 
 This slice contains an independently runnable local service process,
-scratch and Git workspace adapters, and fake-Docker tests. Git workspace
-review/archive disposition, live Docker proof, and end-to-end #175 dispatch
+scratch and Git workspace adapters, explicit review/archive disposition, and
+fake-Docker tests. Live Docker proof and end-to-end #175 dispatch
 integration remain gated. Host death suspends enforcement until the
 supervisor restarts and reconciles. The owner and control sockets both trust
 the same local UID; they are separate operation surfaces, not isolation from
@@ -114,7 +126,7 @@ Docker claim is made by these tests.
 
 Operator evidence remains open for a reviewed, digest-pinned protocol image,
 live two-worker admission and runtime measurements, independent resource
-reservation against actual host load, scratch/Git review/archive disposition, and
+reservation against actual host load, and
 a fault matrix on a host with ordinary Docker access. The legacy Git runner
 remains untouched. Remote access and Starkeep testing belong
 to a separately approved later gate.

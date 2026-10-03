@@ -257,6 +257,13 @@ class DockerRuntime:
             raise
 
     def inspect(self, plan, runtime_id):
+        observed = self.inspect_optional(plan, runtime_id)
+        if observed is None:
+            raise WorkerError("owned container absent without exit evidence")
+        return observed
+
+    def inspect_optional(self, plan, runtime_id):
+        """Exact ownership check, returning None only for verified absence."""
         receipt = self._read(plan["attempt_id"])
         if (receipt["plan_hash"] != hashlib.sha256(_json(plan).encode()).hexdigest() or
                 receipt["incarnation"] != plan["incarnation"] or
@@ -264,12 +271,20 @@ class DockerRuntime:
             raise WorkerError("runtime plan or incarnation mismatch")
         item = self._inspect(receipt)
         if item is None:
-            raise WorkerError("owned container absent without exit evidence")
+            return None
         status = item["State"]["Status"]
         return {"identity_ok": True, "running": bool(item["State"]["Running"]),
                 "stopped": status in {"exited", "dead", "created"},
                 "exit_code": None if status == "created" else item["State"]["ExitCode"],
                 "runtime_id": item["Id"]}
+
+    def review(self, plan, runtime_id):
+        from .disposition import review
+        return review(self, plan, runtime_id)
+
+    def archive(self, plan, runtime_id, review_sha256, operation_id):
+        from .disposition import archive
+        return archive(self, plan, runtime_id, review_sha256, operation_id)
 
     def stop(self, plan, runtime_id):
         observed = self.inspect(plan, runtime_id)
