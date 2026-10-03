@@ -56,6 +56,8 @@ def test_mailbox_ack_follows_durable_host_inbox_and_restart_replays(tmp_path):
 
 def test_mailbox_second_owner_fails_before_loading_inbox(tmp_path, monkeypatch):
     attempt, _, channel, client = mailbox(tmp_path)
+    lock_path = attempt / "host-inbox" / "channel.lock"
+    lock_inode = lock_path.stat().st_ino
     try:
         client.send("hello", {"capabilities": []})
         client.send("ready", {})
@@ -74,8 +76,10 @@ def test_mailbox_second_owner_fails_before_loading_inbox(tmp_path, monkeypatch):
         assert channel.inbox.state["last_seq"] == 3
     finally:
         channel.close()
+    assert lock_path.stat().st_ino == lock_inode
     restarted = MailboxChannel(attempt, job_id="job", attempt_id="attempt", incarnation="first")
     try:
+        assert lock_path.stat().st_ino == lock_inode
         assert restarted.inbox.state["last_seq"] == 3
         assert restarted.inbox.state["ready"] is True
         client.send("heartbeat", {})

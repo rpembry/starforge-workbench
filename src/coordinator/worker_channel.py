@@ -111,7 +111,11 @@ class MailboxChannel:
 
     @staticmethod
     def _lock_inbox(inbox_dir):
-        """Keep a host-only inode locked for this channel's entire lifetime."""
+        """Keep a host-only inode locked for this channel's entire lifetime.
+
+        The lock file is never unlinked by channel cleanup. Host processes that
+        can rewrite this private directory must coordinate outside this lock.
+        """
         directory_fd = os.open(inbox_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             fd = os.open("channel.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
