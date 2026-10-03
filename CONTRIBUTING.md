@@ -1,6 +1,6 @@
 # Contributing
 
-See [human-directed agent coordination](docs/multi-agent-coordination.md) for assignments, review handoffs, GitHub/Workbench responsibilities, and provenance.
+See [human-directed agent coordination](docs/multi-agent-coordination.md) for assignments, review handoffs, GitHub/Workbench responsibilities, and provenance. For new features and integrations, use the [modular architecture guidance](docs/architecture-principles.md) as a lightweight design and review checklist.
 
 Feedback, adaptations, bug reports, and small pull requests are welcome. Open an issue or discussion for a broad change so we can compare it with existing tools first. Email Randall Embry at rpembry@gmail.com if you prefer.
 

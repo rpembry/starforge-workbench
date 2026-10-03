@@ -3,6 +3,7 @@
 Read README.md and docs/adapting.md, then inspect current source and tests; documentation can lag implementation. This repository is a public personal reference implementation.
 
 - Preserve unrelated changes. Keep edits focused and test the affected behavior.
+- Apply the [modular architecture guidance](docs/architecture-principles.md) when adding a capability or integration; keep its boundaries proportional to the use case.
 - When tightening runtime policies, test previously supported pinned images.
 - Do not spawn agents automatically.
 - When a requested Starforge Workbench (`aiw`) operation is not directly supported by its MCP server, consider creating a GitHub feature request to add that capability for future use. If GitHub access is unavailable, notify the user of the capability gap and suggest the feature request. Do not let filing or suggesting the issue substitute for completing the current request through an authorized, safe path when one exists.
