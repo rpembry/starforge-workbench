@@ -18,6 +18,8 @@ def main():
                           job_id=job_id, attempt_id=attempt_id, incarnation=incarnation)
     if client.state["pending"]:
         client.retry_pending()
+    if client.state["seq"]:
+        raise RuntimeError("example worker cannot resume a partially completed attempt")
     client.send("hello", {"capabilities": []})
     payload = json.loads(Path("/input/job.json").read_text())
     client.send("ready", {})

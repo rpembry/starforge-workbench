@@ -38,6 +38,11 @@ class WorkerClient:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(path, self.state_path)
+            directory_fd = os.open(self.state_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         finally:
             if os.path.exists(path):
                 os.unlink(path)

@@ -16,6 +16,10 @@ The coordinator store owns one job ledger, not human task definitions.
 `src/coordinator/contracts.py` is the versioned source model; its generated JSON
 schema is `schemas/coordinator-job-v1.schema.json`. The first slice exposes a
 Python service boundary. A local transport and CLI are the dependent #175 task.
+`pending_commands()` returns durable launch/cancel/retry operation identities
+for the service loop. `set_command_status()` records delivery uncertainty; it
+does not set a job result. The API layer must use the operation ID when calling
+the supervisor and reconcile the same attempt after a lost response.
 
 The store requires an existing private, caller-owned state directory, creates a
 private SQLite database, checks schema version and integrity on open, and uses

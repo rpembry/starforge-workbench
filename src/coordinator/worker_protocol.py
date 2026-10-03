@@ -100,6 +100,8 @@ class WorkerInbox:
         if self.path.is_symlink():
             raise ValueError("worker inbox symlink refused")
         if self.path.exists():
+            if self.path.stat().st_uid != os.getuid() or self.path.stat().st_mode & 0o077:
+                raise ValueError("worker inbox must be private and caller-owned")
             self.state = json.loads(self.path.read_text())
             if self.state["identity"] != self.identity:
                 raise ProtocolError("persisted worker incarnation mismatch")
@@ -146,23 +148,29 @@ class WorkerInbox:
         if self.state["result"] is not None and frame.kind in {"result", "progress", "artifact"}:
             raise ProtocolError("result already declared")
         gap = [last + 1, frame.seq - 1] if frame.seq > last + 1 else None
-        if gap:
-            self.state["gaps"].append(gap)
-            self.state["gaps"] = self.state["gaps"][-MAX_EVENTS:]
-        if frame.kind == "hello":
-            self.state["hello"] = True
-        elif frame.kind == "ready":
-            self.state["ready"] = True
-        elif frame.kind == "result":
-            self.state["result"] = body
-        self.state["last_seq"] = frame.seq
-        self.state["events"].append({"seq": frame.seq, "event_id": frame.event_id,
-                                     "digest": digest, "frame": body})
-        while (len(self.state["events"]) > MAX_EVENTS or
-               len(json.dumps(self.state["events"]).encode()) > MAX_REPLAY_BYTES):
-            self.state["events"].pop(0)
-        self.state["floor"] = self.state["events"][0]["seq"]
-        self._save()
+        previous = self.state
+        self.state = json.loads(json.dumps(previous))
+        try:
+            if gap:
+                self.state["gaps"].append(gap)
+                self.state["gaps"] = self.state["gaps"][-MAX_EVENTS:]
+            if frame.kind == "hello":
+                self.state["hello"] = True
+            elif frame.kind == "ready":
+                self.state["ready"] = True
+            elif frame.kind == "result":
+                self.state["result"] = body
+            self.state["last_seq"] = frame.seq
+            self.state["events"].append({"seq": frame.seq, "event_id": frame.event_id,
+                                         "digest": digest, "frame": body})
+            while (len(self.state["events"]) > MAX_EVENTS or
+                   len(json.dumps(self.state["events"]).encode()) > MAX_REPLAY_BYTES):
+                self.state["events"].pop(0)
+            self.state["floor"] = self.state["events"][0]["seq"]
+            self._save()
+        except BaseException:
+            self.state = previous
+            raise
         return {"status": "accepted", "ack_seq": frame.seq, "floor": self.state["floor"],
                 "gap": gap}
 

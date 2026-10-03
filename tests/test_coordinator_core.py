@@ -108,3 +108,19 @@ def test_storage_failure_never_acknowledges_submit(store, spec, monkeypatch):
     monkeypatch.setattr(sqlite3, "connect", broken)
     with pytest.raises(Unavailable):
         store.submit(spec, principal="client", key="a")
+
+
+def test_dispatch_command_identity_survives_restart(store, spec):
+    store.submit(spec, principal="client", key="a")
+    job = store.admit_next(principal="scheduler", key="admit-a")
+    pending = store.pending_commands()
+    assert len(pending) == 1 and pending[0]["kind"] == "admit"
+    assert pending[0]["job_id"] == job["id"]
+    restarted = CoordinatorStore(store.root, store.policy)
+    assert restarted.pending_commands()[0]["id"] == pending[0]["id"]
+    restarted.set_command_status(pending[0]["id"], "unknown")
+    assert restarted.pending_commands()[0]["outcome"] == "unknown"
+    restarted.set_command_status(pending[0]["id"], "confirmed")
+    assert restarted.pending_commands() == []
+    with pytest.raises(Conflict):
+        restarted.set_command_status(pending[0]["id"], "running")

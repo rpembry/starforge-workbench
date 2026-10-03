@@ -72,3 +72,15 @@ def test_bounds_and_artifact_rules(inbox):
 def test_frame_wire_roundtrip():
     value = frame(1, "hello", {"capabilities": []})
     assert decode_frame((value.model_dump_json() + "\n").encode()) == value
+
+
+def test_failed_inbox_commit_cannot_ack_or_advance(inbox, monkeypatch):
+    original = inbox._save
+    def unavailable():
+        raise OSError("disk full")
+    monkeypatch.setattr(inbox, "_save", unavailable)
+    with pytest.raises(OSError):
+        inbox.accept(frame(1, "hello", {"capabilities": []}))
+    assert inbox.state["last_seq"] == 0 and inbox.state["hello"] is False
+    monkeypatch.setattr(inbox, "_save", original)
+    assert inbox.accept(frame(1, "hello", {"capabilities": []}))["status"] == "accepted"

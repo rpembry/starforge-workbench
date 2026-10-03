@@ -133,6 +133,9 @@ class CoordinatorStore:
 
     @staticmethod
     def _operation(db, principal, key, kind, body):
+        if (not isinstance(principal, str) or not 1 <= len(principal) <= 128 or
+                not isinstance(key, str) or not 1 <= len(key) <= 128):
+            raise ValueError("bounded principal and idempotency key required")
         digest = hashlib.sha256(_json(body).encode()).hexdigest()
         row = db.execute("SELECT * FROM operations WHERE principal=? AND key=?", (principal, key)).fetchone()
         if row:
@@ -179,7 +182,10 @@ class CoordinatorStore:
     def get(self, job_id):
         try:
             with self._connection() as db:
-                return self._view(db, job_id)
+                db.execute("BEGIN")
+                result = self._view(db, job_id)
+                db.execute("COMMIT")
+                return result
         except sqlite3.Error as exc:
             raise Unavailable("coordinator store unavailable") from exc
 
@@ -188,8 +194,11 @@ class CoordinatorStore:
             raise ValueError("invalid page size")
         try:
             with self._connection() as db:
+                db.execute("BEGIN")
                 ids = db.execute("SELECT id FROM jobs ORDER BY created_at,id LIMIT ?", (limit,)).fetchall()
-                return [self._view(db, item[0]) for item in ids]
+                result = [self._view(db, item[0]) for item in ids]
+                db.execute("COMMIT")
+                return result
         except sqlite3.Error as exc:
             raise Unavailable("coordinator store unavailable") from exc
 
@@ -292,6 +301,10 @@ class CoordinatorStore:
             raise ValueError("invalid observation phase")
         if observation_seq < 1 or result_ok is not None and (not stopped or exit_code is None):
             raise ValueError("result needs confirmed stop and exit evidence")
+        if result_ok is True and exit_code != 0:
+            raise ValueError("successful execution requires zero exit")
+        if not supervisor_id or len(supervisor_id) > 128:
+            raise ValueError("invalid supervisor identity")
         with self._tx() as db:
             job = self._view(db, job_id)
             attempt = db.execute("SELECT * FROM attempts WHERE id=? AND job_id=?", (attempt_id, job_id)).fetchone()
@@ -320,7 +333,8 @@ class CoordinatorStore:
             db.execute("UPDATE jobs SET phase=?,outcome=?,visibility=?,reason=? WHERE id=?", (
                 job_phase, outcome, "unknown" if phase == "unknown" else "fresh", phase, job_id))
             self._event(db, job_id, "observed", {"attempt_id": attempt_id, "phase": phase,
-                                                  "stopped": stopped, "outcome": outcome})
+                                                  "stopped": stopped, "outcome": outcome,
+                                                  "observation_gap": observation_seq > attempt["observation_seq"] + 1})
             return self._view(db, job_id)
 
     def mark_visibility_unknown(self, job_id, *, expected_version: int):
@@ -338,12 +352,14 @@ class CoordinatorStore:
             raise ValueError("invalid replay cursor or limit")
         try:
             with self._connection() as db:
+                db.execute("BEGIN")
                 job = self._view(db, job_id)
                 rows = db.execute("SELECT * FROM events WHERE job_id=? AND seq>? ORDER BY seq LIMIT ?", (
                     job_id, after_seq, limit)).fetchall()
                 events = [dict(row) for row in rows]
                 for event in events:
                     event["data"] = json.loads(event["data"])
+                db.execute("COMMIT")
                 return {"snapshot": job, "events": events, "floor": 1,
                         "gap": after_seq < 0, "next_cursor": events[-1]["seq"] if events else after_seq}
         except sqlite3.Error as exc:
@@ -352,10 +368,37 @@ class CoordinatorStore:
     def pending_outbox(self, limit=100):
         if not 1 <= limit <= 1000:
             raise ValueError("invalid page size")
-        with self._connection() as db:
-            return [dict(row) for row in db.execute(
-                "SELECT * FROM outbox WHERE delivered=0 ORDER BY id LIMIT ?", (limit,))]
+        try:
+            with self._connection() as db:
+                return [dict(row) for row in db.execute(
+                    "SELECT * FROM outbox WHERE delivered=0 ORDER BY id LIMIT ?", (limit,))]
+        except sqlite3.Error as exc:
+            raise Unavailable("coordinator store unavailable") from exc
 
     def ack_outbox(self, outbox_id):
         with self._tx() as db:
             db.execute("UPDATE outbox SET delivered=1 WHERE id=?", (outbox_id,))
+
+    def pending_commands(self, limit=100):
+        """Durable dispatch/reconciliation seam for #175's service loop."""
+        if not 1 <= limit <= 1000:
+            raise ValueError("invalid page size")
+        try:
+            with self._connection() as db:
+                return [dict(row) for row in db.execute(
+                    "SELECT * FROM operations WHERE outcome IN ('pending','running','unknown') ORDER BY rowid LIMIT ?", (limit,))]
+        except sqlite3.Error as exc:
+            raise Unavailable("coordinator store unavailable") from exc
+
+    def set_command_status(self, operation_id: str, status: str):
+        """Record ambiguous or in-flight delivery; never infer job success."""
+        if status not in {"running", "unknown", "confirmed"}:
+            raise ValueError("invalid command status")
+        with self._tx() as db:
+            row = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
+            if not row:
+                raise KeyError(operation_id)
+            if row["outcome"] == "confirmed" and status != "confirmed":
+                raise Conflict("confirmed operation cannot regress")
+            db.execute("UPDATE operations SET outcome=? WHERE id=?", (status, operation_id))
+            return {**dict(row), "outcome": status}
