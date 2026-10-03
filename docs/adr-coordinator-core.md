@@ -29,6 +29,11 @@ external command carries principal and idempotency key. Same key and body return
 the same logical identity; a different body conflicts. A failed or unavailable
 commit does not acknowledge a new job or success. The client must look up the
 same key after an uncertain response before sending another command.
+An existing submit key replays even if the approval policy subsequently changes;
+new submissions still use current policy. A repeated cancellation with a new
+key and current version aliases the original cancellation command in schema
+v2 rather than adding a second stop operation. Migration from schema v1
+preserves existing jobs and commands.
 
 Jobs have desired `run`/`cancel`, phase `queued`/`active`/`finalizing`/`terminal`,
 separate outcome and observation freshness. A missing observation leaves the

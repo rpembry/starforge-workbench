@@ -144,3 +144,41 @@ def test_stopped_evidence_cannot_be_reversed_or_contradicted(store, spec):
     final = store.observe(**args, observation_seq=2, phase="stopped", stopped=True,
                           exit_code=0, result_ok=True)
     assert final["outcome"] == "succeeded"
+
+
+def test_same_submit_key_replays_after_policy_revocation(store, spec):
+    original = store.submit(spec, principal="client", key="first")
+    denied = Policy(profiles=frozenset(), workspaces=store.policy.workspaces,
+                    worker_types=store.policy.worker_types, limits=store.policy.limits)
+    reopened = CoordinatorStore(store.root, denied)
+    assert reopened.submit(spec, principal="client", key="first")["id"] == original["id"]
+    with pytest.raises(ValueError, match="unapproved"):
+        reopened.submit(spec, principal="client", key="new")
+
+
+def test_repeated_cancel_key_aliases_original_operation(store, spec):
+    submitted = store.submit(spec, principal="client", key="submit")
+    job = store.admit_next(principal="scheduler", key="admit")
+    cancelled = store.cancel(job["id"], expected_version=job["version"],
+                             principal="client", key="cancel-one")
+    repeated = store.cancel(job["id"], expected_version=cancelled["version"],
+                            principal="client", key="cancel-two")
+    assert repeated["version"] == cancelled["version"]
+    commands = [op for op in store.pending_commands() if op["kind"] == "cancel"]
+    assert len(commands) == 1
+    assert store.cancel(job["id"], expected_version=cancelled["version"],
+                        principal="client", key="cancel-two")["id"] == submitted["id"]
+    with pytest.raises(Conflict, match="different command"):
+        store.cancel(job["id"], expected_version=job["version"],
+                     principal="client", key="cancel-two")
+
+
+def test_schema_one_migration_preserves_jobs(store, spec):
+    original = store.submit(spec, principal="client", key="first")
+    with sqlite3.connect(store.path) as db:
+        db.execute("DROP TABLE operation_aliases")
+        db.execute("PRAGMA user_version=1")
+    reopened = CoordinatorStore(store.root, store.policy)
+    assert reopened.get(original["id"])["id"] == original["id"]
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 2

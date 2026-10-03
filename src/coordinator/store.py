@@ -54,6 +54,10 @@ CREATE TABLE operations(
  kind TEXT NOT NULL, body_hash TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id),
  outcome TEXT NOT NULL CHECK(outcome IN ('pending','running','confirmed','unknown')),
  response TEXT NOT NULL, UNIQUE(principal,key));
+CREATE TABLE operation_aliases(
+ principal TEXT NOT NULL, key TEXT NOT NULL, kind TEXT NOT NULL,
+ body_hash TEXT NOT NULL, operation_id TEXT NOT NULL REFERENCES operations(id),
+ PRIMARY KEY(principal,key));
 CREATE TABLE events(
  job_id TEXT NOT NULL REFERENCES jobs(id), seq INTEGER NOT NULL, kind TEXT NOT NULL,
  data TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(job_id,seq));
@@ -62,6 +66,16 @@ CREATE TABLE outbox(
  delivered INTEGER NOT NULL DEFAULT 0, UNIQUE(job_id,seq),
  FOREIGN KEY(job_id,seq) REFERENCES events(job_id,seq));
 CREATE INDEX jobs_dispatch ON jobs(phase,intent,created_at);
+COMMIT;
+"""
+
+MIGRATE_1_TO_2 = """
+BEGIN IMMEDIATE;
+CREATE TABLE operation_aliases(
+ principal TEXT NOT NULL, key TEXT NOT NULL, kind TEXT NOT NULL,
+ body_hash TEXT NOT NULL, operation_id TEXT NOT NULL REFERENCES operations(id),
+ PRIMARY KEY(principal,key));
+PRAGMA user_version=2;
 COMMIT;
 """
 
@@ -88,8 +102,10 @@ class CoordinatorStore:
                 if version == 0:
                     # executescript is used only for first creation. Its explicit transaction
                     # keeps schema and version atomic even if creation is interrupted.
-                    db.executescript(SCHEMA.replace("COMMIT;", "PRAGMA user_version=1;\nCOMMIT;"))
-                elif version != 1:
+                    db.executescript(SCHEMA.replace("COMMIT;", "PRAGMA user_version=2;\nCOMMIT;"))
+                elif version == 1:
+                    db.executescript(MIGRATE_1_TO_2)
+                elif version != 2:
                     raise Unavailable("unsupported coordinator schema")
                 check = db.execute("PRAGMA quick_check").fetchone()[0]
                 if check != "ok":
@@ -142,6 +158,12 @@ class CoordinatorStore:
             if row["kind"] != kind or row["body_hash"] != digest:
                 raise Conflict("idempotency key reused for different command")
             return row, digest
+        alias = db.execute("SELECT * FROM operation_aliases WHERE principal=? AND key=?", (
+            principal, key)).fetchone()
+        if alias:
+            if alias["kind"] != kind or alias["body_hash"] != digest:
+                raise Conflict("idempotency key reused for different command")
+            return db.execute("SELECT * FROM operations WHERE id=?", (alias["operation_id"],)).fetchone(), digest
         return None, digest
 
     @staticmethod
@@ -161,12 +183,12 @@ class CoordinatorStore:
         return result
 
     def submit(self, spec: JobSpec, *, principal: str, key: str):
-        self.policy.validate_spec(spec)
         body = spec.model_dump(mode="json")
         with self._tx() as db:
             old, digest = self._operation(db, principal, key, "submit", body)
             if old:
                 return self._view(db, old["job_id"])
+            self.policy.validate_spec(spec)
             pending = db.execute("SELECT COUNT(*) FROM jobs WHERE phase='queued' AND intent='run'").fetchone()[0]
             if pending >= self.policy.limits.max_pending:
                 raise Conflict("pending capacity reached")
@@ -212,7 +234,12 @@ class CoordinatorStore:
             if job["version"] != expected_version:
                 raise Conflict("job version changed")
             if job["intent"] == "cancel":
-                self._record_op(db, principal, key, "cancel", digest, job_id, "confirmed", {"job_id": job_id})
+                original = db.execute("SELECT id FROM operations WHERE job_id=? AND kind='cancel' ORDER BY rowid LIMIT 1", (
+                    job_id,)).fetchone()
+                if not original:
+                    raise Unavailable("cancellation intent has no durable command")
+                db.execute("INSERT INTO operation_aliases VALUES(?,?,?,?,?)", (
+                    principal, key, "cancel", digest, original["id"]))
                 return job
             if job["phase"] == "terminal":
                 raise Conflict("job already terminal")

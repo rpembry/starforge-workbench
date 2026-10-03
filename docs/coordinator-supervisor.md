@@ -16,6 +16,9 @@ calls launch again. If a launch response is lost, reconciliation checks the
 exact attempt and runtime identity. It does not create a replacement. Owner
 stop fences the current generation before exact runtime stop. An interrupted
 stop reports unknown until observation confirms termination.
+The watchdog processes every due attempt even when one has mismatched ownership
+or missing evidence. It reports which exact attempts stopped and which remain
+uncertain; it never stops a resource whose identity failed verification.
 
 The default `strict` policy stops at lease expiry plus configured grace, capped
 by the original runtime deadline. Explicit `trusted_local` continuation stops

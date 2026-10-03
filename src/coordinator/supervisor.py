@@ -27,6 +27,13 @@ class OwnershipUnknown(RuntimeError):
     pass
 
 
+class WatchdogUncertain(OwnershipUnknown):
+    def __init__(self, stopped, uncertain):
+        self.stopped = stopped
+        self.uncertain = uncertain
+        super().__init__("watchdog could not confirm exact stop for some attempts")
+
+
 def _serialized(method):
     """Serialize authority changes and runtime mutations across service processes."""
     @wraps(method)
@@ -371,6 +378,16 @@ class Supervisor:
                 if meta["blocked"] or now >= stop_at or row["cancel"]:
                     db.execute("UPDATE attempts SET cancel=1 WHERE id=?", (row["id"],))
                     due.append(row["id"])
+        stopped, uncertain = [], []
         for attempt_id in due:
-            self._stop_exact(attempt_id)
-        return due
+            try:
+                result = self._stop_exact(attempt_id)
+                if result["state"] == "stopped":
+                    stopped.append(attempt_id)
+                else:
+                    uncertain.append(attempt_id)
+            except (OwnershipUnknown, Unavailable):
+                uncertain.append(attempt_id)
+        if uncertain:
+            raise WatchdogUncertain(stopped, uncertain)
+        return stopped

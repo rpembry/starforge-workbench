@@ -2,7 +2,7 @@
 
 import pytest
 
-from coordinator.supervisor import Fenced, OwnershipUnknown, Supervisor
+from coordinator.supervisor import Fenced, OwnershipUnknown, Supervisor, WatchdogUncertain
 
 
 class Runtime:
@@ -158,3 +158,18 @@ def test_duplicate_owner_stop_does_not_fence_new_controller(setup):
     new = supervisor.acquire("new")
     supervisor.owner_stop("attempt-1", operation_id="owner-stop")
     assert supervisor.renew("new", new["generation"]) > clock[0]
+
+
+def test_watchdog_continues_after_one_ownership_mismatch(setup):
+    supervisor, runtime, clock = setup
+    lease = supervisor.acquire("old", lease_seconds=5)
+    supervisor.launch(plan("attempt-1"), controller="old", generation=lease["generation"], operation_id="launch-1")
+    supervisor.launch(plan("attempt-2"), controller="old", generation=lease["generation"], operation_id="launch-2")
+    runtime.items["attempt-1"]["identity_ok"] = False
+    clock[0] = 1008
+    with pytest.raises(WatchdogUncertain) as caught:
+        supervisor.tick()
+    assert caught.value.stopped == ["attempt-2"]
+    assert caught.value.uncertain == ["attempt-1"]
+    assert runtime.items["attempt-1"]["running"]
+    assert runtime.items["attempt-2"]["stopped"]
