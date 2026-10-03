@@ -257,11 +257,14 @@ class Supervisor:
         return result
 
     def inspect(self, attempt_id: str):
-        with self._db() as db:
-            row = db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
-            if not row:
-                raise KeyError(attempt_id)
-            return self._attempt(row)
+        try:
+            with self._db() as db:
+                row = db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+                if not row:
+                    raise KeyError(attempt_id)
+                return self._attempt(row)
+        except sqlite3.Error as exc:
+            raise Unavailable("supervisor journal read unavailable") from exc
 
     @_serialized
     def reconcile(self, attempt_id: str):

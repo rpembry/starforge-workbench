@@ -6,6 +6,26 @@ coordinator database can be absent while `tick()` enforces persisted deadlines
 and orphan policy or `owner_stop()` fences the coordinator and stops an exact
 attempt. A service wrapper must run the tick loop independently of the
 coordinator and authenticate its owner-only local stop endpoint.
+The optional `coord-supervisor` entry point runs this process explicitly; it
+does not install a service. Example private config:
+
+```json
+{"profiles":{"offline":{"backend":"docker","repository_strategy":"per-task-worktree","image":"example.invalid/reviewed@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","toolchain":"fixture","user":1000,"group":1000,"cpus":1,"memory_mb":64,"pids_limit":32,"timeout_seconds":30,"network":"none","mounts":[{"source":"worktree","target":"/workspace","read_only":false}]}},"workspaces":{"scratch":"scratch"}}
+```
+
+Create the state directory and config outside Git with mode 0700/0600 and set
+the profile UID/GID to the actual non-root service account. Then run
+`coord-supervisor serve --state-root DIR --config FILE`. Its private Unix
+`control.sock` accepts fenced acquire/renew/launch/reconcile/cancel/inspect;
+`owner.sock` accepts only owner stop, inspect, and explicit takeover. The
+control socket rejects `owner_takeover`. `coord-supervisor owner-stop --socket
+DIR/owner.sock ATTEMPT_ID OPERATION_ID` exits successfully only after confirmed
+stop. Both sockets require the same local UID; this first profile trusts that
+Unix account. Keep the owner socket path out of ordinary client configuration.
+The tick loop runs every 250 ms independently of coordinator availability and
+reports changed uncertainty without unbounded repeated error lines. The
+service refuses existing socket paths rather than replacing a possibly live
+owner, and it removes only sockets it created on clean shutdown.
 
 The journal records one active controller lease and monotonically increasing
 generation, immutable attempt/operation IDs, a plan hash, runtime identity,
@@ -37,9 +57,8 @@ regular files after positive stop; the workspace and container remain for
 review. No legacy receipt is adopted automatically. The existing Git-worktree
 runner remains a separate compatibility path, unchanged by this slice.
 
-This slice contains the journal and fake-Docker adapter tests, **not** an
-independently running service/owner authentication, Git-worktree coordinator
-adapter, or protocol-aware worker mount. It is therefore not ready for a live
-coordinator release. Host death suspends enforcement until a supervisor
-service restarts and reconciles. No service installation or live Docker claim
-is made by these tests.
+This slice contains an independently runnable local service process and
+fake-Docker adapter tests, **not** a Git-worktree coordinator adapter or
+protocol-aware worker mount. It is therefore not ready for a live coordinator
+release. Host death suspends enforcement until the supervisor restarts and
+reconciles. No service installation or live Docker claim is made by these tests.

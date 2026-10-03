@@ -1,6 +1,7 @@
 """Deterministic supervisor failures without a Docker socket."""
 
 import pytest
+import sqlite3
 
 from coordinator.supervisor import Fenced, OwnershipUnknown, Supervisor, WatchdogUncertain
 
@@ -171,5 +172,27 @@ def test_watchdog_continues_after_one_ownership_mismatch(setup):
         supervisor.tick()
     assert caught.value.stopped == ["attempt-2"]
     assert caught.value.uncertain == ["attempt-1"]
+    assert runtime.items["attempt-1"]["running"]
+    assert runtime.items["attempt-2"]["stopped"]
+
+
+def test_watchdog_continues_after_transient_journal_read_failure(setup, monkeypatch):
+    supervisor, runtime, clock = setup
+    lease = supervisor.acquire("old", lease_seconds=5)
+    supervisor.launch(plan("attempt-1"), controller="old", generation=lease["generation"], operation_id="launch-1")
+    supervisor.launch(plan("attempt-2"), controller="old", generation=lease["generation"], operation_id="launch-2")
+    clock[0] = 1008
+    original = sqlite3.connect
+    calls = [0]
+    def flaky(*args, **kwargs):
+        calls[0] += 1
+        if calls[0] == 2:  # tick transaction works; first exact inspect fails
+            raise sqlite3.OperationalError("transient read failure")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(sqlite3, "connect", flaky)
+    with pytest.raises(WatchdogUncertain) as caught:
+        supervisor.tick()
+    assert caught.value.uncertain == ["attempt-1"]
+    assert caught.value.stopped == ["attempt-2"]
     assert runtime.items["attempt-1"]["running"]
     assert runtime.items["attempt-2"]["stopped"]
