@@ -38,6 +38,13 @@ def test_handshake_duplicate_and_result_survive_reconnect(inbox):
         restarted.accept(frame(4, "result", {"ok": False, "summary": "conflict"}))
 
 
+def test_fixed_worker_requires_declared_result_artifact(inbox):
+    inbox.accept(frame(1, "hello", {"capabilities": []}))
+    inbox.accept(frame(2, "ready"))
+    inbox.accept(frame(3, "result", {"ok": True, "summary": "fixture finished"}))
+    assert protocol_execution_result(0, inbox.state) is False
+
+
 def test_stale_incarnation_gap_and_conflict(inbox):
     inbox.accept(frame(1, "hello", {"capabilities": []}))
     with pytest.raises(ProtocolError, match="stale-incarnation"):

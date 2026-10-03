@@ -2,6 +2,7 @@
 # Example: docker build --pull=false --build-arg BASE_IMAGE='python@sha256:...'
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
+LABEL io.starforge.worker.transport="mailbox-v1"
 COPY --chown=0:0 src/coordinator/worker_sdk.py /opt/worker_sdk.py
 COPY --chown=0:0 examples/coordinator_worker.py /opt/coordinator-worker.py
 # The host controller sets a numeric non-root UID/GID, read-only root, no network,

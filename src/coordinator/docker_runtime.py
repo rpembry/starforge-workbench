@@ -19,7 +19,7 @@ from starforge_workbench.docker_worker import (
 from starforge_workbench.execution import parse_profile
 
 from .store import _json
-from .worker_channel import WorkerChannel
+from .worker_channel import MailboxChannel, WorkerChannel
 from .worker_protocol import WorkerInbox
 
 
@@ -37,6 +37,8 @@ def protocol_execution_result(exit_code, inbox_state):
         return False
     if not inbox_state["ready"] or result is None or not inbox_state["artifacts_complete"]:
         return None
+    if "result.json" not in inbox_state["artifacts"]:
+        return False
     return True
 
 
@@ -98,8 +100,12 @@ class DockerRuntime:
             raise ValueError("unregistered worker adapter")
         if not re.fullmatch(r"[0-9a-f]{32}", plan["attempt_id"]):
             raise ValueError("invalid attempt identity")
+        if plan["deadline_seconds"] > self.profiles[plan["profile_ref"]].timeout_seconds:
+            raise ValueError("job deadline exceeds approved profile timeout")
         payload = plan["payload"]
         if kind == "protocol_example":
+            if binding["kind"] != "scratch":
+                raise ValueError("protocol example requires a scratch workspace")
             if set(payload) != {"input"} or not isinstance(payload["input"], dict):
                 raise ValueError("protocol example requires bounded input only")
             if len(_json(payload["input"]).encode()) > 65_536:
@@ -215,6 +221,10 @@ class DockerRuntime:
         image = json.loads(self.command(self.docker + ["image", "inspect", profile.image]))[0]
         if image["Config"].get("Volumes"):
             raise WorkerError("image-declared volumes unsupported")
+        protocol = plan["worker_type"] == "protocol_example"
+        if (protocol and (image["Config"].get("Labels") or {}).get(
+                "io.starforge.worker.transport") != "mailbox-v1"):
+            raise WorkerError("protocol worker image lacks reviewed mailbox transport label")
         env_hash = environment_digest(image["Config"].get("Env"), image=True)
         attempt = self.root / plan["attempt_id"]
         attempt.mkdir(mode=0o700)  # existing attempt is reconciliation, never a new launch
@@ -222,9 +232,8 @@ class DockerRuntime:
         (attempt / "scratch").mkdir(mode=0o700)
         (attempt / "git-mask").write_text("No container Git administration.\n")
         (attempt / "git-mask").chmod(0o444)
-        protocol = plan["worker_type"] == "protocol_example"
         if protocol:
-            self.channels[plan["attempt_id"]] = WorkerChannel(
+            self.channels[plan["attempt_id"]] = MailboxChannel(
                 attempt, job_id=plan["job_id"], attempt_id=plan["attempt_id"],
                 incarnation=plan["incarnation"])
         plan_hash = hashlib.sha256(_json(plan).encode()).hexdigest()
@@ -240,6 +249,7 @@ class DockerRuntime:
                    "image_id": image["Id"], "environment_sha256": env_hash,
                    "argv": worker_argv, "artifact_paths": plan["payload"].get("artifacts", []),
                    "workspace_kind": binding["kind"],
+                   "channel_transport": "mailbox-v1" if protocol else None,
                    "phase": "workspace_pending"}
         if binding["kind"] == "git_worktree":
             receipt.update(repository=binding["repository"], revision=binding["revision"])
@@ -398,7 +408,9 @@ class DockerRuntime:
                 continue
             receipt = self._read(path.name)
             if receipt.get("worker_type") == "protocol_example":
-                self.channels[path.name] = WorkerChannel(
+                channel_type = (MailboxChannel if receipt.get("channel_transport") == "mailbox-v1"
+                                else WorkerChannel)  # pre-upgrade socket receipts
+                self.channels[path.name] = channel_type(
                     path, job_id=receipt["job_id"], attempt_id=path.name,
                     incarnation=receipt["incarnation"])
 
@@ -465,6 +477,7 @@ class DockerRuntime:
             save("status.txt", git(receipt["worktree"], "status", "--porcelain",
                                    "--untracked-files=all", "--ignored"))
         total = 0
+        result_matches_input = False
         for index, name in enumerate(declarations):
             path = source / name
             if path.resolve() != path.absolute() or not path.is_file() or path.is_symlink():
@@ -473,12 +486,21 @@ class DockerRuntime:
             total += size
             if size > MAX_ARTIFACT or total > MAX_ARTIFACT:
                 raise WorkerError("declared artifacts exceed aggregate limit")
-            save("file-" + str(index), path.read_bytes())
+            data = path.read_bytes()
+            save("file-" + str(index), data)
             files[-1]["source_relative_path"] = name
+            if protocol and name == "result.json":
+                try:
+                    result_matches_input = json.loads(data) == {
+                        "value": plan["payload"]["input"].get("value")}
+                except (UnicodeDecodeError, ValueError, TypeError):
+                    result_matches_input = False
         save("exit.json", _json({"exit_code": observed["exit_code"],
                                  "runtime_id": runtime_id}).encode())
         if inbox:
             execution_ok = protocol_execution_result(observed["exit_code"], inbox.state)
+            if execution_ok is True and not result_matches_input:
+                execution_ok = False
         else:
             execution_ok = observed["exit_code"] == 0 if observed["exit_code"] is not None else None
         atomic(output / "manifest.json", {"attempt_id": plan["attempt_id"],

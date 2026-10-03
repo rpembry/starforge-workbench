@@ -1,6 +1,8 @@
 # Headless worker v1 contract (#174)
 
-The wire protocol is newline-delimited JSON over a **per-attempt** Unix socket.
+The wire protocol is newline-delimited JSON. The fixed example worker exchanges
+one request and one acknowledgement through a private **per-attempt** file mailbox.
+Older in-flight receipts may still use their per-attempt Unix socket.
 The host mounts only that worker's channel. No supervisor owner API or Docker
 socket is present in the worker. `Frame` and `WorkerInbox` in
 `src/coordinator/worker_protocol.py` define the receiver. `worker_sdk.py` is a
@@ -43,14 +45,23 @@ show a tiny scratch-only worker. Build requires an explicitly reviewed,
 locally cached Python base image by immutable digest; the Dockerfile does not
 pull an image or add credentials. The worker assumes `/workspace/job.json` is
 host-prepared bounded input, `/scratch` is its writable area, and `/channel`
-contains only its event socket. The host controller must set arbitrary numeric
-non-root UID/GID, read-only root, network none, dropped capabilities, no new
-privileges, PID/CPU/memory/time limits, and no container Git. The current
+contains only its file mailbox. This mailbox requires the worker's numeric UID
+to match the controller's UID because its directory and files are mode 0700/0600.
+The host controller must set a non-root UID/GID, read-only root, network none,
+dropped capabilities, no new privileges, PID/CPU/memory/time limits, and no
+container Git. The current
 `DockerRuntime` adapter supports ordinary commands and the fixed
-`protocol_example` worker with scratch input. It mounts only that attempt's
-event socket; inbox state stays in a separate host-only directory. Host
+`protocol_example` worker only with a scratch workspace. Its job deadline may
+not exceed the approved profile timeout. It mounts only that attempt's
+file mailbox; inbox state stays in a separate host-only directory. A mailbox
+acknowledgement is written only after the host inbox fsyncs the frame; the
+worker-writable mailbox itself is never host evidence. Channel ownership uses
+a lifetime lock in that host-only directory; normal
+channel cleanup leaves the lock inode in place. A trusted host process with
+write access to the inbox directory must coordinate before changing it. Host
 collection requires positive process exit, readiness, a worker result, and
-valid declared scratch artifacts before execution success. Socket reconnect
+the declared `result.json` artifact with JSON content matching the bounded
+input's `value` before execution success. File-mailbox retry
 and fake-Docker tests pass; the Docker mount/entrypoint path and supported
 pinned images still require opt-in live runtime verification.
 
