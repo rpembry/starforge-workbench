@@ -21,7 +21,7 @@ def main():
     if client.state["seq"]:
         raise RuntimeError("example worker cannot resume a partially completed attempt")
     client.send("hello", {"capabilities": []})
-    payload = json.loads(Path("/input/job.json").read_text())
+    payload = json.loads(Path("/workspace/job.json").read_text())
     client.send("ready", {})
     client.send("heartbeat", {})
     result = {"value": payload.get("value")}

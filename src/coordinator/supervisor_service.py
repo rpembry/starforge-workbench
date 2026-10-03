@@ -15,11 +15,12 @@ import struct
 import sys
 
 from .docker_runtime import DockerRuntime
-from .supervisor import Conflict, Fenced, OwnershipUnknown, Supervisor, WatchdogUncertain
+from .supervisor import Conflict, Fenced, OwnershipUnknown, RecoveryUncertain, Supervisor, WatchdogUncertain
 
 
 MAX_REQUEST = 131_072
-CONTROL = {"acquire", "renew", "launch", "reconcile", "cancel", "inspect"}
+CONTROL = {"acquire", "renew", "launch", "abandon", "reconcile", "cancel", "collect",
+           "read_artifact", "inspect"}
 OWNER = {"owner_stop", "inspect", "takeover"}
 
 
@@ -39,6 +40,7 @@ def load_service(state_root, config_file, *, command_fn=None):
     if command_fn is not None:
         arguments["command_fn"] = command_fn
     runtime = DockerRuntime(state_root, **arguments)
+    runtime.reopen_channels()
     return Supervisor(state_root, runtime)
 
 
@@ -86,9 +88,17 @@ class SupervisorService:
 
     async def _watchdog(self):
         while True:
+            recovery_error = None
+            try:
+                if self.supervisor.recovery_required():
+                    await asyncio.to_thread(self.supervisor.recover_startup)
+            except RecoveryUncertain as exc:
+                recovery_error = {"recovery_uncertain": exc.uncertain}
+            except Exception:
+                recovery_error = {"recovery_error": "unavailable"}
             try:
                 await asyncio.to_thread(self.supervisor.tick)
-                self.last_watchdog_error = None
+                self.last_watchdog_error = recovery_error
             except WatchdogUncertain as exc:
                 state = {"stopped": exc.stopped, "uncertain": exc.uncertain}
                 if state != self.last_watchdog_error:
@@ -109,11 +119,12 @@ class SupervisorService:
                 raise ValueError("supervisor socket path already exists; inspect previous service")
         servers = []
         socket_inodes = {}
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             for path, owner in endpoints:
                 server = await asyncio.start_unix_server(
                     lambda reader, writer, owner=owner: self._handle(reader, writer, owner=owner),
-                    path=str(path), limit=MAX_REQUEST + 1)
+                    path=f"/proc/self/fd/{root_fd}/{path.name}", limit=MAX_REQUEST + 1)
                 path.chmod(0o600)
                 socket_inodes[path] = path.stat().st_ino
                 servers.append(server)
@@ -130,18 +141,27 @@ class SupervisorService:
             for path, _ in endpoints:
                 if path.is_socket() and path.stat().st_ino == socket_inodes.get(path):
                     path.unlink()
+            close_channels = getattr(self.supervisor.runtime, "close_channels", None)
+            if close_channels is not None:
+                close_channels()
+            os.close(root_fd)
 
 
 def owner_stop(socket_path, attempt_id, operation_id):
     """Emergency local client; response never guesses termination."""
     wire = json.dumps({"method": "owner_stop", "args": {
         "attempt_id": attempt_id, "operation_id": operation_id}}, separators=(",", ":")).encode() + b"\n"
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(10)
-        connection.connect(socket_path)
-        connection.sendall(wire)
-        with connection.makefile("rb") as stream:
-            response = json.loads(stream.readline(MAX_REQUEST))
+    path = Path(socket_path).absolute()
+    directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(10)
+            connection.connect(f"/proc/self/fd/{directory_fd}/{path.name}")
+            connection.sendall(wire)
+            with connection.makefile("rb") as stream:
+                response = json.loads(stream.readline(MAX_REQUEST))
+    finally:
+        os.close(directory_fd)
     return response
 
 

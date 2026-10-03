@@ -6,6 +6,7 @@ path, image, or mount from a client. This module does not contact Workbench.
 """
 
 from contextlib import contextmanager
+import base64
 import fcntl
 from functools import wraps
 import hashlib
@@ -34,6 +35,13 @@ class WatchdogUncertain(OwnershipUnknown):
         super().__init__("watchdog could not confirm exact stop for some attempts")
 
 
+class RecoveryUncertain(OwnershipUnknown):
+    def __init__(self, verified, uncertain):
+        self.verified = verified
+        self.uncertain = uncertain
+        super().__init__("startup ownership recovery incomplete; new starts blocked")
+
+
 def _serialized(method):
     """Serialize authority changes and runtime mutations across service processes."""
     @wraps(method)
@@ -52,7 +60,7 @@ SCHEMA = """
 BEGIN IMMEDIATE;
 CREATE TABLE meta(version INTEGER NOT NULL CHECK(version=1), supervisor_id TEXT NOT NULL,
  generation INTEGER NOT NULL, controller TEXT, lease_until REAL NOT NULL, last_wall REAL NOT NULL,
- blocked INTEGER NOT NULL DEFAULT 0);
+ blocked INTEGER NOT NULL DEFAULT 0, recovery_required INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE attempts(
  id TEXT PRIMARY KEY, job_id TEXT NOT NULL, incarnation TEXT NOT NULL,
  plan_hash TEXT NOT NULL, plan TEXT NOT NULL, generation INTEGER NOT NULL,
@@ -63,7 +71,22 @@ CREATE TABLE attempts(
 CREATE TABLE operations(
  id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL REFERENCES attempts(id),
  kind TEXT NOT NULL, status TEXT NOT NULL, response TEXT);
-PRAGMA user_version=1;
+CREATE TABLE evidence(attempt_id TEXT PRIMARY KEY REFERENCES attempts(id), response TEXT NOT NULL);
+PRAGMA user_version=3;
+COMMIT;
+"""
+
+MIGRATE_1_TO_2 = """
+BEGIN IMMEDIATE;
+CREATE TABLE evidence(attempt_id TEXT PRIMARY KEY REFERENCES attempts(id), response TEXT NOT NULL);
+PRAGMA user_version=2;
+COMMIT;
+"""
+
+MIGRATE_2_TO_3 = """
+BEGIN IMMEDIATE;
+ALTER TABLE meta ADD COLUMN recovery_required INTEGER NOT NULL DEFAULT 0;
+PRAGMA user_version=3;
 COMMIT;
 """
 
@@ -99,12 +122,19 @@ class Supervisor:
                 version = db.execute("PRAGMA user_version").fetchone()[0]
                 if version == 0:
                     db.executescript(SCHEMA)
-                    db.execute("INSERT INTO meta VALUES(?,?,?,?,?,?,?)", (
-                        1, uuid.uuid4().hex, 0, None, 0, self.clock(), 0))
-                elif version != 1:
+                    db.execute("INSERT INTO meta VALUES(?,?,?,?,?,?,?,?)", (
+                        1, uuid.uuid4().hex, 0, None, 0, self.clock(), 0, 0))
+                elif version == 1:
+                    db.executescript(MIGRATE_1_TO_2)
+                    db.executescript(MIGRATE_2_TO_3)
+                elif version == 2:
+                    db.executescript(MIGRATE_2_TO_3)
+                elif version != 3:
                     raise Unavailable("unsupported supervisor schema")
                 if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                     raise Unavailable("supervisor journal failed integrity check")
+                if db.execute("SELECT 1 FROM attempts WHERE state!='stopped' LIMIT 1").fetchone():
+                    db.execute("UPDATE meta SET recovery_required=1")
         except sqlite3.Error as exc:
             raise Unavailable("supervisor journal unavailable") from exc
 
@@ -182,9 +212,7 @@ class Supervisor:
                 meta["generation"] != generation or meta["lease_until"] <= now):
             raise Fenced("stale or expired controller")
 
-    @_serialized
-    def launch(self, plan: dict, *, controller: str, generation: int, operation_id: str):
-        """Journal intent before runtime launch; same operation never launches twice."""
+    def _validated_plan(self, plan, operation_id):
         required = {"job_id", "attempt_id", "incarnation", "worker_type", "profile_ref",
                     "workspace_ref", "payload", "deadline_seconds", "orphan_policy"}
         if set(plan) != required or not operation_id:
@@ -204,10 +232,18 @@ class Supervisor:
         if policy["mode"] == "strict" and policy["max_orphan_seconds"]:
             raise ValueError("strict orphan policy cannot continue")
         self.runtime.validate(plan)
-        digest = hashlib.sha256(_json(plan).encode()).hexdigest()
+        return hashlib.sha256(_json(plan).encode()).hexdigest()
+
+    @_serialized
+    def launch(self, plan: dict, *, controller: str, generation: int, operation_id: str):
+        """Journal intent before runtime launch; same operation never launches twice."""
+        digest = self._validated_plan(plan, operation_id)
+        policy = plan["orphan_policy"]
         with self._tx() as db:
             now, meta = self._clock_check(db)
             self._authority(meta, controller, generation, now)
+            if meta["recovery_required"]:
+                raise RecoveryUncertain([], ["startup_reconciliation_required"])
             old = db.execute("SELECT * FROM attempts WHERE id=?", (plan["attempt_id"],)).fetchone()
             if old:
                 if old["plan_hash"] != digest or old["launch_op"] != operation_id:
@@ -228,6 +264,8 @@ class Supervisor:
         with self._tx() as db:
             now, meta = self._clock_check(db)
             self._authority(meta, controller, generation, now)
+            if meta["recovery_required"]:
+                raise RecoveryUncertain([], ["startup_reconciliation_required"])
             item = db.execute("SELECT * FROM attempts WHERE id=?", (plan["attempt_id"],)).fetchone()
             if item["cancel"]:
                 return self._attempt(item)
@@ -250,6 +288,45 @@ class Supervisor:
             self._stop_exact(plan["attempt_id"])
         return self.inspect(plan["attempt_id"])
 
+    @_serialized
+    def abandon(self, plan: dict, *, controller: str, generation: int, operation_id: str):
+        """Fence a durable launch intent before create; never start to cancel."""
+        digest = self._validated_plan(plan, operation_id)
+        policy = plan["orphan_policy"]
+        with self._tx() as db:
+            now, meta = self._clock_check(db)
+            self._authority(meta, controller, generation, now)
+            old = db.execute("SELECT * FROM attempts WHERE id=?", (plan["attempt_id"],)).fetchone()
+            if old:
+                if old["plan_hash"] != digest or old["launch_op"] != operation_id:
+                    raise Conflict("attempt or operation identity conflict")
+                if old["state"] == "stopped":
+                    return self._attempt(old)
+                db.execute("UPDATE attempts SET cancel=1 WHERE id=?", (plan["attempt_id"],))
+                if old["state"] == "launch_pending":
+                    db.execute("UPDATE attempts SET state='stopped',observation_seq=observation_seq+1 WHERE id=?", (
+                        plan["attempt_id"],))
+                    db.execute("UPDATE operations SET status='confirmed',response=? WHERE id=?", (
+                        _json({"state": "stopped", "no_start": True}), operation_id))
+                    return self._attempt(db.execute("SELECT * FROM attempts WHERE id=?", (
+                        plan["attempt_id"],)).fetchone())
+            else:
+                deadline = now + plan["deadline_seconds"]
+                orphan_deadline = (min(deadline, now + policy["max_orphan_seconds"])
+                                   if policy["mode"] == "trusted_local"
+                                   else min(deadline, meta["lease_until"] + policy["grace_seconds"]))
+                db.execute("INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+                    plan["attempt_id"], plan["job_id"], plan["incarnation"], digest, _json(plan),
+                    generation, operation_id, None, "stopped", 1, deadline,
+                    orphan_deadline, policy["mode"], policy["grace_seconds"], 1))
+                db.execute("INSERT INTO operations VALUES(?,?,?,?,?)", (
+                    operation_id, plan["attempt_id"], "launch", "confirmed",
+                    _json({"state": "stopped", "no_start": True})))
+                return self._attempt(db.execute("SELECT * FROM attempts WHERE id=?", (
+                    plan["attempt_id"],)).fetchone())
+        # Existing create/start may have happened. Stop only exact owned runtime.
+        return self._stop_exact(plan["attempt_id"])
+
     @staticmethod
     def _attempt(row):
         result = dict(row)
@@ -267,9 +344,116 @@ class Supervisor:
             raise Unavailable("supervisor journal read unavailable") from exc
 
     @_serialized
-    def reconcile(self, attempt_id: str):
-        """Inspect exact owned resource after restart; never create or adopt by label alone."""
+    def collect(self, attempt_id: str, *, controller: str, generation: int):
+        """Return durable positive runtime and artifact evidence, never a bare claim."""
+        with self._tx() as db:
+            now, meta = self._clock_check(db)
+            self._authority(meta, controller, generation, now)
+        with self._db() as db:
+            saved = db.execute("SELECT response FROM evidence WHERE attempt_id=?", (attempt_id,)).fetchone()
+            if saved:
+                return json.loads(saved["response"])
+        attempt = self.inspect(attempt_id)
+        if attempt["state"] != "stopped" or not attempt["runtime_id"]:
+            raise OwnershipUnknown("attempt has no confirmed stopped runtime to collect")
+        observed = self.runtime.inspect(attempt["plan"], attempt["runtime_id"])
+        if (not observed["identity_ok"] or not observed["stopped"] or
+                observed["runtime_id"] != attempt["runtime_id"]):
+            raise OwnershipUnknown("positive stopped runtime evidence unavailable")
+        manifest_path = Path(self.runtime.collect(attempt["plan"], attempt["runtime_id"]))
+        if manifest_path.is_symlink() or manifest_path.stat().st_size > 131_072:
+            raise OwnershipUnknown("artifact manifest unavailable or oversized")
+        manifest = json.loads(manifest_path.read_text())
+        if (manifest.get("attempt_id") != attempt_id or
+                not any(manifest.get("execution_ok") is value for value in (True, False, None))):
+            raise OwnershipUnknown("artifact manifest identity mismatch")
+        execution_ok = manifest["execution_ok"]
+        if execution_ok is True and observed["exit_code"] != 0:
+            raise OwnershipUnknown("result conflicts with process exit")
+        with self._tx() as db:
+            now, meta = self._clock_check(db)
+            self._authority(meta, controller, generation, now)
+            saved = db.execute("SELECT response FROM evidence WHERE attempt_id=?", (attempt_id,)).fetchone()
+            if saved:
+                return json.loads(saved["response"])
+            row = db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+            if row["state"] != "stopped" or row["runtime_id"] != observed["runtime_id"]:
+                raise OwnershipUnknown("attempt changed during collection")
+            db.execute("UPDATE attempts SET observation_seq=observation_seq+1 WHERE id=?", (attempt_id,))
+            seq = row["observation_seq"] + 1
+            response = {"supervisor_id": db.execute("SELECT supervisor_id FROM meta").fetchone()[0],
+                        "job_id": row["job_id"], "attempt_id": attempt_id,
+                        "incarnation": row["incarnation"], "runtime_id": row["runtime_id"],
+                        "observation_seq": seq, "phase": "stopped", "stopped": True,
+                        "exit_code": observed["exit_code"], "result_ok": execution_ok,
+                        "artifact_manifest": manifest}
+            db.execute("INSERT INTO evidence VALUES(?,?)", (attempt_id, _json(response)))
+            return response
+
+    def read_artifact(self, attempt_id: str, name: str, *, offset=0, limit=65_536):
+        if not isinstance(name, str) or not 0 <= offset or not 1 <= limit <= 65_536:
+            raise ValueError("invalid artifact read")
+        with self._db() as db:
+            saved = db.execute("SELECT response FROM evidence WHERE attempt_id=?", (attempt_id,)).fetchone()
+            if not saved:
+                raise OwnershipUnknown("artifact evidence not committed")
+            evidence = json.loads(saved["response"])
+        entry = next((item for item in evidence["artifact_manifest"]["files"]
+                      if item["path"] == name), None)
+        if entry is None:
+            raise ValueError("artifact not declared")
+        attempt = self.inspect(attempt_id)
+        data = self.runtime.read_artifact(attempt["plan"], attempt["runtime_id"], name)
+        if len(data) != entry["bytes"] or hashlib.sha256(data).hexdigest() != entry["sha256"]:
+            raise OwnershipUnknown("artifact changed after evidence commit")
+        chunk = data[offset:offset + limit]
+        return {"attempt_id": attempt_id, "name": name, "offset": offset,
+                "next_offset": offset + len(chunk), "total": len(data),
+                "sha256": entry["sha256"], "data_base64": base64.b64encode(chunk).decode()}
+
+    def recovery_required(self):
+        try:
+            with self._db() as db:
+                return bool(db.execute("SELECT recovery_required FROM meta").fetchone()[0])
+        except sqlite3.Error as exc:
+            raise Unavailable("supervisor recovery state unavailable") from exc
+
+    @_serialized
+    def recover_startup(self):
+        """Service-owned exact inspection gate before new starts are allowed."""
+        with self._tx() as db:
+            db.execute("UPDATE meta SET recovery_required=1")
+            ids = [row[0] for row in db.execute(
+                "SELECT id FROM attempts WHERE state!='stopped' ORDER BY rowid")]
+        verified, uncertain = [], []
+        for attempt_id in ids:
+            try:
+                outcome = self._reconcile_owned(attempt_id)
+                if outcome["state"] in {"running", "stopped"}:
+                    verified.append(attempt_id)
+                else:
+                    uncertain.append(attempt_id)
+            except (OwnershipUnknown, Unavailable):
+                uncertain.append(attempt_id)
+        if uncertain:
+            raise RecoveryUncertain(verified, uncertain)
+        with self._tx() as db:
+            db.execute("UPDATE meta SET recovery_required=0")
+        return verified
+
+    @_serialized
+    def reconcile(self, attempt_id: str, *, controller: str, generation: int):
+        """Current controller may reconcile; a stale caller cannot mutate state."""
+        with self._tx() as db:
+            now, meta = self._clock_check(db)
+            self._authority(meta, controller, generation, now)
+        return self._reconcile_owned(attempt_id)
+
+    def _reconcile_owned(self, attempt_id: str):
+        """Exact host inspection; only caller holding serialized authority uses it."""
         item = self.inspect(attempt_id)
+        if item["state"] == "stopped" and item["cancel"] and not item["runtime_id"]:
+            return item  # durable prelaunch tombstone; no runtime to reattach
         try:
             observed = self.runtime.inspect(item["plan"], item["runtime_id"])
             if not observed["identity_ok"] or (item["runtime_id"] and observed["runtime_id"] != item["runtime_id"]):

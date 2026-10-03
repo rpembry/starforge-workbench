@@ -105,10 +105,11 @@ class WorkerInbox:
             self.state = json.loads(self.path.read_text())
             if self.state["identity"] != self.identity:
                 raise ProtocolError("persisted worker incarnation mismatch")
+            self.state.setdefault("artifacts", [])
         else:
             self.state = {"identity": self.identity, "last_seq": 0, "hello": False,
                           "ready": False, "result": None, "events": [], "floor": 1,
-                          "gaps": []}
+                          "gaps": [], "artifacts": []}
 
     def _save(self):
         fd, path = tempfile.mkstemp(prefix=".inbox-", dir=self.directory)
@@ -147,6 +148,8 @@ class WorkerInbox:
             raise ProtocolError("duplicate handshake")
         if self.state["result"] is not None and frame.kind in {"result", "progress", "artifact"}:
             raise ProtocolError("result already declared")
+        if frame.kind == "artifact" and len(self.state["artifacts"]) >= 32:
+            raise ProtocolError("too many artifact declarations")
         gap = [last + 1, frame.seq - 1] if frame.seq > last + 1 else None
         previous = self.state
         self.state = json.loads(json.dumps(previous))
@@ -160,6 +163,10 @@ class WorkerInbox:
                 self.state["ready"] = True
             elif frame.kind == "result":
                 self.state["result"] = body
+            elif frame.kind == "artifact":
+                if frame.data["path"] in self.state["artifacts"]:
+                    raise ProtocolError("artifact declared twice")
+                self.state["artifacts"].append(frame.data["path"])
             self.state["last_seq"] = frame.seq
             self.state["events"].append({"seq": frame.seq, "event_id": frame.event_id,
                                          "digest": digest, "frame": body})
@@ -180,7 +187,7 @@ class WorkerInbox:
         return {"events": [entry["frame"] for entry in self.state["events"] if entry["seq"] > after_seq],
                 "floor": self.state["floor"], "gap": after_seq < self.state["floor"] - 1,
                 "latest": self.state["last_seq"], "sequence_gaps": self.state["gaps"],
-                "result": self.state["result"]}
+                "result": self.state["result"], "artifacts": self.state["artifacts"]}
 
 
 async def serve_worker_socket(path: str | Path, inbox: WorkerInbox):

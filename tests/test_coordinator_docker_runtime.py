@@ -2,11 +2,14 @@
 
 import json
 import os
+import errno
+import base64
 
 import pytest
 
 from coordinator.docker_runtime import DockerRuntime
 from coordinator.supervisor import OwnershipUnknown, Supervisor
+from coordinator.worker_sdk import WorkerClient
 
 
 def profile():
@@ -47,8 +50,12 @@ class FakeDocker:
                     key, value = argv[index + 1].split("=", 1)
                     labels[key] = value
             self.item = {"Id": "container-1", "Name": "/swb-" + "a" * 32,
-                         "Config": {"Labels": labels},
+                         "Config": {"Labels": labels}, "Mounts": [],
                          "State": {"Status": "created", "Running": False, "ExitCode": 0}}
+            for index, part in enumerate(argv):
+                if part == "--volume" and argv[index + 1].endswith(":/channel:Z"):
+                    self.item["Mounts"].append({"Type": "bind", "Source": argv[index + 1].split(":", 1)[0],
+                                                "Destination": "/channel", "RW": True})
             if self.lose_create_response:
                 raise TimeoutError("lost Docker create reply")
             return b"container-1\n"
@@ -111,7 +118,7 @@ def test_lost_create_response_reconciles_same_resource(runtime, tmp_path):
         supervisor.launch(plan(), controller="controller", generation=lease["generation"], operation_id="launch-op")
     assert fake.create_count == 1
     assert supervisor.launch(plan(), controller="controller", generation=lease["generation"], operation_id="launch-op")["state"] == "unknown"
-    assert supervisor.reconcile("a" * 32)["state"] == "stopped"  # created, never started
+    assert supervisor.reconcile("a" * 32, controller="controller", generation=lease["generation"])["state"] == "stopped"  # created, never started
     assert fake.create_count == 1
     assert supervisor.owner_stop("a" * 32, operation_id="owner-op")["state"] == "stopped"
 
@@ -122,3 +129,70 @@ def test_unapproved_reference_rejected_before_docker(runtime):
     with pytest.raises(ValueError, match="workspace"):
         adapter.validate(bad)
     assert fake.calls == []
+
+
+def test_protocol_channel_reconnect_and_result_evidence(tmp_path, monkeypatch):
+    if os.getuid() == 0 or os.getgid() == 0:
+        pytest.skip("restricted runner needs non-root caller")
+    root = tmp_path / "runtime"
+    root.mkdir(mode=0o700)
+    raw = profile()
+    raw["mounts"].append(dict(source="scratch", target="/scratch", read_only=False))
+    fake = FakeDocker()
+    monkeypatch.setattr("coordinator.docker_runtime.verify_container", lambda item, receipt, p: None)
+    adapter = DockerRuntime(root, profiles={"offline": raw},
+                            workspaces={"scratch": "scratch"}, command_fn=fake)
+    spec = {**plan(), "worker_type": "protocol_example", "payload": {"input": {"value": 3}}}
+    try:
+        try:
+            runtime_id = adapter.launch(spec)
+        except PermissionError as exc:
+            if exc.errno == errno.EPERM:
+                pytest.skip("sandbox forbids binding Unix sockets")
+            raise
+        client = WorkerClient(adapter.channels["a" * 32].connect_path,
+                              str(root / ("a" * 32) / "scratch" / "sender.json"),
+                              job_id="job", attempt_id="a" * 32, incarnation="inc")
+        client.send("hello", {"capabilities": []})
+        client.send("ready", {})
+        (root / ("a" * 32) / "scratch" / "result.json").write_text('{"value":3}\n')
+        client.send("artifact", {"path": "result.json"})
+        client.send("result", {"ok": True, "summary": "fixture completed"})
+        adapter.close_channels()
+        adapter.reopen_channels()  # supervisor restart: same inbox, no new container
+        fake.item["State"].update(Status="exited", Running=False, ExitCode=0)
+        manifest = json.loads(open(adapter.collect(spec, runtime_id)).read())
+        assert manifest["execution_ok"] is True
+        assert fake.create_count == 1
+        assert {entry["path"] for entry in manifest["files"]} == {"output.txt", "file-0", "exit.json"}
+        assert not (root / ("a" * 32) / "channel" / "worker-inbox.json").exists()
+        assert (root / ("a" * 32) / "host-inbox" / "worker-inbox.json").exists()
+    finally:
+        adapter.close_channels()
+
+
+def test_supervisor_collect_commits_exit_and_artifact_evidence(runtime, tmp_path):
+    adapter, fake = runtime
+    journal = tmp_path / "journal"
+    journal.mkdir(mode=0o700)
+    supervisor = Supervisor(journal, adapter)
+    lease = supervisor.acquire("controller")
+    supervisor.launch(plan(), controller="controller", generation=lease["generation"], operation_id="launch-op")
+    (adapter.root / ("a" * 32) / "worktree" / "result.txt").write_text("fixture\n")
+    fake.item["State"].update(Status="exited", Running=False, ExitCode=0)
+    stopped = supervisor.reconcile("a" * 32, controller="controller", generation=lease["generation"])
+    assert stopped["state"] == "stopped"
+    evidence = supervisor.collect("a" * 32, controller="controller", generation=lease["generation"])
+    assert evidence["exit_code"] == 0 and evidence["result_ok"] is True
+    assert evidence["attempt_id"] == "a" * 32 and evidence["observation_seq"] > stopped["observation_seq"]
+    assert {entry["path"] for entry in evidence["artifact_manifest"]["files"]} == {
+        "output.txt", "file-0", "exit.json"}
+    chunk = supervisor.read_artifact("a" * 32, "file-0", offset=0, limit=3)
+    assert base64.b64decode(chunk["data_base64"]) == b"fix" and chunk["total"] == 8
+    (adapter.root / ("a" * 32) / "worktree" / "result.txt").write_text("changed after collection\n")
+    reopened = Supervisor(journal, adapter)
+    assert reopened.collect("a" * 32, controller="controller", generation=lease["generation"]) == evidence  # durable replay; no recollect
+    exported = adapter.root / ("a" * 32) / "artifacts" / "file-0"
+    exported.write_text("tampered\n")
+    with pytest.raises(Exception, match="hash changed"):
+        supervisor.read_artifact("a" * 32, "file-0")

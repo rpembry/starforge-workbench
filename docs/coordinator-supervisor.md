@@ -26,6 +26,15 @@ The tick loop runs every 250 ms independently of coordinator availability and
 reports changed uncertainty without unbounded repeated error lines. The
 service refuses existing socket paths rather than replacing a possibly live
 owner, and it removes only sockets it created on clean shutdown.
+The control socket also provides `abandon(plan, controller, generation,
+operation_id)` for a durable no-start tombstone, fenced
+`collect(attempt_id, controller, generation)` for
+committed process/result/artifact evidence, and `read_artifact` for bounded
+hash-verified chunks of exported files such as `output.txt` logs. On restart,
+new launches remain blocked until every existing attempt has exact, positive
+runtime ownership evidence. The owner socket remains available while recovery
+is uncertain. Mutating control reconciliation requires the current controller
+and generation; a stale coordinator cannot change journal observations.
 
 The journal records one active controller lease and monotonically increasing
 generation, immutable attempt/operation IDs, a plan hash, runtime identity,
@@ -47,7 +56,8 @@ budget is refreshed by a coordinator reconnection. A backward clock step
 blocks starts and causes the watchdog to stop owned attempts conservatively.
 
 The runtime adapter contract is in the class docstring. `DockerRuntime` now
-implements the approved **scratch plus ordinary command** path. It resolves
+implements approved **scratch plus ordinary command** and fixed
+`protocol_example` paths. It resolves
 symbolic profile/workspace references from administrator configuration, uses
 the existing runner's digest-pinned image/environment and restricted create
 verification, and checks exact labels/token/ID, plan hash, and incarnation on
@@ -57,8 +67,11 @@ regular files after positive stop; the workspace and container remain for
 review. No legacy receipt is adopted automatically. The existing Git-worktree
 runner remains a separate compatibility path, unchanged by this slice.
 
-This slice contains an independently runnable local service process and
-fake-Docker adapter tests, **not** a Git-worktree coordinator adapter or
-protocol-aware worker mount. It is therefore not ready for a live coordinator
-release. Host death suspends enforcement until the supervisor restarts and
-reconciles. No service installation or live Docker claim is made by these tests.
+This slice contains an independently runnable local service process,
+scratch command and protocol-example adapters, and fake-Docker tests. The
+Git-worktree coordinator adapter, live Docker proof, and end-to-end #175
+dispatch integration remain gated. Host death suspends enforcement until the
+supervisor restarts and reconciles. The owner and control sockets both trust
+the same local UID; they are separate operation surfaces, not isolation from
+a malicious process running under that UID. No service installation or live
+Docker claim is made by these tests.

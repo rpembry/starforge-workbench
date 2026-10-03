@@ -3,7 +3,7 @@
 import pytest
 import sqlite3
 
-from coordinator.supervisor import Fenced, OwnershipUnknown, Supervisor, WatchdogUncertain
+from coordinator.supervisor import Conflict, Fenced, OwnershipUnknown, RecoveryUncertain, Supervisor, WatchdogUncertain
 
 
 class Runtime:
@@ -100,7 +100,7 @@ def test_lost_launch_response_does_not_duplicate(setup):
     assert supervisor.inspect("attempt-1")["state"] == "unknown"
     assert supervisor.launch(plan(), controller="a", generation=lease["generation"], operation_id="launch-1")["state"] == "unknown"
     assert runtime.starts == 1
-    same = supervisor.reconcile("attempt-1")
+    same = supervisor.reconcile("attempt-1", controller="a", generation=lease["generation"])
     assert same["state"] == "running" and same["runtime_id"] == "runtime-attempt-1"
     assert runtime.starts == 1
 
@@ -196,3 +196,69 @@ def test_watchdog_continues_after_transient_journal_read_failure(setup, monkeypa
     assert caught.value.stopped == ["attempt-2"]
     assert runtime.items["attempt-1"]["running"]
     assert runtime.items["attempt-2"]["stopped"]
+
+
+def test_prelaunch_abandon_fences_delayed_launch_without_start(setup):
+    supervisor, runtime, clock = setup
+    lease = supervisor.acquire("controller")
+    abandoned = supervisor.abandon(plan(), controller="controller",
+                                   generation=lease["generation"], operation_id="launch-op")
+    assert abandoned["state"] == "stopped" and abandoned["cancel"] == 1
+    assert abandoned["runtime_id"] is None and runtime.starts == 0
+    assert supervisor.launch(plan(), controller="controller",
+                             generation=lease["generation"], operation_id="launch-op")["state"] == "stopped"
+    assert supervisor.reconcile("attempt-1", controller="controller", generation=lease["generation"])["state"] == "stopped"
+    assert runtime.starts == 0
+    with pytest.raises(Conflict):
+        supervisor.launch(plan(), controller="controller", generation=lease["generation"], operation_id="new-op")
+
+
+def test_abandon_after_launch_stops_same_runtime(setup):
+    supervisor, runtime, clock = setup
+    lease = supervisor.acquire("controller")
+    supervisor.launch(plan(), controller="controller", generation=lease["generation"], operation_id="launch-op")
+    stopped = supervisor.abandon(plan(), controller="controller",
+                                 generation=lease["generation"], operation_id="launch-op")
+    assert stopped["state"] == "stopped" and runtime.starts == 1 and runtime.stops == 1
+
+
+def test_restart_blocks_new_launch_until_exact_recovery(setup):
+    supervisor, runtime, clock = setup
+    original = supervisor.acquire("old", lease_seconds=5)
+    supervisor.launch(plan("attempt-1"), controller="old", generation=original["generation"], operation_id="launch-1")
+    clock[0] = 1006
+    restarted = Supervisor(supervisor.root, runtime, clock=lambda: clock[0])
+    assert restarted.recovery_required()
+    fresh = restarted.acquire("new")
+    with pytest.raises(RecoveryUncertain):
+        restarted.launch(plan("attempt-2"), controller="new", generation=fresh["generation"], operation_id="launch-2")
+    assert runtime.starts == 1
+    assert restarted.recover_startup() == ["attempt-1"]
+    assert not restarted.recovery_required()
+    restarted.launch(plan("attempt-2"), controller="new", generation=fresh["generation"], operation_id="launch-2")
+    assert runtime.starts == 2
+
+
+def test_stale_controller_cannot_mutate_reconciliation(setup):
+    supervisor, runtime, clock = setup
+    old = supervisor.acquire("old", lease_seconds=5)
+    supervisor.launch(plan(), controller="old", generation=old["generation"], operation_id="launch")
+    seq = supervisor.inspect("attempt-1")["observation_seq"]
+    clock[0] = 1006
+    new = supervisor.acquire("new")
+    with pytest.raises(Fenced):
+        supervisor.reconcile("attempt-1", controller="old", generation=old["generation"])
+    assert supervisor.inspect("attempt-1")["observation_seq"] == seq
+    assert supervisor.reconcile("attempt-1", controller="new", generation=new["generation"])["observation_seq"] == seq + 1
+
+
+def test_supervisor_schema_two_migrates_without_losing_identity(setup):
+    supervisor, runtime, clock = setup
+    identity = supervisor.acquire("controller")["supervisor_id"]
+    with sqlite3.connect(supervisor.path) as db:
+        db.execute("ALTER TABLE meta DROP COLUMN recovery_required")
+        db.execute("PRAGMA user_version=2")
+    reopened = Supervisor(supervisor.root, runtime, clock=lambda: clock[0])
+    assert reopened.acquire("controller")["supervisor_id"] == identity
+    with sqlite3.connect(supervisor.path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3

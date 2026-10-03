@@ -36,15 +36,18 @@ must verify containment, symlinks, regular files, byte limits, and hashes.
 `examples/coordinator_worker.py` and `examples/Dockerfile.coordinator-worker`
 show a tiny scratch-only worker. Build requires an explicitly reviewed,
 locally cached Python base image by immutable digest; the Dockerfile does not
-pull an image or add credentials. The worker assumes `/input/job.json` is a
+pull an image or add credentials. The worker assumes `/workspace/job.json` is
 host-prepared bounded input, `/scratch` is its writable area, and `/channel`
 contains only its event socket. The host controller must set arbitrary numeric
 non-root UID/GID, read-only root, network none, dropped capabilities, no new
 privileges, PID/CPU/memory/time limits, and no container Git. The current
-`DockerRuntime` adapter supports ordinary commands with scratch input. It does
-not yet mount the worker event channel, so this protocol-aware example is not
-yet a live Docker demonstration. The Docker mount/entrypoint path and supported
-pinned images still require opt-in runtime verification.
+`DockerRuntime` adapter supports ordinary commands and the fixed
+`protocol_example` worker with scratch input. It mounts only that attempt's
+event socket; inbox state stays in a separate host-only directory. Host
+collection requires positive process exit, readiness, a worker result, and
+valid declared scratch artifacts before execution success. Socket reconnect
+and fake-Docker tests pass; the Docker mount/entrypoint path and supported
+pinned images still require opt-in live runtime verification.
 
 Cancellation is supervisor-owned: it first sends typed cancel when a connected
 worker transport supports it or a termination signal, then performs bounded
