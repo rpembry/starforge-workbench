@@ -160,6 +160,9 @@ def test_readiness_observation_failure_stops_at_cap_not_job_deadline(setup):
         supervisor.tick()
     assert capped.value.stopped == ["attempt-1"]
     assert capped.value.uncertain == ["attempt-1"]
+    assert capped.value.readiness_uncertain == ["attempt-1"]
+    assert capped.value.runtime_uncertain == []
+    assert "exact stop confirmed" in str(capped.value)
     assert runtime.stops == 1 and supervisor.inspect("attempt-1")["state"] == "stopped"
 
 

@@ -100,9 +100,15 @@ class SupervisorService:
                 await asyncio.to_thread(self.supervisor.tick)
                 self.last_watchdog_error = recovery_error
             except WatchdogUncertain as exc:
-                state = {"stopped": exc.stopped, "uncertain": exc.uncertain}
+                state = {"stopped": exc.stopped, "runtime_uncertain": exc.runtime_uncertain,
+                         "readiness_uncertain": exc.readiness_uncertain}
                 if state != self.last_watchdog_error:
-                    print("supervisor watchdog: exact stop uncertain", file=sys.stderr)
+                    if exc.runtime_uncertain:
+                        print("supervisor watchdog: runtime observation or exact stop uncertain",
+                              file=sys.stderr)
+                    if exc.readiness_uncertain:
+                        print("supervisor watchdog: readiness observation uncertain",
+                              file=sys.stderr)
                 self.last_watchdog_error = state
             except Exception:
                 state = {"error": "unavailable"}

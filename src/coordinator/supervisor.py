@@ -32,7 +32,14 @@ class WatchdogUncertain(OwnershipUnknown):
     def __init__(self, stopped, uncertain):
         self.stopped = stopped
         self.uncertain = uncertain
-        super().__init__("watchdog could not confirm exact stop for some attempts")
+        confirmed = set(stopped)
+        self.readiness_uncertain = [item for item in uncertain if item in confirmed]
+        self.runtime_uncertain = [item for item in uncertain if item not in confirmed]
+        if self.runtime_uncertain:
+            message = "watchdog runtime observation or exact stop uncertain"
+        else:
+            message = "readiness observation uncertain; exact stop confirmed"
+        super().__init__(message)
 
 
 class RecoveryUncertain(OwnershipUnknown):
