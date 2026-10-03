@@ -35,7 +35,7 @@ class GnomeDesktop:
                             if process.stat().st_uid != os.getuid():
                                 continue
                             executable = process.joinpath('exe').resolve(strict=True)
-                            if executable.parent == Path(entry['executable']).parent and _pwa_cmdline_identity(
+                            if executable == Path(entry['executable']).resolve() and _pwa_cmdline_identity(
                                     process.joinpath('cmdline').read_bytes(), favorite) is True:
                                 return 'present', 'Exact browser profile and PWA process are running'
                         except FileNotFoundError:

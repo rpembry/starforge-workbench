@@ -2,7 +2,8 @@
 
 The **Favorite Apps** application-menu entry opens a manual checklist. It
 shows which configured favorites are already open, ready to open, or have an
-unknown running status. The user selects apps, reviews a preview, and confirms
+unknown running status. The user selects apps, reviews a preview, can go Back
+to change the selection, and confirms
 before opening them. Unknown status requires an explicit **Open anyway** choice
 because another window may already exist. An unresolved same-boot launch
 remains blocked after that choice. The entry never starts apps at login.
@@ -90,7 +91,7 @@ class, and matching `/proc` process identity. On GNOME Wayland, the optional
 read-only GNOME presence extension can provide native window presence. The
 client checks its D-Bus owner against GNOME Shell, allowlist membership, and
 sample freshness, then checks user processes before declaring absence. Browser
-PWAs remain unknown unless an exact same-profile, same-app browser process
+PWAs remain unknown unless an exact executable, same-profile, same-app browser process
 proves presence. Unknown does not authorize an automatic launch. Only synthetic
 tests have been exercised for this integration; live GNOME mapping and normal
 app launches remain separate QA steps.
