@@ -272,7 +272,9 @@ class Reconciler:
                     reason = 'catalog_unavailable'
                 if not reason and (not record or record.get('archived')):
                     reason = 'missing_or_archived_thread'
-                elif not reason and (record.get('id') != thread_id or record.get('cwd') != binding.get('source_cwd', binding['cwd']) or record.get('source') != 'cli'):
+                elif not reason and (record.get('id') != thread_id or
+                                     record.get('cwd') not in {binding.get('source_cwd', binding['cwd']), binding['cwd']} or
+                                     record.get('source') != 'cli'):
                     reason = 'stale_binding'
             if not reason and (self.state / 'uncertain' / (thread_id + '.json')).exists():
                 reason = 'unresolved_provider_outcome'

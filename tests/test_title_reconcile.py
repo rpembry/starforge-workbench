@@ -136,6 +136,14 @@ def test_missing_archived_and_blocked_provider(fixture):
     assert not cat.writes
 
 
+def test_historical_source_cwd_accepts_exact_current_configured_cwd(fixture):
+    service, cat, contexts, bindings, _ = fixture
+    bindings['alpha']['source_cwd'] = '/synthetic/historical'
+    assert service.preview(['alpha'])['rows'][0]['status'] == 'eligible'
+    cat.rows[A]['cwd'] = '/synthetic/unrelated'
+    assert service.preview(['alpha'])['rows'][0]['reason'] == 'stale_binding'
+
+
 def test_partial_failure_retry_and_uncertain_ack(fixture):
     service, cat, *_ = fixture
     plan = service.preview(['alpha', 'beta'])
