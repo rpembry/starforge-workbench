@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.starforge-favorite-presence"
+          path="/org/gnome/shell/extensions/starforge-favorite-presence/">
+    <key name="favorites" type="a(sss)">
+      <default>[]</default>
+      <summary>Private favorite keys, exact desktop IDs, and identity kinds</summary>
+      <description>Each tuple is (key, desktop ID, native/browser/pwa). Browser and PWA identities remain unknown.</description>
+    </key>
+  </schema>
+</schemalist>

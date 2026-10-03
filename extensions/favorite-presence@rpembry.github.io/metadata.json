@@ -1,0 +1,9 @@
+{
+  "uuid": "favorite-presence@rpembry.github.io",
+  "name": "Starforge Favorite Presence",
+  "description": "Read-only presence for explicitly configured favorite application keys",
+  "shell-version": ["50"],
+  "settings-schema": "org.gnome.shell.extensions.starforge-favorite-presence",
+  "session-modes": ["user"],
+  "url": "https://github.com/rpembry/starforge-workbench"
+}
