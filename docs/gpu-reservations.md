@@ -1,0 +1,24 @@
+# Host-local GPU reservations (isolated policy slice)
+
+This source-controlled slice addresses [#193](https://github.com/rpembry/starforge-workbench/issues/193). It provides a pure policy engine in `workbench.gpu_policy`. It does **not** install a service, change an existing job, contact a model server, or control a GPU. An installed scheduler remains responsible for starting the eventual host-local controller. Script observation in #189 and scheduled collection in #190 can report evidence, but neither is the authority to interrupt a process.
+
+## Controller adapter contract
+
+One host-local controller must be the sole writer of the reservation registry and the sole owner of its background process. An adapter should use an owner-private Unix socket (directory mode `0700`, socket mode `0600`) and operating-system peer identity. No TCP listener, client-supplied shell command, or arbitrary PID control belongs in this interface. Bind a client identity to an authenticated peer and a supervised client process or equivalent liveness proof; never accept an owner name or `alive` flag from request JSON as authority.
+
+1. `acquire(ttl)` creates a pending lease. Persist its token, bound owner, expiry and state privately before acknowledging the request. The adapter asks the controller to stop only its own process when `reconcile` returns `STOP`.
+2. The controller waits for process exit and confirms that its owned GPU context has disappeared. It then reobserves and reconciles. Only a `granted` lease may be reported as granted. Global GPU use or VRAM occupancy need not be zero: the desktop and unrelated applications can hold memory. Unknown process or owned-context state cannot produce a new grant.
+3. `renew(token, ttl)` and `release(token)` require the same authenticated owner. Persist changes before acknowledging them. Bound TTL to one hour per renewal. Clients must acquire before using the GPU and renew while work continues.
+4. On restart, restore the private registry before allowing a background start. Reconcile restored leases and process evidence before answering clients. A lost or unreadable registry is an unknown safety state requiring operator resolution, not an empty registry. Maintain atomic writes or a transactional store and a single-writer lock. Persist expiry as a UTC timestamp plus boot identity; after a clock jump or reboot, treat liveness as unknown until re-established.
+5. Expired leases disappear only with affirmative evidence that the supervised client is no longer running. True or unknown liveness retains a stale hold, preventing an unsafe automatic restart. Expiry alone does not kill a higher-priority job. A stuck client or missing evidence needs bounded operator-visible attention and explicit recovery; deleting registry data is not recovery.
+6. During an active hold, the controller must not restart its background process. An unexpected owned process or context revokes the reported grant and requests its stop. Clients must treat revoked/unknown state as unsafe and stop or defer their own GPU work.
+
+The pure core returns `START`, `STOP`, or `HOLD` as controller decisions. The adapter must not forward these as commands from clients. The core's `snapshot()` is private data because it includes bearer tokens; never put it in logs, Workbench projections, or public configuration. Expose only bounded status such as pending/granted/stale and an opaque lease ID.
+
+## Idle policy
+
+The default `IdlePolicy()` permits background work at **any hour** once the host's independent idle gate is open and no reservation blocks it. Optional local daily windows restrict that eligibility; a separately authorized local policy override can bypass windows but cannot bypass the idle gate or an active reservation. The controller supplies a timezone-aware local time. This is an eligibility check, not a new scheduler.
+
+## Private migration and rollback checklist
+
+For a selected host, inventory the current service, controller, child process tree, GPU context observation, lock, idle thresholds, restart delay, signal behavior and baseline start/stop evidence. Keep every private path, pool, account, credential and runtime setting outside Git. Add the adapter behind an opt-in local configuration and compare its **observations only** against the existing controller first. Test fake runtime races, crash recovery, ownership fencing, and previous controller behavior before a separate reviewed cutover. At cutover, stop the old authority cleanly, preserve its settings privately, enable exactly one new owner, confirm service health and rollback by restoring the prior controller. Do not enable the adapter merely to run tests or read this document.
