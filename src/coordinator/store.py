@@ -48,6 +48,7 @@ CREATE TABLE attempts(
  incarnation TEXT NOT NULL, phase TEXT NOT NULL, outcome TEXT, exit_code INTEGER,
  supervisor_id TEXT, runtime_id TEXT, observation_seq INTEGER NOT NULL DEFAULT 0,
  last_observed_at TEXT, stopped INTEGER NOT NULL DEFAULT 0,
+ no_start_reason TEXT,
  UNIQUE(job_id,ordinal));
 CREATE TABLE operations(
  id TEXT PRIMARY KEY, principal TEXT NOT NULL, key TEXT NOT NULL,
@@ -79,6 +80,13 @@ PRAGMA user_version=2;
 COMMIT;
 """
 
+MIGRATE_2_TO_3 = """
+BEGIN IMMEDIATE;
+ALTER TABLE attempts ADD COLUMN no_start_reason TEXT;
+PRAGMA user_version=3;
+COMMIT;
+"""
+
 
 class CoordinatorStore:
     def __init__(self, state_root: str | Path, policy: Policy):
@@ -102,10 +110,13 @@ class CoordinatorStore:
                 if version == 0:
                     # executescript is used only for first creation. Its explicit transaction
                     # keeps schema and version atomic even if creation is interrupted.
-                    db.executescript(SCHEMA.replace("COMMIT;", "PRAGMA user_version=2;\nCOMMIT;"))
+                    db.executescript(SCHEMA.replace("COMMIT;", "PRAGMA user_version=3;\nCOMMIT;"))
                 elif version == 1:
                     db.executescript(MIGRATE_1_TO_2)
-                elif version != 2:
+                    db.executescript(MIGRATE_2_TO_3)
+                elif version == 2:
+                    db.executescript(MIGRATE_2_TO_3)
+                elif version != 3:
                     raise Unavailable("unsupported coordinator schema")
                 check = db.execute("PRAGMA quick_check").fetchone()[0]
                 if check != "ok":
@@ -392,6 +403,45 @@ class CoordinatorStore:
             self._event(db, job_id, "observed", {"attempt_id": attempt_id, "phase": phase,
                                                   "stopped": stopped, "outcome": outcome,
                                                   "observation_gap": observation_seq > attempt["observation_seq"] + 1})
+            return self._view(db, job_id)
+
+    def record_no_start(self, job_id, *, attempt_id: str, incarnation: str,
+                        observation_seq: int, supervisor_id: str, reason: str):
+        """Apply distinct positive never-started evidence; no process exit is implied."""
+        if (reason not in {"workspace_setup_failed", "prelaunch_abandon"} or
+                type(observation_seq) is not int or observation_seq < 1 or
+                not isinstance(supervisor_id, str) or not 1 <= len(supervisor_id) <= 128):
+            raise ValueError("invalid no-start evidence")
+        with self._tx() as db:
+            job = self._view(db, job_id)
+            attempt = db.execute("SELECT * FROM attempts WHERE id=? AND job_id=?", (
+                attempt_id, job_id)).fetchone()
+            if not attempt or attempt["incarnation"] != incarnation or job["attempt_id"] != attempt_id:
+                raise Conflict("stale or mismatched attempt")
+            if (attempt["supervisor_id"] and attempt["supervisor_id"] != supervisor_id or
+                    attempt["runtime_id"] is not None or attempt["exit_code"] is not None):
+                raise Conflict("no-start evidence conflicts with runtime identity")
+            if attempt["no_start_reason"] is not None:
+                if (attempt["no_start_reason"] == reason and
+                        attempt["observation_seq"] == observation_seq and
+                        attempt["supervisor_id"] == supervisor_id):
+                    return job
+                raise Conflict("no-start evidence changed")
+            if (observation_seq <= attempt["observation_seq"] or attempt["stopped"] or
+                    attempt["phase"] not in {"launch_pending", "unknown"} or
+                    job["phase"] == "terminal"):
+                raise Conflict("stale no-start evidence")
+            outcome = "cancelled" if job["intent"] == "cancel" else "failed"
+            db.execute("UPDATE attempts SET phase='stopped',outcome=?,supervisor_id=?,"
+                       "observation_seq=?,last_observed_at=?,stopped=1,no_start_reason=? WHERE id=?", (
+                           outcome, supervisor_id, observation_seq, _stamp(), reason, attempt_id))
+            db.execute("UPDATE jobs SET phase='terminal',outcome=?,visibility='fresh',reason=? "
+                       "WHERE id=?", (outcome, reason, job_id))
+            db.execute("UPDATE operations SET outcome='confirmed' WHERE job_id=? "
+                       "AND kind IN ('admit','retry','cancel') AND outcome='pending'", (job_id,))
+            self._event(db, job_id, "no_start_observed", {
+                "attempt_id": attempt_id, "reason": reason, "outcome": outcome,
+                "observation_gap": observation_seq > attempt["observation_seq"] + 1})
             return self._view(db, job_id)
 
     def mark_visibility_unknown(self, job_id, *, expected_version: int):

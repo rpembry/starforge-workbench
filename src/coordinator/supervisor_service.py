@@ -21,7 +21,7 @@ from .supervisor import Conflict, Fenced, OwnershipUnknown, RecoveryUncertain, S
 MAX_REQUEST = 131_072
 CONTROL = {"acquire", "renew", "launch", "abandon", "reconcile", "cancel", "collect",
            "read_artifact", "inspect"}
-OWNER = {"owner_stop", "inspect", "takeover"}
+OWNER = {"owner_stop", "inspect", "takeover", "review", "archive"}
 
 
 def _private_file(path):
@@ -34,9 +34,11 @@ def _private_file(path):
 
 def load_service(state_root, config_file, *, command_fn=None):
     config = json.loads(_private_file(config_file).read_text())
-    if set(config) != {"profiles", "workspaces"}:
+    if set(config) not in ({"profiles", "workspaces"}, {"profiles", "workspaces", "host_budget"}):
         raise ValueError("unsupported supervisor configuration")
     arguments = dict(profiles=config["profiles"], workspaces=config["workspaces"])
+    if "host_budget" in config:
+        arguments["host_budget"] = config["host_budget"]
     if command_fn is not None:
         arguments["command_fn"] = command_fn
     runtime = DockerRuntime(state_root, **arguments)
@@ -100,9 +102,15 @@ class SupervisorService:
                 await asyncio.to_thread(self.supervisor.tick)
                 self.last_watchdog_error = recovery_error
             except WatchdogUncertain as exc:
-                state = {"stopped": exc.stopped, "uncertain": exc.uncertain}
+                state = {"stopped": exc.stopped, "runtime_uncertain": exc.runtime_uncertain,
+                         "readiness_uncertain": exc.readiness_uncertain}
                 if state != self.last_watchdog_error:
-                    print("supervisor watchdog: exact stop uncertain", file=sys.stderr)
+                    if exc.runtime_uncertain:
+                        print("supervisor watchdog: runtime observation or exact stop uncertain",
+                              file=sys.stderr)
+                    if exc.readiness_uncertain:
+                        print("supervisor watchdog: readiness observation uncertain",
+                              file=sys.stderr)
                 self.last_watchdog_error = state
             except Exception:
                 state = {"error": "unavailable"}
@@ -147,10 +155,11 @@ class SupervisorService:
             os.close(root_fd)
 
 
-def owner_stop(socket_path, attempt_id, operation_id):
-    """Emergency local client; response never guesses termination."""
-    wire = json.dumps({"method": "owner_stop", "args": {
-        "attempt_id": attempt_id, "operation_id": operation_id}}, separators=(",", ":")).encode() + b"\n"
+def owner_call(socket_path, method, args):
+    """Local owner client; the service returns confirmed evidence or an error."""
+    if method not in {"owner_stop", "review", "archive"}:
+        raise ValueError("unsupported owner command")
+    wire = json.dumps({"method": method, "args": args}, separators=(",", ":")).encode() + b"\n"
     path = Path(socket_path).absolute()
     directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -165,6 +174,12 @@ def owner_stop(socket_path, attempt_id, operation_id):
     return response
 
 
+def owner_stop(socket_path, attempt_id, operation_id):
+    """Emergency local stop; response never guesses termination."""
+    return owner_call(socket_path, "owner_stop", {
+        "attempt_id": attempt_id, "operation_id": operation_id})
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
@@ -175,13 +190,33 @@ def main():
     stop.add_argument("--socket", required=True)
     stop.add_argument("attempt_id")
     stop.add_argument("operation_id")
+    review = sub.add_parser("review")
+    review.add_argument("--socket", required=True)
+    review.add_argument("attempt_id")
+    archive = sub.add_parser("archive")
+    archive.add_argument("--socket", required=True)
+    archive.add_argument("attempt_id")
+    archive.add_argument("review_sha256")
+    archive.add_argument("operation_id")
     args = parser.parse_args()
     if args.action == "serve":
         asyncio.run(SupervisorService(load_service(args.state_root, args.config)).serve())
-    else:
+    elif args.action == "owner-stop":
         result = owner_stop(args.socket, args.attempt_id, args.operation_id)
         print(json.dumps(result, sort_keys=True))
         if not result.get("ok") or result["result"]["state"] != "stopped":
+            raise SystemExit(2)
+    elif args.action == "review":
+        result = owner_call(args.socket, "review", {"attempt_id": args.attempt_id})
+        print(json.dumps(result, sort_keys=True))
+        if not result.get("ok"):
+            raise SystemExit(2)
+    else:
+        result = owner_call(args.socket, "archive", {
+            "attempt_id": args.attempt_id, "review_sha256": args.review_sha256,
+            "operation_id": args.operation_id})
+        print(json.dumps(result, sort_keys=True))
+        if not result.get("ok") or result["result"]["phase"] != "complete":
             raise SystemExit(2)
 
 

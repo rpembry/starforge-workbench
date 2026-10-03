@@ -53,6 +53,8 @@ def test_owner_socket_is_narrow_and_independent(tmp_path):
             "controller": "other", "owner_takeover": True}})
     with pytest.raises(PermissionError):
         service.dispatch({"method": "launch", "args": {}}, owner=True)
+    with pytest.raises(PermissionError):
+        service.dispatch({"method": "archive", "args": {}}, owner=False)
     stopped = service.dispatch({"method": "owner_stop", "args": {
         "attempt_id": "a" * 32, "operation_id": "owner-1"}}, owner=True)
     assert stopped["state"] == "stopped"

@@ -1,4 +1,4 @@
-"""Host-owned scratch Docker adapter for the supervisor protocol.
+"""Host-owned scratch/Git Docker adapters for the supervisor protocol.
 
 This reuses the established runner's restricted Docker create/verify functions.
 It never adopts legacy receipts, pulls an image, or accepts host paths from a job.
@@ -6,6 +6,7 @@ It never adopts legacy receipts, pulls an image, or accepts host paths from a jo
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -13,7 +14,7 @@ import tempfile
 
 from starforge_workbench.docker_worker import (
     MAX_ARTIFACT, WorkerError, atomic, command, create_argv, docker_prefix,
-    environment_digest, private_directory, verify_container,
+    environment_digest, git, private_directory, verify_container, verify_worktree,
 )
 from starforge_workbench.execution import parse_profile
 
@@ -43,13 +44,14 @@ class DockerRuntime:
     """One local Docker host, with approved immutable refs supplied by operator.
 
     `profiles` maps names to already reviewed Docker profile mappings.
-    `workspaces` maps names to the literal `scratch`; other workspace adapters
-    are rejected until separately implemented. `worker_types` is a set of
+    `workspaces` maps names to `scratch` or an operator-approved Git repository
+    and full commit. `worker_types` is a set of
     registered host adapters: ordinary `command` and fixed `protocol_example`.
     """
 
     def __init__(self, state_root, *, profiles: dict, workspaces: dict,
-                 worker_types=frozenset({"command", "protocol_example"}), command_fn=command):
+                 worker_types=frozenset({"command", "protocol_example"}),
+                 host_budget=None, command_fn=command):
         self.root = private_directory(state_root)
         self.profiles = {}
         for name, raw in profiles.items():
@@ -60,6 +62,18 @@ class DockerRuntime:
                 raise ValueError("Docker profile UID/GID must match non-root host caller")
             self.profiles[name] = profile
         self.workspaces = dict(workspaces)
+        if host_budget is None:
+            # Safe single-allocation default until the operator assigns an
+            # explicit slice of host capacity to this supervisor.
+            host_budget = {"max_active": 1,
+                           "cpu_millis": max((math.ceil(p.cpus * 1000) for p in self.profiles.values()), default=0),
+                           "memory_mb": max((p.memory_mb for p in self.profiles.values()), default=0)}
+        if (not isinstance(host_budget, dict) or set(host_budget) !=
+                {"max_active", "cpu_millis", "memory_mb"} or
+                any(type(host_budget[key]) is not int or host_budget[key] < 0 for key in host_budget) or
+                host_budget["max_active"] < 1):
+            raise ValueError("invalid host reservation budget")
+        self.host_budget = dict(host_budget)
         self.worker_types = frozenset(worker_types)
         self.command = command_fn
         self.docker = docker_prefix(False)  # no implicit sudo or remote context
@@ -68,8 +82,17 @@ class DockerRuntime:
     def validate(self, plan):
         if plan["profile_ref"] not in self.profiles:
             raise ValueError("unapproved Docker profile")
-        if self.workspaces.get(plan["workspace_ref"]) != "scratch":
-            raise ValueError("unsupported or unapproved workspace adapter")
+        binding = self._workspace_binding(plan["workspace_ref"])
+        if binding["kind"] == "git_worktree":
+            self._verify_git_source(binding)
+        request = self.reservation(plan)
+        if (request["cpu_millis"] > self.host_budget["cpu_millis"] or
+                request["memory_mb"] > self.host_budget["memory_mb"]):
+            raise WorkerError("approved profile exceeds supervisor host reservation")
+        capacity = json.loads(self.command(self.docker + ["info", "--format", "{{json .}}"] ))
+        if (self.host_budget["cpu_millis"] > capacity["NCPU"] * 1000 or
+                self.host_budget["memory_mb"] * 1024 * 1024 > capacity["MemTotal"]):
+            raise WorkerError("supervisor reservation exceeds daemon host capacity")
         kind = plan["worker_type"]
         if kind not in {"command", "protocol_example"} or kind not in self.worker_types:
             raise ValueError("unregistered worker adapter")
@@ -104,6 +127,40 @@ class DockerRuntime:
         if "input" in payload and (not isinstance(payload["input"], dict) or
                                    len(_json(payload["input"]).encode()) > 65_536):
             raise ValueError("invalid bounded input")
+
+    def reservation(self, plan):
+        profile = self.profiles[plan["profile_ref"]]
+        return {"cpu_millis": math.ceil(profile.cpus * 1000),
+                "memory_mb": profile.memory_mb}
+
+    def _workspace_binding(self, reference):
+        binding = self.workspaces.get(reference)
+        if binding == "scratch":
+            return {"kind": "scratch"}
+        if (not isinstance(binding, dict) or set(binding) != {"kind", "repository", "revision"} or
+                binding["kind"] != "git_worktree" or
+                not isinstance(binding["repository"], str) or
+                not isinstance(binding["revision"], str) or
+                not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", binding["revision"])):
+            raise ValueError("unsupported or unapproved workspace adapter")
+        repository = Path(binding["repository"])
+        if (not repository.is_absolute() or repository.is_symlink() or
+                not repository.is_dir() or repository.resolve() != repository or
+                repository == self.root or repository in self.root.parents or self.root in repository.parents):
+            raise ValueError("Git workspace repository must be an isolated real path")
+        return {"kind": "git_worktree", "repository": str(repository),
+                "revision": binding["revision"]}
+
+    @staticmethod
+    def _verify_git_source(binding):
+        repo = binding["repository"]
+        resolved = git(repo, "rev-parse", "--verify", "--end-of-options",
+                       binding["revision"] + "^{commit}").decode().strip()
+        if resolved != binding["revision"]:
+            raise WorkerError("approved Git revision changed or is not a full commit")
+        config = git(repo, "config", "--name-only", "--list").decode().splitlines()
+        if any(key.startswith("filter.") for key in config):
+            raise WorkerError("repositories with content filters are unsupported")
 
     def _receipt_path(self, attempt_id):
         return self.root / attempt_id / "runtime.json"
@@ -150,6 +207,7 @@ class DockerRuntime:
 
     def launch(self, plan):
         self.validate(plan)
+        binding = self._workspace_binding(plan["workspace_ref"])
         profile = self.profiles[plan["profile_ref"]]
         capacity = json.loads(self.command(self.docker + ["info", "--format", "{{json .}}"] ))
         if profile.cpus > capacity["NCPU"] or profile.memory_mb * 1024 * 1024 > capacity["MemTotal"]:
@@ -161,13 +219,9 @@ class DockerRuntime:
         attempt = self.root / plan["attempt_id"]
         attempt.mkdir(mode=0o700)  # existing attempt is reconciliation, never a new launch
         workspace = attempt / "worktree"  # reuse existing restricted mount verifier
-        workspace.mkdir(mode=0o700)
         (attempt / "scratch").mkdir(mode=0o700)
         (attempt / "git-mask").write_text("No container Git administration.\n")
         (attempt / "git-mask").chmod(0o444)
-        if "input" in plan["payload"]:
-            (workspace / "job.json").write_text(_json(plan["payload"]["input"]) + "\n")
-            (workspace / "job.json").chmod(0o444)
         protocol = plan["worker_type"] == "protocol_example"
         if protocol:
             self.channels[plan["attempt_id"]] = WorkerChannel(
@@ -185,7 +239,24 @@ class DockerRuntime:
                    "container_id": None, "token": os.urandom(16).hex(),
                    "image_id": image["Id"], "environment_sha256": env_hash,
                    "argv": worker_argv, "artifact_paths": plan["payload"].get("artifacts", []),
-                   "phase": "create_pending"}
+                   "workspace_kind": binding["kind"],
+                   "phase": "workspace_pending"}
+        if binding["kind"] == "git_worktree":
+            receipt.update(repository=binding["repository"], revision=binding["revision"])
+        self._write(receipt)  # durable receipt before host worktree allocation
+        if binding["kind"] == "git_worktree":
+            git(binding["repository"], "worktree", "add", "--detach", str(workspace),
+                binding["revision"])
+            verify_worktree(receipt)
+        else:
+            workspace.mkdir(mode=0o700)
+        if "input" in plan["payload"]:
+            fd = os.open(workspace / "job.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o400)
+            with os.fdopen(fd, "w") as stream:
+                stream.write(_json(plan["payload"]["input"]) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        receipt["phase"] = "create_pending"
         self._write(receipt)  # durable ownership token before Docker create
         argv = create_argv(self.docker, receipt, profile)
         argv[argv.index("--entrypoint"):argv.index("--entrypoint")] = [
@@ -213,6 +284,13 @@ class DockerRuntime:
             raise
 
     def inspect(self, plan, runtime_id):
+        observed = self.inspect_optional(plan, runtime_id)
+        if observed is None:
+            raise WorkerError("owned container absent without exit evidence")
+        return observed
+
+    def inspect_optional(self, plan, runtime_id):
+        """Exact ownership check, returning None only for verified absence."""
         receipt = self._read(plan["attempt_id"])
         if (receipt["plan_hash"] != hashlib.sha256(_json(plan).encode()).hexdigest() or
                 receipt["incarnation"] != plan["incarnation"] or
@@ -220,12 +298,51 @@ class DockerRuntime:
             raise WorkerError("runtime plan or incarnation mismatch")
         item = self._inspect(receipt)
         if item is None:
-            raise WorkerError("owned container absent without exit evidence")
+            return None
         status = item["State"]["Status"]
         return {"identity_ok": True, "running": bool(item["State"]["Running"]),
                 "stopped": status in {"exited", "dead", "created"},
                 "exit_code": None if status == "created" else item["State"]["ExitCode"],
                 "runtime_id": item["Id"]}
+
+    def inspect_no_start(self, plan):
+        """Positive precreate proof; an unknown create outcome never qualifies."""
+        receipt = self._read(plan["attempt_id"])
+        if (receipt["plan_hash"] != hashlib.sha256(_json(plan).encode()).hexdigest() or
+                receipt["incarnation"] != plan["incarnation"] or
+                receipt["job_id"] != plan["job_id"]):
+            raise WorkerError("runtime plan or incarnation mismatch")
+        if receipt["phase"] != "workspace_pending" or receipt["container_id"] is not None:
+            return False
+        return self._inspect(receipt) is None
+
+    def review(self, plan, runtime_id):
+        from .disposition import review
+        return review(self, plan, runtime_id)
+
+    def archive(self, plan, runtime_id, review_sha256, operation_id):
+        from .disposition import archive
+        return archive(self, plan, runtime_id, review_sha256, operation_id)
+
+    def inspect_archived(self, plan, runtime_id):
+        """Positive disposed-resource proof for repeated supervisor reconcile."""
+        from starforge_workbench.worker_disposition import read_private
+        receipt = self._read(plan["attempt_id"])
+        if (receipt["plan_hash"] != hashlib.sha256(_json(plan).encode()).hexdigest() or
+                receipt["incarnation"] != plan["incarnation"] or
+                receipt["job_id"] != plan["job_id"] or
+                receipt["container_id"] != runtime_id):
+            raise WorkerError("archived attempt identity mismatch")
+        path = Path(receipt["attempt_path"]) / "disposition.json"
+        if not path.exists():
+            return False
+        disposition = read_private(path)
+        if disposition.get("phase") != "complete" or disposition.get("runtime_id") != runtime_id:
+            return False
+        self.archive(plan, runtime_id, disposition["review_sha256"], disposition["operation_id"])
+        if self._inspect(receipt) is not None:
+            raise WorkerError("archived container reappeared")
+        return True
 
     def stop(self, plan, runtime_id):
         observed = self.inspect(plan, runtime_id)
@@ -304,6 +421,25 @@ class DockerRuntime:
                  if protocol else None)
         declarations = inbox.state["artifacts"] if inbox else receipt["artifact_paths"]
         source = attempt / ("scratch" if protocol else "worktree")
+        if receipt.get("workspace_kind") == "git_worktree":
+            verify_worktree(receipt)
+            changed = git(receipt["worktree"], "diff", "--name-only", "-z", "HEAD").split(b"\0")
+            total_changed = 0
+            for name in changed:
+                if not name:
+                    continue
+                path = Path(receipt["worktree"]) / os.fsdecode(name)
+                if path.is_symlink() or not path.exists():
+                    continue
+                if not path.is_file():
+                    raise WorkerError("special changed file; retain worktree for review")
+                total_changed += path.stat().st_size
+                if total_changed > MAX_ARTIFACT:
+                    raise WorkerError("changed Git files exceed export limit")
+            save("changes.patch", git(receipt["worktree"], "diff", "--binary",
+                                      "--no-ext-diff", "--no-textconv", "HEAD"))
+            save("status.txt", git(receipt["worktree"], "status", "--porcelain",
+                                   "--untracked-files=all", "--ignored"))
         total = 0
         for index, name in enumerate(declarations):
             path = source / name
@@ -338,7 +474,7 @@ class DockerRuntime:
         if manifest.get("attempt_id") != plan["attempt_id"]:
             raise WorkerError("artifact manifest identity mismatch")
         entry = next((item for item in manifest.get("files", []) if item.get("path") == name), None)
-        if entry is None or not re.fullmatch(r"(?:output\.txt|exit\.json|file-[0-9]{1,2})", name):
+        if entry is None or not re.fullmatch(r"(?:output\.txt|exit\.json|changes\.patch|status\.txt|file-[0-9]{1,2})", name):
             raise WorkerError("undeclared exported artifact")
         path = root / name
         if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_ARTIFACT:

@@ -15,13 +15,46 @@ does not install a service. Example private config:
 
 Create the state directory and config outside Git with mode 0700/0600 and set
 the profile UID/GID to the actual non-root service account. Then run
-`coord-supervisor serve --state-root DIR --config FILE`. Its private Unix
+`coord-supervisor serve --state-root DIR --config FILE`. An approved Git
+workspace entry uses
+`"reviewed_repo":{"kind":"git_worktree","repository":"/absolute/repository","revision":"<full-commit-id>"}`
+in `workspaces`; the service state directory must be outside that repository.
+The repository and revision are operator configuration, not job input.
+Optional `host_budget` has exact integer keys `max_active`, `cpu_millis`, and
+`memory_mb`. Without it, the supervisor reserves room for one allocation.
+For example, `{"max_active":2,"cpu_millis":2000,"memory_mb":128}` permits
+two reviewed 1-CPU/64-MiB profiles only when the daemon reports at least that
+capacity. The supervisor sums resolved profile reservations for every
+non-stopped attempt under its launch lock; a full budget fails before a new
+intent or Docker create. A stopped attempt releases its reservation. The
+operator must choose a slice that leaves capacity for other local workloads;
+Docker host capacity alone does not measure their current resource use.
+Each allocation's resolved reservation is persisted with its launch intent.
+Changing or revoking a profile cannot shrink an existing worker's accounting.
+An older active journal row without a provable reservation blocks new starts
+until it is positively stopped and reconciled.
+The service's private Unix
 `control.sock` accepts fenced acquire/renew/launch/reconcile/cancel/inspect;
-`owner.sock` accepts only owner stop, inspect, and explicit takeover. The
-control socket rejects `owner_takeover`. `coord-supervisor owner-stop --socket
+`owner.sock` accepts owner stop, inspect, explicit takeover, `review`, and
+`archive`. Review and archive require committed stopped
+runtime and artifact evidence. Run `coord-supervisor review --socket
+DIR/owner.sock ATTEMPT_ID`, inspect the returned private review manifest, then
+run `coord-supervisor archive --socket DIR/owner.sock ATTEMPT_ID REVIEW_SHA256
+OPERATION_ID` to retain exact reviewed bytes under the attempt's `archive/`.
+The archive operation durably records intent before exact stopped-container
+removal and file renames. It keeps `artifacts/` at its evidence path, retains
+dirty Git work and scratch bytes, and removes only the old linked-worktree
+administrative entry using non-force Git removal after the archive is fsynced
+and rechecked. A changed file, unsafe link, ownership mismatch, or uncertain
+runtime leaves the allocation retained for review. The same archive operation
+ID is replayable after a lost response. The control socket rejects
+`owner_takeover`. `coord-supervisor owner-stop --socket
 DIR/owner.sock ATTEMPT_ID OPERATION_ID` exits successfully only after confirmed
 stop. Both sockets require the same local UID; this first profile trusts that
 Unix account. Keep the owner socket path out of ordinary client configuration.
+Repeated reconciliation after a committed exact archive preserves the stopped
+state after the container is removed; it rechecks the private disposition,
+archived content, and exact absence before accepting that terminal evidence.
 The tick loop runs every 250 ms independently of coordinator availability and
 reports changed uncertainty without unbounded repeated error lines. The
 service refuses existing socket paths rather than replacing a possibly live
@@ -29,7 +62,8 @@ owner, and it removes only sockets it created on clean shutdown.
 The control socket also provides `abandon(plan, controller, generation,
 operation_id)` for a durable no-start tombstone, fenced
 `collect(attempt_id, controller, generation)` for
-committed process/result/artifact evidence, and `read_artifact` for bounded
+committed process/result/artifact evidence or distinct positive no-start evidence,
+and `read_artifact` for bounded
 hash-verified chunks of exported files such as `output.txt` logs. On restart,
 new launches remain blocked until every existing attempt has exact, positive
 runtime ownership evidence. The owner socket remains available while recovery
@@ -80,8 +114,26 @@ budget is refreshed by a coordinator reconnection. A backward clock step
 blocks starts and causes the watchdog to stop owned attempts conservatively.
 
 The runtime adapter contract is in the class docstring. `DockerRuntime` now
-implements approved **scratch plus ordinary command** and fixed
-`protocol_example` paths. It resolves
+implements approved scratch or Git-worktree workspaces for ordinary commands
+and the fixed `protocol_example` worker. The Git workspace is bound by private
+operator configuration to an absolute repository and full commit, never by a
+job-supplied host path or branch. It refuses configured Git content filters,
+records a receipt before linked-worktree allocation, verifies the linked
+worktree and HEAD, and retains work plus bounded `changes.patch` and
+`status.txt` exports for review. A partial worktree setup remains retained.
+Only a matching private `workspace_pending` receipt, written before Docker
+create, plus an exact empty container lookup proves no start. The supervisor
+then records `no_start_reason=workspace_setup_failed` and collection returns
+`no_start=true`, null runtime/exit, and no artifact manifest. A durable
+`prelaunch_abandon` tombstone has the same distinct evidence form. Coordinator
+dispatch must call `CoordinatorStore.record_no_start` with the exact attempt,
+incarnation, supervisor, observation sequence, and reason; it must not feed
+that result to normal exit observation or artifact handling. That atomic
+store transition records a failed outcome, or cancelled when cancel intent is
+already sticky, and permits explicit retry as a new attempt. An absent or
+mismatched receipt, `create_pending` or later phase, Docker outage, or
+ambiguous lookup remains unknown and cannot be retried. This proof does not
+archive the retained partial worktree. The adapter resolves
 symbolic profile/workspace references from administrator configuration, uses
 the existing runner's digest-pinned image/environment and restricted create
 verification, and checks exact labels/token/ID, plan hash, and incarnation on
@@ -92,9 +144,9 @@ review. No legacy receipt is adopted automatically. The existing Git-worktree
 runner remains a separate compatibility path, unchanged by this slice.
 
 This slice contains an independently runnable local service process,
-scratch command and protocol-example adapters, and fake-Docker tests. The
-Git-worktree coordinator adapter, live Docker proof, and end-to-end #175
-dispatch integration remain gated. Host death suspends enforcement until the
+scratch and Git workspace adapters, explicit review/archive disposition, and
+fake-Docker tests. Live Docker proof and end-to-end #175 dispatch
+integration remain gated. Host death suspends enforcement until the
 supervisor restarts and reconciles. The owner and control sockets both trust
 the same local UID; they are separate operation surfaces, not isolation from
 a malicious process running under that UID. No service installation or live
@@ -102,7 +154,7 @@ Docker claim is made by these tests.
 
 Operator evidence remains open for a reviewed, digest-pinned protocol image,
 live two-worker admission and runtime measurements, independent resource
-reservation against actual host load, scratch review/archive disposition, and
-a fault matrix on a host with ordinary Docker access. The legacy Git runner is
-not a coordinator workspace adapter. Remote access and Starkeep testing belong
+reservation against actual host load, and
+a fault matrix on a host with ordinary Docker access. The legacy Git runner
+remains untouched. Remote access and Starkeep testing belong
 to a separately approved later gate.
