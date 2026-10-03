@@ -6,6 +6,8 @@ separate reviewed contract; a stopped noncancelled attempt stays finalizing.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 from pathlib import Path
@@ -25,7 +27,8 @@ class ControlError(RuntimeError):
 class SupervisorControl:
     """Bounded client for supervisor_service.py's owner-protected control.sock."""
 
-    _allowed = frozenset({"acquire", "renew", "launch", "reconcile", "cancel", "inspect"})
+    _allowed = frozenset({"acquire", "renew", "launch", "abandon", "reconcile",
+                          "cancel", "collect", "read_artifact", "inspect"})
 
     def __init__(self, socket_path: str | Path, *, timeout: float = 5):
         if not 0 < timeout <= 30:
@@ -82,6 +85,7 @@ class Dispatcher:
         self.clock = clock
         self.lease: dict | None = None
         self.renew_at = 0.0
+        self.last_error: str | None = None
 
     def _lease(self):
         if self.lease is None:
@@ -119,17 +123,39 @@ class Dispatcher:
         if state not in {"running", "stopped"} or item["observation_seq"] < 1:
             return job
         attempt = next(a for a in job["attempts"] if a["id"] == item["id"])
-        if (job["visibility"] == "fresh" and
-                attempt["phase"] == state and
-                (state != "stopped" or job["phase"] in {"finalizing", "terminal"})):
+        if (job["visibility"] == "fresh" and attempt["phase"] == state and
+                job["phase"] == "terminal"):
+            return job
+        evidence = None
+        if state == "stopped" and item["runtime_id"] and job["intent"] != "cancel":
+            try:
+                evidence = self.control.call("collect", attempt_id=item["id"],
+                                             controller=self.controller,
+                                             generation=self.lease["generation"])
+            except ControlError as exc:
+                if exc.code not in {"OwnershipUnknown", "RecoveryUncertain"}:
+                    raise
+                # Positive stop is known; result remains unverified.
+        if evidence is not None:
+            if (evidence.get("job_id") != job["id"] or
+                    evidence.get("attempt_id") != item["id"] or
+                    evidence.get("incarnation") != item["incarnation"] or
+                    evidence.get("runtime_id") != item["runtime_id"] or
+                    evidence.get("supervisor_id") != self.lease["supervisor_id"] or
+                    evidence.get("phase") != "stopped" or evidence.get("stopped") is not True):
+                raise Conflict("supervisor evidence identity mismatch")
+        if (job["visibility"] == "fresh" and attempt["phase"] == state and
+                (state == "running" or evidence is None and job["phase"] == "finalizing")):
             return job
         return self.store.observe(job["id"], attempt_id=item["id"],
                                   incarnation=item["incarnation"],
-                                  observation_seq=item["observation_seq"],
+                                  observation_seq=(evidence or item)["observation_seq"],
                                   phase="stopped" if state == "stopped" else "running",
                                   supervisor_id=self.lease["supervisor_id"],
                                   runtime_id=item["runtime_id"],
-                                  stopped=state == "stopped")
+                                  stopped=state == "stopped",
+                                  exit_code=evidence["exit_code"] if evidence else None,
+                                  result_ok=evidence["result_ok"] if evidence else None)
 
     def _command(self, op: dict):
         job = self.store.get(op["job_id"])
@@ -138,9 +164,13 @@ class Dispatcher:
             return
         if op["kind"] in {"admit", "retry"}:
             if job["intent"] == "cancel":
-                # A cancel committed before supervisor journal creation must
-                # never be transformed into a new runtime launch.
-                self.store.set_command_status(op["id"], "unknown")
+                # Canonical launch op ID creates a durable no-start tombstone or
+                # stops the exact existing runtime. Delayed launch cannot win.
+                item = self.control.call("abandon", plan=self._plan(job),
+                                         controller=self.controller,
+                                         generation=self.lease["generation"],
+                                         operation_id=op["id"])
+                self._observe(job, item)
                 return
             try:
                 item = self.control.call("inspect", attempt_id=attempt_id)
@@ -153,8 +183,31 @@ class Dispatcher:
                                          operation_id=op["id"])
             if not self._owned(job, item):
                 raise Conflict("supervisor attempt identity mismatch")
-            item = self.control.call("reconcile", attempt_id=attempt_id)
+            item = self.control.call("reconcile", attempt_id=attempt_id,
+                                     controller=self.controller,
+                                     generation=self.lease["generation"])
             self._observe(job, item)
+        elif op["kind"] == "reattach":
+            original = json.loads(op["response"])["attempt_id"]
+            if original != attempt_id:
+                # A later explicit retry already proved the predecessor stopped.
+                # Never reattach this old command to the new attempt.
+                self.store.set_command_status(op["id"], "confirmed")
+                return
+            try:
+                item = self.control.call("inspect", attempt_id=attempt_id)
+            except ControlError as exc:
+                if exc.code == "KeyError":
+                    self.store.set_command_status(op["id"], "unknown")
+                    return
+                raise
+            if not self._owned(job, item):
+                raise Conflict("supervisor attempt identity mismatch")
+            item = self.control.call("reconcile", attempt_id=attempt_id,
+                                     controller=self.controller,
+                                     generation=self.lease["generation"])
+            self._observe(job, item)
+            self.store.set_command_status(op["id"], "confirmed")
         elif op["kind"] == "cancel":
             try:
                 item = self.control.call("inspect", attempt_id=attempt_id)
@@ -165,6 +218,9 @@ class Dispatcher:
                 raise
             if not self._owned(job, item):
                 raise Conflict("supervisor attempt identity mismatch")
+            if item["state"] == "stopped":
+                self._observe(job, item)
+                return
             item = self.control.call("cancel", attempt_id=attempt_id,
                                      controller=self.controller,
                                      generation=self.lease["generation"],
@@ -172,7 +228,9 @@ class Dispatcher:
             if item["state"] in {"launch_pending", "launch_calling", "unknown"}:
                 self.store.set_command_status(op["id"], "unknown")
                 return
-            item = self.control.call("reconcile", attempt_id=attempt_id)
+            item = self.control.call("reconcile", attempt_id=attempt_id,
+                                     controller=self.controller,
+                                     generation=self.lease["generation"])
             self._observe(job, item)
         else:
             raise Conflict("unsupported pending coordinator command")
@@ -212,7 +270,9 @@ class Dispatcher:
             if job["phase"] not in {"active", "finalizing"} or not job["attempt_id"]:
                 continue
             try:
-                item = self.control.call("reconcile", attempt_id=job["attempt_id"])
+                item = self.control.call("reconcile", attempt_id=job["attempt_id"],
+                                         controller=self.controller,
+                                         generation=self.lease["generation"])
             except ControlError as exc:
                 if exc.code == "KeyError":
                     continue  # prelaunch intent; never invent runtime evidence
@@ -225,3 +285,103 @@ class Dispatcher:
         admitted = self.store.admit_next(principal="coordinator-dispatch",
                                          key=uuid.uuid4().hex)
         return {"processed": processed, "admitted": admitted["id"] if admitted else None}
+
+
+class SupervisorEvidence:
+    """Post-stop evidence adapter for the API; never reads Docker or journals."""
+
+    def __init__(self, dispatcher: Dispatcher):
+        self.dispatcher = dispatcher
+
+    def health(self) -> dict:
+        return {"state": "unavailable" if self.dispatcher.last_error else
+                "ready" if self.dispatcher.lease else "unknown"}
+
+    def capabilities(self) -> dict:
+        return {"worker_types": sorted(self.dispatcher.store.policy.worker_types),
+                "reattach": True, "post_stop_logs": True, "post_stop_artifacts": True,
+                "live_logs": False, "checkpoint_resume": False}
+
+    def _call(self, method: str, **kwargs):
+        try:
+            return self.dispatcher.control.call(method, **kwargs)
+        except ControlError as exc:
+            if exc.code == "KeyError":
+                raise KeyError(method) from exc
+            if exc.code == "ValueError":
+                raise ValueError("invalid supervisor evidence request") from exc
+            raise Unavailable("supervisor evidence unavailable") from exc
+
+    def _evidence(self, job: dict, attempt_id: str) -> dict:
+        try:
+            self.dispatcher._lease()
+        except ControlError as exc:
+            raise Unavailable("supervisor control unavailable") from exc
+        attempt = next((a for a in job["attempts"] if a["id"] == attempt_id), None)
+        if attempt is None:
+            raise KeyError(attempt_id)
+        if not attempt["stopped"]:
+            raise Unavailable("post-stop evidence unavailable while attempt is active")
+        if not attempt["runtime_id"]:
+            return {"artifact_manifest": {"files": [], "execution_ok": None},
+                    "attempt_id": attempt_id, "job_id": job["id"],
+                    "incarnation": attempt["incarnation"], "runtime_id": None}
+        data = self._call("collect", attempt_id=attempt_id,
+                                            controller=self.dispatcher.controller,
+                                            generation=self.dispatcher.lease["generation"])
+        if (data.get("job_id") != job["id"] or data.get("attempt_id") != attempt_id or
+                data.get("incarnation") != attempt["incarnation"] or
+                data.get("runtime_id") != attempt["runtime_id"] or
+                data.get("supervisor_id") != attempt["supervisor_id"]):
+            raise Conflict("supervisor artifact evidence identity mismatch")
+        return data
+
+    def artifacts(self, job: dict, attempt_id: str) -> dict:
+        evidence = self._evidence(job, attempt_id)
+        return {"job_id": job["id"], "attempt_id": attempt_id,
+                "items": evidence["artifact_manifest"]["files"],
+                "execution_ok": evidence["artifact_manifest"]["execution_ok"]}
+
+    def artifact(self, job: dict, attempt_id: str, artifact_id: str,
+                 offset: int, limit: int) -> dict:
+        evidence = self._evidence(job, attempt_id)
+        entry = next((item for item in evidence["artifact_manifest"]["files"]
+                      if item["path"] == artifact_id), None)
+        if entry is None:
+            raise KeyError(artifact_id)
+        chunk = self._call("read_artifact", attempt_id=attempt_id,
+                           name=artifact_id, offset=offset, limit=limit)
+        try:
+            data = base64.b64decode(chunk["data_base64"], validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise Unavailable("supervisor artifact chunk invalid") from exc
+        if (chunk["attempt_id"] != attempt_id or chunk["name"] != artifact_id or
+                chunk["offset"] != offset or chunk["next_offset"] != offset + len(data) or
+                chunk["total"] != entry["bytes"] or chunk["sha256"] != entry["sha256"] or
+                len(data) > limit):
+            raise Conflict("supervisor artifact chunk identity mismatch")
+        return chunk
+
+    def logs(self, job: dict, attempt_id: str, cursor: int, limit: int) -> dict:
+        evidence = self._evidence(job, attempt_id)
+        entry = next((item for item in evidence["artifact_manifest"]["files"]
+                      if item["path"] == "output.txt"), None)
+        if entry is None:
+            raise Unavailable("bounded log export unavailable")
+        chunk = self._call("read_artifact", attempt_id=attempt_id,
+                                             name="output.txt", offset=cursor, limit=limit)
+        try:
+            data = base64.b64decode(chunk["data_base64"], validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise Unavailable("supervisor log chunk invalid") from exc
+        if (chunk["attempt_id"] != attempt_id or chunk["name"] != "output.txt" or
+                chunk["sha256"] != entry["sha256"] or chunk["total"] != entry["bytes"] or
+                chunk["offset"] != cursor or chunk["next_offset"] != cursor + len(data) or
+                len(data) > limit):
+            raise Conflict("supervisor log evidence identity mismatch")
+        return {"job_id": job["id"], "attempt_id": attempt_id,
+                "cursor": cursor, "next_cursor": min(chunk["next_offset"], chunk["total"]),
+                "floor": 0, "gap": cursor > chunk["total"], "total": chunk["total"],
+                "sha256": chunk["sha256"], "data_base64": chunk["data_base64"],
+                "text": data.decode("utf-8", errors="replace"),
+                "source_window": "last_1000_lines", "possible_prefix_gap": True}

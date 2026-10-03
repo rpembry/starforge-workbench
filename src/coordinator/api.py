@@ -13,13 +13,13 @@ from . import Conflict, CoordinatorStore, JobSpec, Unavailable
 class EvidenceAdapter(Protocol):
     """Implement against the reviewed supervisor/worker contract, never Docker directly."""
 
-    async def health(self) -> dict[str, Any]: ...
-    async def capabilities(self) -> dict[str, Any]: ...
+    def health(self) -> dict[str, Any]: ...
+    def capabilities(self) -> dict[str, Any]: ...
     def reconcile(self, job: dict[str, Any], operation_key: str) -> dict[str, Any]: ...
-    async def logs(self, job: dict[str, Any], attempt_id: str, cursor: int, limit: int) -> dict[str, Any]: ...
-    async def artifacts(self, job: dict[str, Any], attempt_id: str) -> dict[str, Any]: ...
-    async def artifact(self, job: dict[str, Any], attempt_id: str, artifact_id: str) -> dict[str, Any]: ...
-
+    def logs(self, job: dict[str, Any], attempt_id: str, cursor: int, limit: int) -> dict[str, Any]: ...
+    def artifacts(self, job: dict[str, Any], attempt_id: str) -> dict[str, Any]: ...
+    def artifact(self, job: dict[str, Any], attempt_id: str, artifact_id: str,
+                 offset: int, limit: int) -> dict[str, Any]: ...
 
 class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -80,13 +80,16 @@ def create_app(store: CoordinatorStore, *, adapter: EvidenceAdapter | None = Non
         except Unavailable:
             store_state = "unavailable"
         return {"api": "ready", "store": store_state, "supervisor": adapter.health() if adapter else {"state": "unavailable"},
-                "runtime_visibility": "unknown" if adapter is None else "adapter_reported"}
+                "runtime_visibility": "unknown"}
 
     @app.get("/v1/capabilities")
     async def capabilities():
-        return {"api_version": "v1", "jobs": True, "reattach": adapter is not None,
-                "logs": adapter is not None, "artifacts": adapter is not None,
-                "checkpoint_resume": False, "worker": adapter.capabilities() if adapter else {}}
+        worker = adapter.capabilities() if adapter else {}
+        return {"api_version": "v1", "jobs": True,
+                "reattach": bool(worker.get("reattach", False)),
+                "logs": bool(worker.get("post_stop_logs", False)),
+                "artifacts": bool(worker.get("post_stop_artifacts", False)),
+                "checkpoint_resume": False, "worker": worker}
 
     @app.get("/v1/capacity")
     async def capacity():
@@ -162,12 +165,13 @@ def create_app(store: CoordinatorStore, *, adapter: EvidenceAdapter | None = Non
 
     @app.post("/v1/jobs/{job_id}/reattach")
     async def reattach(job_id: str, body: Mutation):
-        result = store.get(job_id)
-        if result["version"] != body.expected_version:
-            raise Conflict("job version changed")
-        # This call must verify exact supervisor ownership and generation. The
-        # adapter is intentionally absent until its contract is reviewed.
-        return {"job": result, "operation": evidence().reconcile(result, body.idempotency_key)}
+        if not adapter or not adapter.capabilities().get("reattach", False):
+            raise HTTPException(503, detail={"code": "supervisor_unavailable"})
+        operation = store.reattach(job_id, expected_version=body.expected_version,
+                                   principal=principal, key=body.idempotency_key)
+        return {"job": store.get(job_id), "operation": {
+            "id": operation["operation_id"], "key": body.idempotency_key,
+            "attempt_id": operation["attempt_id"], "state": operation["outcome"]}}
 
     def checked_attempt(job_id: str, attempt_id: str):
         result = store.get(job_id)
@@ -176,8 +180,8 @@ def create_app(store: CoordinatorStore, *, adapter: EvidenceAdapter | None = Non
         return result
 
     @app.get("/v1/jobs/{job_id}/attempts/{attempt_id}/logs")
-    async def logs(job_id: str, attempt_id: str, cursor: int = 0, limit: int = 100):
-        if cursor < 0 or not 1 <= limit <= 1000:
+    async def logs(job_id: str, attempt_id: str, cursor: int = 0, limit: int = 4096):
+        if cursor < 0 or not 1 <= limit <= 65_536:
             raise HTTPException(422, detail={"code": "invalid_cursor"})
         result = checked_attempt(job_id, attempt_id)
         return evidence().logs(result, attempt_id, cursor, limit)
@@ -188,10 +192,15 @@ def create_app(store: CoordinatorStore, *, adapter: EvidenceAdapter | None = Non
         return evidence().artifacts(result, attempt_id)
 
     @app.get("/v1/jobs/{job_id}/attempts/{attempt_id}/artifacts/{artifact_id}")
-    async def artifact(job_id: str, attempt_id: str, artifact_id: str):
-        if not artifact_id.isascii() or not artifact_id.replace("-", "").replace("_", "").isalnum():
+    async def artifact(job_id: str, attempt_id: str, artifact_id: str,
+                       offset: int = 0, limit: int = 65_536):
+        if (not artifact_id.isascii() or artifact_id in {".", ".."} or
+                not artifact_id.replace("-", "").replace("_", "").replace(".", "").isalnum() or
+                len(artifact_id) > 64):
             raise HTTPException(422, detail={"code": "invalid_artifact_id"})
+        if offset < 0 or not 1 <= limit <= 65_536:
+            raise HTTPException(422, detail={"code": "invalid_artifact_range"})
         result = checked_attempt(job_id, attempt_id)
-        return evidence().artifact(result, attempt_id, artifact_id)
+        return evidence().artifact(result, attempt_id, artifact_id, offset, limit)
 
     return app

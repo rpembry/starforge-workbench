@@ -97,12 +97,14 @@ class CoordinatorClient:
     def reattach(self, job_id: str, expected_version: int, key: str) -> dict:
         return self._mutate(job_id, "reattach", expected_version, key)
 
-    def logs(self, job_id: str, attempt_id: str, *, cursor: int = 0, limit: int = 100) -> dict:
+    def logs(self, job_id: str, attempt_id: str, *, cursor: int = 0, limit: int = 4096) -> dict:
         return self._call("GET", f"/v1/jobs/{job_id}/attempts/{attempt_id}/logs",
                           params={"cursor": cursor, "limit": limit})
 
     def artifacts(self, job_id: str, attempt_id: str) -> dict:
         return self._call("GET", f"/v1/jobs/{job_id}/attempts/{attempt_id}/artifacts")
 
-    def artifact(self, job_id: str, attempt_id: str, artifact_id: str) -> dict:
-        return self._call("GET", f"/v1/jobs/{job_id}/attempts/{attempt_id}/artifacts/{artifact_id}")
+    def artifact(self, job_id: str, attempt_id: str, artifact_id: str,
+                 *, offset: int = 0, limit: int = 65_536) -> dict:
+        return self._call("GET", f"/v1/jobs/{job_id}/attempts/{attempt_id}/artifacts/{artifact_id}",
+                          params={"offset": offset, "limit": limit})

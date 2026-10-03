@@ -4,13 +4,15 @@
 standalone `coord-server` launcher accepts an existing private state directory,
 a private JSON `Policy` file, and an unused socket path inside an existing
 owner-only directory. It binds only a Unix socket with mode `0600`. Run it as the
-owner; keep this socket out of proxy configurations. The current launcher does
-not attach a supervisor dispatcher, so jobs remain durably queued and evidence
-operations report unavailable. A runtime-enabled release requires the reviewed
-supervisor/worker service integration.
+owner; keep this socket out of proxy configurations. Without an explicit
+`--supervisor-socket` (the separate service's protected `control.sock`), jobs
+remain durably queued. With that socket and approved runtime configuration,
+the coordinator renews a fenced controller lease and dispatches committed
+commands. Missing supervision never falls back to native execution.
 
 ```sh
-coord-server --state-root /private/state --socket /private/run/coord.sock --policy /private/policy.json
+coord-supervisor serve --state-root /private/supervisor --config /private/supervisor.json
+coord-server --state-root /private/state --socket /private/run/coord.sock --policy /private/policy.json --supervisor-socket /private/supervisor/control.sock
 coord --socket /private/run/coord.sock --json health
 coord --socket /private/run/coord.sock --json submit job.json --key submit-2026-01
 ```
@@ -31,8 +33,8 @@ payload to 64 KiB and accepts registered policy keys, not host paths.
 | GET | `/v1/jobs/{id}`, `/v1/jobs/{id}/attempts` | Detailed job, immutable attempts and evidence |
 | GET | `/v1/jobs/{id}/events` | Replay after `after_seq` with snapshot, floor, gap, next cursor |
 | POST | `/v1/jobs/{id}/cancel`, `/retry` | Expected version and idempotency key required |
-| GET, POST | `/v1/jobs/{id}/recovery`, `/reattach` | Read-only recovery status; explicit supervised reattach |
-| GET | `/v1/jobs/{id}/attempts/{attempt_id}/logs` | Bounded log cursor and truncation from adapter |
+| GET, POST | `/v1/jobs/{id}/recovery`, `/reattach` | Read-only recovery status; durable same-attempt reattach request |
+| GET | `/v1/jobs/{id}/attempts/{attempt_id}/logs` | Post-stop bounded log bytes with cursor and possible prefix-gap flag |
 | GET | `/v1/jobs/{id}/attempts/{attempt_id}/artifacts[/{artifact_id}]` | Manifest and contained artifact from adapter |
 
 FastAPI publishes `/openapi.json`. Mutations return the job and an operation key
@@ -44,8 +46,10 @@ journal or operates Docker.
 
 After an uncertain response, repeat the **same payload, expected version, and
 idempotency key**. Never mint a second key to guess whether a submission or
-retry happened. `recover` only inspects. `reattach` checks the owned live
-attempt through the supervisor integration. `retry` creates a fresh attempt
+retry happened. `recover` only inspects. `reattach` records a durable same-attempt command;
+the dispatcher verifies the exact owned runtime under its current controller
+fence. Same-key replay remains safe after a lost response, while a stale new
+key conflicts. `retry` creates a fresh attempt
 only after positive stopped evidence. A checkpoint resume, if ever supported,
 requires a separate capability and is not equivalent to either action.
 
@@ -64,16 +68,16 @@ the supervisor's owner-only `control.sock`, using the store operation ID as the
 supervisor idempotency identity. It verifies the exact job, attempt,
 incarnation, and launch plan before applying observations. A lost launch
 response reconciles the same attempt; it does not allocate another worker.
-The relay retains unknown visibility when supervision is unavailable. It must
-run under one active coordinator controller with its lease renewed, and it
-must not be enabled until the supervisor service and approved runtime are
-configured together. The standalone API launcher currently does not start
-this relay.
+The relay retains unknown visibility when supervision is unavailable. The
+optional `--supervisor-socket` enables one coordinator controller and renews
+its lease; the supervisor independently enforces deadlines and owner stop.
 
-A cancellation committed before the supervisor has journaled launch is held
-without launching. That attempt remains unresolved until a reviewed durable
-prelaunch stop handshake is added. A stopped noncancelled attempt remains
-`finalizing` until verified worker result evidence is available. Logs and
-artifacts similarly require a reviewed bounded evidence contract over the
-supervisor boundary; no direct Docker or supervisor database reads are used by
-the API or CLI.
+A cancellation committed before supervisor launch now uses the canonical launch
+operation ID to create a durable no-start tombstone. Delayed launch replay
+cannot start a worker after that tombstone. A stopped noncancelled attempt is
+`finalizing` until `collect` returns verified process and worker evidence;
+`result_ok=None` remains unconfirmed. Artifact reads use hash-verified bounded
+chunks from the supervisor. `logs` reads the exported `output.txt` after stop;
+its source is a bounded last-1000-lines window, so the response advertises a
+possible earlier gap. Live log streaming is not yet supported. Neither API nor
+CLI reads Docker or the supervisor journal directly.

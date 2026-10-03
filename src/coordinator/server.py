@@ -11,11 +11,13 @@ import os
 from pathlib import Path
 import socket
 import stat
+import threading
 
 import uvicorn
 
 from . import CoordinatorStore, Policy
 from .api import create_app
+from .dispatch import Dispatcher, SupervisorControl, SupervisorEvidence
 
 
 def private_dir(path: Path) -> Path:
@@ -26,7 +28,20 @@ def private_dir(path: Path) -> Path:
     return resolved
 
 
-def run(state_root: Path, socket_path: Path, policy_path: Path) -> None:
+def _dispatch_loop(dispatcher: Dispatcher, stop: threading.Event):
+    while not stop.is_set():
+        try:
+            dispatcher.tick()
+            dispatcher.last_error = None
+        except Exception as exc:
+            # The durable command remains pending/unknown for exact replay.
+            # Do not print payloads, paths, or raw supervisor responses.
+            dispatcher.last_error = type(exc).__name__
+        stop.wait(0.5)
+
+
+def run(state_root: Path, socket_path: Path, policy_path: Path,
+        supervisor_socket: Path | None = None) -> None:
     state_root = private_dir(state_root)
     socket_path = socket_path.absolute()
     private_dir(socket_path.parent)
@@ -36,18 +51,29 @@ def run(state_root: Path, socket_path: Path, policy_path: Path) -> None:
             policy_path.stat().st_uid != os.getuid() or policy_path.stat().st_mode & 0o077):
         raise ValueError("policy file must be caller-owned and private")
     policy = Policy.model_validate_json(policy_path.read_bytes())
-    app = create_app(CoordinatorStore(state_root, policy))
+    store = CoordinatorStore(state_root, policy)
+    dispatcher = (Dispatcher(store, SupervisorControl(supervisor_socket))
+                  if supervisor_socket is not None else None)
+    app = create_app(store, adapter=SupervisorEvidence(dispatcher) if dispatcher else None)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     old_mask = os.umask(0o177)
     try:
         listener.bind(str(socket_path))
     finally:
         os.umask(old_mask)
+    stop = threading.Event()
+    thread = None
     try:
         os.chmod(socket_path, stat.S_IRUSR | stat.S_IWUSR)
         listener.listen(128)
+        if dispatcher is not None:
+            thread = threading.Thread(target=_dispatch_loop, args=(dispatcher, stop), daemon=True)
+            thread.start()
         uvicorn.Server(uvicorn.Config(app, log_level="warning", access_log=False)).run(sockets=[listener])
     finally:
+        stop.set()
+        if thread is not None:
+            thread.join(timeout=6)
         listener.close()
         if socket_path.is_socket() and socket_path.stat().st_uid == os.getuid():
             socket_path.unlink()
@@ -58,9 +84,11 @@ def main(argv=None) -> int:
     parser.add_argument("--state-root", type=Path, required=True)
     parser.add_argument("--socket", type=Path, required=True)
     parser.add_argument("--policy", type=Path, required=True)
+    parser.add_argument("--supervisor-socket", type=Path,
+                        help="protected supervisor control.sock; enables durable dispatch")
     args = parser.parse_args(argv)
     try:
-        run(args.state_root, args.socket, args.policy)
+        run(args.state_root, args.socket, args.policy, args.supervisor_socket)
     except (ValueError, OSError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
     return 0

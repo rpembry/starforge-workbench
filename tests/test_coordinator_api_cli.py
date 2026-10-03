@@ -145,7 +145,7 @@ def test_evidence_routes_scope_attempt_and_advertise_log_gap(fixture):
                     "floor": 5, "gap": cursor < 5, "truncated": True, "next_cursor": 5}
         def artifacts(self, job, attempt_id):
             return {"items": [{"id": "output-1", "sha256": "a" * 64}]}
-        def artifact(self, job, attempt_id, artifact_id):
+        def artifact(self, job, attempt_id, artifact_id, offset, limit):
             return {"id": artifact_id, "sha256": "a" * 64, "content_base64": ""}
 
     api = LocalAPI(create_app(store, adapter=Evidence()))

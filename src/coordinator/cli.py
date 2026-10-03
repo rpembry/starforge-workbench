@@ -47,9 +47,11 @@ def parser() -> argparse.ArgumentParser:
         s.add_argument("attempt_id")
         if name in {"logs", "follow"}:
             s.add_argument("--cursor", type=int, default=0)
-            s.add_argument("--limit", type=int, default=100)
+            s.add_argument("--limit", type=int, default=4096)
         if name == "artifact":
             s.add_argument("artifact_id")
+            s.add_argument("--offset", type=int, default=0)
+            s.add_argument("--limit", type=int, default=65_536)
     return p
 
 
@@ -97,7 +99,13 @@ def run(args, client: CoordinatorClient) -> int:
     elif cmd in {"logs", "follow"}:
         cursor = args.cursor
         while True:
-            value = client.logs(args.job_id, args.attempt_id, cursor=cursor, limit=args.limit)
+            try:
+                value = client.logs(args.job_id, args.attempt_id, cursor=cursor, limit=args.limit)
+            except CoordinatorError as exc:
+                if cmd == "follow" and exc.code == "unavailable" and "while attempt is active" in exc.message:
+                    time.sleep(1)
+                    continue
+                raise
             _emit(value, json_mode=args.json)
             cursor = value.get("next_cursor", cursor)
             if cmd == "logs":
@@ -106,7 +114,8 @@ def run(args, client: CoordinatorClient) -> int:
     elif cmd == "artifacts":
         value = client.artifacts(args.job_id, args.attempt_id)
     else:
-        value = client.artifact(args.job_id, args.attempt_id, args.artifact_id)
+        value = client.artifact(args.job_id, args.attempt_id, args.artifact_id,
+                                offset=args.offset, limit=args.limit)
     _emit(value, json_mode=args.json)
     return 0
 
