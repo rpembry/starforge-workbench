@@ -75,12 +75,13 @@ CREATE TABLE attempts(
  cancel INTEGER NOT NULL DEFAULT 0, deadline REAL NOT NULL,
  orphan_deadline REAL NOT NULL, policy TEXT NOT NULL, grace REAL NOT NULL,
  observation_seq INTEGER NOT NULL DEFAULT 0,
- reserved_cpu_millis INTEGER, reserved_memory_mb INTEGER);
+ reserved_cpu_millis INTEGER, reserved_memory_mb INTEGER,
+ no_start_reason TEXT);
 CREATE TABLE operations(
  id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL REFERENCES attempts(id),
  kind TEXT NOT NULL, status TEXT NOT NULL, response TEXT);
 CREATE TABLE evidence(attempt_id TEXT PRIMARY KEY REFERENCES attempts(id), response TEXT NOT NULL);
-PRAGMA user_version=4;
+PRAGMA user_version=5;
 COMMIT;
 """
 
@@ -103,6 +104,15 @@ BEGIN IMMEDIATE;
 ALTER TABLE attempts ADD COLUMN reserved_cpu_millis INTEGER;
 ALTER TABLE attempts ADD COLUMN reserved_memory_mb INTEGER;
 PRAGMA user_version=4;
+COMMIT;
+"""
+
+MIGRATE_4_TO_5 = """
+BEGIN IMMEDIATE;
+ALTER TABLE attempts ADD COLUMN no_start_reason TEXT;
+UPDATE attempts SET no_start_reason='prelaunch_abandon'
+ WHERE state='stopped' AND runtime_id IS NULL AND cancel=1;
+PRAGMA user_version=5;
 COMMIT;
 """
 
@@ -144,12 +154,17 @@ class Supervisor:
                     db.executescript(MIGRATE_1_TO_2)
                     db.executescript(MIGRATE_2_TO_3)
                     db.executescript(MIGRATE_3_TO_4)
+                    db.executescript(MIGRATE_4_TO_5)
                 elif version == 2:
                     db.executescript(MIGRATE_2_TO_3)
                     db.executescript(MIGRATE_3_TO_4)
+                    db.executescript(MIGRATE_4_TO_5)
                 elif version == 3:
                     db.executescript(MIGRATE_3_TO_4)
-                elif version != 4:
+                    db.executescript(MIGRATE_4_TO_5)
+                elif version == 4:
+                    db.executescript(MIGRATE_4_TO_5)
+                elif version != 5:
                     raise Unavailable("unsupported supervisor schema")
                 if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                     raise Unavailable("supervisor journal failed integrity check")
@@ -293,12 +308,12 @@ class Supervisor:
             orphan_deadline = (min(deadline, now + policy["max_orphan_seconds"])
                                if policy["mode"] == "trusted_local"
                                else min(deadline, meta["lease_until"] + policy["grace_seconds"]))
-            db.execute("INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+            db.execute("INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                 plan["attempt_id"], plan["job_id"], plan["incarnation"], digest, _json(plan),
                 generation, operation_id, None, "launch_pending", 0, deadline,
                 orphan_deadline, policy["mode"], policy["grace_seconds"], 0,
                 requested["cpu_millis"] if requested else None,
-                requested["memory_mb"] if requested else None))
+                requested["memory_mb"] if requested else None, None))
             db.execute("INSERT INTO operations VALUES(?,?,?,?,?)", (
                 operation_id, plan["attempt_id"], "launch", "pending", None))
         # Recheck fencing at the actual mutation boundary, after durable intent.
@@ -345,10 +360,11 @@ class Supervisor:
                     return self._attempt(old)
                 db.execute("UPDATE attempts SET cancel=1 WHERE id=?", (plan["attempt_id"],))
                 if old["state"] == "launch_pending":
-                    db.execute("UPDATE attempts SET state='stopped',observation_seq=observation_seq+1 WHERE id=?", (
+                    db.execute("UPDATE attempts SET state='stopped',no_start_reason='prelaunch_abandon',observation_seq=observation_seq+1 WHERE id=?", (
                         plan["attempt_id"],))
                     db.execute("UPDATE operations SET status='confirmed',response=? WHERE id=?", (
-                        _json({"state": "stopped", "no_start": True}), operation_id))
+                        _json({"state": "stopped", "no_start": True,
+                               "no_start_reason": "prelaunch_abandon"}), operation_id))
                     return self._attempt(db.execute("SELECT * FROM attempts WHERE id=?", (
                         plan["attempt_id"],)).fetchone())
             else:
@@ -356,14 +372,15 @@ class Supervisor:
                 orphan_deadline = (min(deadline, now + policy["max_orphan_seconds"])
                                    if policy["mode"] == "trusted_local"
                                    else min(deadline, meta["lease_until"] + policy["grace_seconds"]))
-                db.execute("INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+                db.execute("INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                     plan["attempt_id"], plan["job_id"], plan["incarnation"], digest, _json(plan),
                     generation, operation_id, None, "stopped", 1, deadline,
                     orphan_deadline, policy["mode"], policy["grace_seconds"], 1,
-                    None, None))
+                    None, None, "prelaunch_abandon"))
                 db.execute("INSERT INTO operations VALUES(?,?,?,?,?)", (
                     operation_id, plan["attempt_id"], "launch", "confirmed",
-                    _json({"state": "stopped", "no_start": True})))
+                    _json({"state": "stopped", "no_start": True,
+                           "no_start_reason": "prelaunch_abandon"})))
                 return self._attempt(db.execute("SELECT * FROM attempts WHERE id=?", (
                     plan["attempt_id"],)).fetchone())
         # Existing create/start may have happened. Stop only exact owned runtime.
@@ -396,6 +413,34 @@ class Supervisor:
             if saved:
                 return json.loads(saved["response"])
         attempt = self.inspect(attempt_id)
+        if attempt["state"] == "stopped" and attempt["no_start_reason"]:
+            reason = attempt["no_start_reason"]
+            if reason == "workspace_setup_failed":
+                probe = getattr(self.runtime, "inspect_no_start", None)
+                try:
+                    confirmed = probe is not None and probe(attempt["plan"])
+                except Exception:
+                    confirmed = False
+                if not confirmed:
+                    raise OwnershipUnknown("precreate absence evidence unavailable")
+            with self._tx() as db:
+                now, meta = self._clock_check(db)
+                self._authority(meta, controller, generation, now)
+                saved = db.execute("SELECT response FROM evidence WHERE attempt_id=?", (attempt_id,)).fetchone()
+                if saved:
+                    return json.loads(saved["response"])
+                row = db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+                if (row["state"] != "stopped" or row["runtime_id"] is not None or
+                        row["no_start_reason"] != reason):
+                    raise OwnershipUnknown("no-start evidence changed")
+                db.execute("UPDATE attempts SET observation_seq=observation_seq+1 WHERE id=?", (attempt_id,))
+                response = {"supervisor_id": meta["supervisor_id"], "job_id": row["job_id"],
+                            "attempt_id": attempt_id, "incarnation": row["incarnation"],
+                            "runtime_id": None, "observation_seq": row["observation_seq"] + 1,
+                            "phase": "stopped", "stopped": True, "exit_code": None,
+                            "result_ok": False, "no_start": True, "no_start_reason": reason}
+                db.execute("INSERT INTO evidence VALUES(?,?)", (attempt_id, _json(response)))
+                return response
         if attempt["state"] != "stopped" or not attempt["runtime_id"]:
             raise OwnershipUnknown("attempt has no confirmed stopped runtime to collect")
         observed = self.runtime.inspect(attempt["plan"], attempt["runtime_id"])
@@ -440,6 +485,8 @@ class Supervisor:
             if not saved:
                 raise OwnershipUnknown("artifact evidence not committed")
             evidence = json.loads(saved["response"])
+        if evidence.get("no_start"):
+            raise ValueError("never-started attempt has no artifacts")
         entry = next((item for item in evidence["artifact_manifest"]["files"]
                       if item["path"] == name), None)
         if entry is None:
@@ -543,8 +590,16 @@ class Supervisor:
     def _reconcile_owned(self, attempt_id: str):
         """Exact host inspection; only caller holding serialized authority uses it."""
         item = self.inspect(attempt_id)
-        if item["state"] == "stopped" and item["cancel"] and not item["runtime_id"]:
+        if item["state"] == "stopped" and item["no_start_reason"] and not item["runtime_id"]:
             return item  # durable prelaunch tombstone; no runtime to reattach
+        if not item["runtime_id"]:
+            probe = getattr(self.runtime, "inspect_no_start", None)
+            try:
+                proved_absent = probe is not None and probe(item["plan"])
+            except Exception:
+                proved_absent = False  # lost or ambiguous host evidence remains unknown below
+            if proved_absent:
+                return self._record_no_start(attempt_id, "workspace_setup_failed")
         if item["state"] == "stopped" and item["runtime_id"]:
             archived = getattr(self.runtime, "inspect_archived", None)
             if archived is not None and archived(item["plan"], item["runtime_id"]):
@@ -567,6 +622,25 @@ class Supervisor:
             cancelled = bool(row["cancel"])
         if cancelled and state != "stopped":
             return self._stop_exact(attempt_id)
+        return self.inspect(attempt_id)
+
+    def _record_no_start(self, attempt_id, reason):
+        """Persist positive absence before exposing a terminal no-start result."""
+        with self._tx() as db:
+            row = db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+            if row["runtime_id"] is not None:
+                raise OwnershipUnknown("runtime identity already saved")
+            if row["state"] == "stopped" and row["no_start_reason"] == reason:
+                return self._attempt(row)
+            if row["state"] == "stopped":
+                raise OwnershipUnknown("stopped attempt has different evidence")
+            db.execute("UPDATE attempts SET state='stopped',no_start_reason=?,"
+                       "observation_seq=observation_seq+1 WHERE id=?", (reason, attempt_id))
+            response = _json({"state": "stopped", "no_start": True,
+                              "no_start_reason": reason})
+            db.execute("UPDATE operations SET status='confirmed',response=? "
+                       "WHERE attempt_id=? AND kind IN ('launch','cancel','owner_stop')", (
+                           response, attempt_id))
         return self.inspect(attempt_id)
 
     @_serialized
@@ -657,13 +731,23 @@ class Supervisor:
             # Runtime launch is entered only after a durable transition to
             # launch_calling under this same cross-process control lock.
             with self._tx() as db:
-                db.execute("UPDATE attempts SET state='stopped',observation_seq=observation_seq+1 WHERE id=? AND state='launch_pending'", (
+                db.execute("UPDATE attempts SET state='stopped',no_start_reason='prelaunch_abandon',observation_seq=observation_seq+1 WHERE id=? AND state='launch_pending'", (
                     attempt_id,))
                 db.execute("UPDATE operations SET status='confirmed',response=? WHERE attempt_id=? AND kind IN ('cancel','owner_stop')", (
-                    _json({"state": "stopped", "no_start": True}), attempt_id))
+                    _json({"state": "stopped", "no_start": True,
+                           "no_start_reason": "prelaunch_abandon"}), attempt_id))
                 db.execute("UPDATE operations SET status='confirmed',response=? WHERE attempt_id=? AND kind='launch'", (
-                    _json({"state": "stopped", "no_start": True}), attempt_id))
+                    _json({"state": "stopped", "no_start": True,
+                           "no_start_reason": "prelaunch_abandon"}), attempt_id))
             return self.inspect(attempt_id)
+        if not item["runtime_id"]:
+            probe = getattr(self.runtime, "inspect_no_start", None)
+            try:
+                proved_absent = probe is not None and probe(item["plan"])
+            except Exception:
+                proved_absent = False
+            if proved_absent:
+                return self._record_no_start(attempt_id, "workspace_setup_failed")
         if item["state"] == "launch_calling":
             return item  # unknown create outcome; reconciliation will honor sticky cancel
         try:

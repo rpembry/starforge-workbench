@@ -177,11 +177,78 @@ def test_schema_one_migration_preserves_jobs(store, spec):
     original = store.submit(spec, principal="client", key="first")
     with sqlite3.connect(store.path) as db:
         db.execute("DROP TABLE operation_aliases")
+        db.execute("ALTER TABLE attempts DROP COLUMN no_start_reason")
         db.execute("PRAGMA user_version=1")
     reopened = CoordinatorStore(store.root, store.policy)
     assert reopened.get(original["id"])["id"] == original["id"]
     with sqlite3.connect(store.path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_positive_no_start_terminal_replay_and_retry(store, spec):
+    job = store.submit(spec, principal="client", key="no-start")
+    job = store.admit_next(principal="scheduler", key="no-start")
+    attempt = job["attempts"][0]
+    evidence = dict(job_id=job["id"], attempt_id=attempt["id"],
+                    incarnation=attempt["incarnation"], supervisor_id="host-1",
+                    observation_seq=2, reason="workspace_setup_failed")
+    with pytest.raises(Conflict):
+        store.retry(job["id"], expected_version=job["version"], principal="client", key="early-no-start")
+    observed = store.record_no_start(**evidence)
+    assert observed["phase"] == "terminal" and observed["outcome"] == "failed"
+    assert observed["reason"] == "workspace_setup_failed"
+    assert observed["attempts"][0]["exit_code"] is None
+    assert observed["attempts"][0]["runtime_id"] is None
+    assert observed["attempts"][0]["stopped"] == 1
+    assert store.record_no_start(**evidence) == observed
+    with pytest.raises(Conflict):
+        store.record_no_start(**{**evidence, "observation_seq": 1})
+    with pytest.raises(Conflict):
+        store.record_no_start(**{**evidence, "reason": "prelaunch_abandon"})
+    assert store.replay(job["id"], 0)["events"][-1]["kind"] == "no_start_observed"
+    retried = store.retry(job["id"], expected_version=observed["version"],
+                          principal="client", key="after-no-start")
+    assert retried["attempt_id"] != attempt["id"]
+    with pytest.raises(Conflict):
+        store.record_no_start(**{**evidence, "observation_seq": 3})
+
+
+def test_no_start_respects_sticky_cancel_and_rejects_runtime_evidence(store, spec):
+    job = store.submit(spec, principal="client", key="cancel-no-start")
+    job = store.admit_next(principal="scheduler", key="cancel-no-start")
+    attempt = job["attempts"][0]
+    args = dict(job_id=job["id"], attempt_id=attempt["id"],
+                incarnation=attempt["incarnation"], supervisor_id="host-1")
+    job = store.cancel(job["id"], expected_version=job["version"],
+                       principal="client", key="cancel-no-start-request")
+    observed = store.record_no_start(**args, observation_seq=1, reason="prelaunch_abandon")
+    assert observed["outcome"] == "cancelled"
+    assert observed["attempts"][0]["outcome"] == "cancelled"
+    other = store.submit(spec, principal="client", key="runtime-conflict")
+    other = store.admit_next(principal="scheduler", key="runtime-conflict")
+    assert other is not None
+    current = other["attempts"][0]
+    store.observe(other["id"], attempt_id=current["id"], incarnation=current["incarnation"],
+                  observation_seq=1, supervisor_id="host-1", phase="running", runtime_id="container")
+    with pytest.raises(Conflict):
+        store.record_no_start(other["id"], attempt_id=current["id"],
+                              incarnation=current["incarnation"], observation_seq=2,
+                              supervisor_id="host-1", reason="workspace_setup_failed")
+
+
+def test_no_start_store_failure_cannot_confirm_terminal(store, spec, monkeypatch):
+    store.submit(spec, principal="client", key="failed-write")
+    job = store.admit_next(principal="scheduler", key="failed-write")
+    attempt = job["attempts"][0]
+    def broken(*args, **kwargs):
+        raise sqlite3.OperationalError("disk full")
+    monkeypatch.setattr(sqlite3, "connect", broken)
+    with pytest.raises(Unavailable):
+        store.record_no_start(job["id"], attempt_id=attempt["id"],
+                              incarnation=attempt["incarnation"], observation_seq=1,
+                              supervisor_id="host-1", reason="workspace_setup_failed")
+    monkeypatch.undo()
+    assert store.get(job["id"])["phase"] == "active"
 
 
 def test_reattach_replays_same_attempt_and_command(store, spec):

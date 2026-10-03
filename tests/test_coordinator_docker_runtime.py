@@ -227,6 +227,19 @@ def test_partial_git_setup_retains_receipt_and_never_creates_container(runtime, 
     assert receipt["phase"] == "workspace_pending" and receipt["revision"] == revision
     assert (adapter.root / ("a" * 32) / "worktree").exists()
     assert not any("create" in argv for argv in fake.calls)
+    assert adapter.inspect_no_start(spec) is True
+    original_command = adapter.command
+    def daemon_unavailable(argv, **kwargs):
+        if "ps" in argv:
+            raise WorkerError("daemon unavailable")
+        return original_command(argv, **kwargs)
+    adapter.command = daemon_unavailable
+    with pytest.raises(WorkerError, match="daemon unavailable"):
+        adapter.inspect_no_start(spec)
+    adapter.command = original_command
+    receipt["phase"] = "create_pending"
+    (adapter.root / ("a" * 32) / "runtime.json").write_text(json.dumps(receipt))
+    assert adapter.inspect_no_start(spec) is False
 
 
 def test_protocol_channel_reconnect_and_result_evidence(tmp_path, monkeypatch):

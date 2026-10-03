@@ -62,7 +62,8 @@ owner, and it removes only sockets it created on clean shutdown.
 The control socket also provides `abandon(plan, controller, generation,
 operation_id)` for a durable no-start tombstone, fenced
 `collect(attempt_id, controller, generation)` for
-committed process/result/artifact evidence, and `read_artifact` for bounded
+committed process/result/artifact evidence or distinct positive no-start evidence,
+and `read_artifact` for bounded
 hash-verified chunks of exported files such as `output.txt` logs. On restart,
 new launches remain blocked until every existing attempt has exact, positive
 runtime ownership evidence. The owner socket remains available while recovery
@@ -119,9 +120,20 @@ operator configuration to an absolute repository and full commit, never by a
 job-supplied host path or branch. It refuses configured Git content filters,
 records a receipt before linked-worktree allocation, verifies the linked
 worktree and HEAD, and retains work plus bounded `changes.patch` and
-`status.txt` exports for review. A partial worktree setup with no confirmed
-Docker runtime remains unknown and retained for explicit recovery; it is not
-reported as an execution result. The adapter resolves
+`status.txt` exports for review. A partial worktree setup remains retained.
+Only a matching private `workspace_pending` receipt, written before Docker
+create, plus an exact empty container lookup proves no start. The supervisor
+then records `no_start_reason=workspace_setup_failed` and collection returns
+`no_start=true`, null runtime/exit, and no artifact manifest. A durable
+`prelaunch_abandon` tombstone has the same distinct evidence form. Coordinator
+dispatch must call `CoordinatorStore.record_no_start` with the exact attempt,
+incarnation, supervisor, observation sequence, and reason; it must not feed
+that result to normal exit observation or artifact handling. That atomic
+store transition records a failed outcome, or cancelled when cancel intent is
+already sticky, and permits explicit retry as a new attempt. An absent or
+mismatched receipt, `create_pending` or later phase, Docker outage, or
+ambiguous lookup remains unknown and cannot be retried. This proof does not
+archive the retained partial worktree. The adapter resolves
 symbolic profile/workspace references from administrator configuration, uses
 the existing runner's digest-pinned image/environment and restricted create
 verification, and checks exact labels/token/ID, plan hash, and incarnation on

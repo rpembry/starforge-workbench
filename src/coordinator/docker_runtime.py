@@ -305,6 +305,17 @@ class DockerRuntime:
                 "exit_code": None if status == "created" else item["State"]["ExitCode"],
                 "runtime_id": item["Id"]}
 
+    def inspect_no_start(self, plan):
+        """Positive precreate proof; an unknown create outcome never qualifies."""
+        receipt = self._read(plan["attempt_id"])
+        if (receipt["plan_hash"] != hashlib.sha256(_json(plan).encode()).hexdigest() or
+                receipt["incarnation"] != plan["incarnation"] or
+                receipt["job_id"] != plan["job_id"]):
+            raise WorkerError("runtime plan or incarnation mismatch")
+        if receipt["phase"] != "workspace_pending" or receipt["container_id"] is not None:
+            return False
+        return self._inspect(receipt) is None
+
     def review(self, plan, runtime_id):
         from .disposition import review
         return review(self, plan, runtime_id)

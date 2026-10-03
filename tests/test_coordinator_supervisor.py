@@ -67,6 +67,72 @@ def plan(attempt="attempt-1", mode="strict"):
                 "max_orphan_seconds": 12 if mode == "trusted_local" else 0}}
 
 
+def test_supervisor_positive_no_start_and_ambiguous_create(setup):
+    supervisor, runtime, clock = setup
+    lease = supervisor.acquire("controller")
+    def failed_workspace(_plan):
+        raise OSError("Git worktree setup interrupted")
+    runtime.launch = failed_workspace
+    runtime.inspect_no_start = lambda _plan: True
+    with pytest.raises(OwnershipUnknown):
+        supervisor.launch(plan(), controller="controller", generation=lease["generation"],
+                          operation_id="launch")
+    stopped = supervisor.reconcile("attempt-1", controller="controller",
+                                   generation=lease["generation"])
+    assert stopped["state"] == "stopped"
+    assert stopped["runtime_id"] is None and stopped["no_start_reason"] == "workspace_setup_failed"
+    evidence = supervisor.collect("attempt-1", controller="controller",
+                                  generation=lease["generation"])
+    assert evidence["no_start"] is True and evidence["exit_code"] is None
+    assert "artifact_manifest" not in evidence
+    assert supervisor.collect("attempt-1", controller="controller",
+                              generation=lease["generation"]) == evidence
+    with pytest.raises(ValueError, match="no artifacts"):
+        supervisor.read_artifact("attempt-1", "output.txt")
+    assert supervisor.reconcile("attempt-1", controller="controller",
+                                generation=lease["generation"])["state"] == "stopped"
+
+    other = plan(attempt="attempt-2")
+    runtime.inspect_no_start = lambda _plan: False  # create_pending has an unknown result
+    with pytest.raises(OwnershipUnknown):
+        supervisor.launch(other, controller="controller", generation=lease["generation"],
+                          operation_id="launch-2")
+    with pytest.raises(OwnershipUnknown):
+        supervisor.reconcile("attempt-2", controller="controller",
+                             generation=lease["generation"])
+    assert supervisor.inspect("attempt-2")["state"] == "unknown"
+
+
+def test_cancel_after_workspace_failure_proves_no_start(setup):
+    supervisor, runtime, clock = setup
+    lease = supervisor.acquire("controller")
+    runtime.launch = lambda _plan: (_ for _ in ()).throw(OSError("interrupted"))
+    runtime.inspect_no_start = lambda _plan: True
+    with pytest.raises(OwnershipUnknown):
+        supervisor.launch(plan(), controller="controller", generation=lease["generation"],
+                          operation_id="launch")
+    stopped = supervisor.cancel("attempt-1", controller="controller",
+                                generation=lease["generation"], operation_id="cancel")
+    assert stopped["state"] == "stopped" and stopped["cancel"] == 1
+    assert stopped["no_start_reason"] == "workspace_setup_failed"
+
+
+def test_no_start_journal_failure_does_not_claim_stop(setup, monkeypatch):
+    supervisor, runtime, clock = setup
+    lease = supervisor.acquire("controller")
+    runtime.launch = lambda _plan: (_ for _ in ()).throw(OSError("interrupted"))
+    runtime.inspect_no_start = lambda _plan: True
+    with pytest.raises(OwnershipUnknown):
+        supervisor.launch(plan(), controller="controller", generation=lease["generation"],
+                          operation_id="launch")
+    monkeypatch.setattr(supervisor, "_record_no_start",
+                        lambda *_: (_ for _ in ()).throw(Unavailable("journal full")))
+    with pytest.raises(Unavailable, match="journal full"):
+        supervisor.reconcile("attempt-1", controller="controller",
+                             generation=lease["generation"])
+    assert supervisor.inspect("attempt-1")["state"] == "unknown"
+
+
 def test_fenced_launch_and_owner_stop(setup):
     supervisor, runtime, clock = setup
     a = supervisor.acquire("a", lease_seconds=5)
@@ -430,11 +496,12 @@ def test_supervisor_schema_two_migrates_without_losing_identity(setup):
         db.execute("ALTER TABLE meta DROP COLUMN recovery_required")
         db.execute("ALTER TABLE attempts DROP COLUMN reserved_cpu_millis")
         db.execute("ALTER TABLE attempts DROP COLUMN reserved_memory_mb")
+        db.execute("ALTER TABLE attempts DROP COLUMN no_start_reason")
         db.execute("PRAGMA user_version=2")
     reopened = Supervisor(supervisor.root, runtime, clock=lambda: clock[0])
     assert reopened.acquire("controller")["supervisor_id"] == identity
     with sqlite3.connect(supervisor.path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
 
 
 def test_owner_stop_confirms_no_start_from_committed_launch_pending(setup):
@@ -456,4 +523,5 @@ def test_owner_stop_confirms_no_start_from_committed_launch_pending(setup):
     with supervisor._db() as db:
         launch = db.execute("SELECT status,response FROM operations WHERE id='launch-op'").fetchone()
     assert launch["status"] == "confirmed"
-    assert json.loads(launch["response"]) == {"state": "stopped", "no_start": True}
+    assert json.loads(launch["response"]) == {"state": "stopped", "no_start": True,
+                                              "no_start_reason": "prelaunch_abandon"}
