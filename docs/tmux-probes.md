@@ -37,6 +37,13 @@ is the user's terminal session. It uses the same explicit server/socket argument
 a verified target, and a fresh final observation before clearing a pending receipt.
 The launcher adds no automatic cleanup or destructive recovery policy.
 
+`aiw c NAME` selects an existing managed session by its configured display title,
+context ID, or launcher alias. It checks the same binding and dead-pane metadata as
+`live`. From a separate terminal it attaches a second client without detaching
+existing clients. Within the dedicated Workbench tmux server it checks the socket
+path and switches the current client. It refuses a different tmux server, an
+ambiguous name, or a missing/dead session without creating or modifying sessions.
+
 Every tmux client command starts from `/`, a stable non-project directory, while
 each managed pane still receives its explicit resolved context directory. This
 prevents a dedicated server first reached from a disposable worktree from inheriting

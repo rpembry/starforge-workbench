@@ -11,6 +11,8 @@ Copy `config/workbench.example.yaml` to the private XDG configuration location, 
 
 Provider executables are discovered on PATH, with historical installation-path fallbacks in `PROVIDERS`. The launcher still expects Linux process metadata, tmux, and zsh. The desktop bridge uses `/usr/bin/python3` with GObject introspection and the installed Ptyxis schemas. An optional `~/bin/ren.sh` title helper is attempted; its absence does not prevent provider startup. CLI flags, resume catalogs, and provider installations are expected adaptation points.
 
+For an existing managed tmux session, run `aiw c Example Support` from an interactive terminal on the same host as Workbench, or SSH to that host first. The full configured title, context ID, and established launcher aliases work; names must match completely, though case is ignored. Use `aiw list` to discover titles and IDs. `c` attaches another client to the session even if a desktop client is present; inside the same Workbench tmux server it switches the current client. A missing or dead session is reported and never started by `c`. This command does not connect across hosts, create a session, or submit text to a provider pane.
+
 Launcher metadata probes are bounded and distinguish confirmed absence from unknown
 state. See [tmux probe behavior](tmux-probes.md) for recovery semantics and isolated
 test coverage. Interactive attachment remains unbounded.
