@@ -19,7 +19,7 @@ from starforge_workbench.docker_worker import (
 from starforge_workbench.execution import parse_profile
 
 from .store import _json
-from .worker_channel import WorkerChannel
+from .worker_channel import MailboxChannel, WorkerChannel
 from .worker_protocol import WorkerInbox
 
 
@@ -221,6 +221,10 @@ class DockerRuntime:
         image = json.loads(self.command(self.docker + ["image", "inspect", profile.image]))[0]
         if image["Config"].get("Volumes"):
             raise WorkerError("image-declared volumes unsupported")
+        protocol = plan["worker_type"] == "protocol_example"
+        if (protocol and (image["Config"].get("Labels") or {}).get(
+                "io.starforge.worker.transport") != "mailbox-v1"):
+            raise WorkerError("protocol worker image lacks reviewed mailbox transport label")
         env_hash = environment_digest(image["Config"].get("Env"), image=True)
         attempt = self.root / plan["attempt_id"]
         attempt.mkdir(mode=0o700)  # existing attempt is reconciliation, never a new launch
@@ -228,9 +232,8 @@ class DockerRuntime:
         (attempt / "scratch").mkdir(mode=0o700)
         (attempt / "git-mask").write_text("No container Git administration.\n")
         (attempt / "git-mask").chmod(0o444)
-        protocol = plan["worker_type"] == "protocol_example"
         if protocol:
-            self.channels[plan["attempt_id"]] = WorkerChannel(
+            self.channels[plan["attempt_id"]] = MailboxChannel(
                 attempt, job_id=plan["job_id"], attempt_id=plan["attempt_id"],
                 incarnation=plan["incarnation"])
         plan_hash = hashlib.sha256(_json(plan).encode()).hexdigest()
@@ -246,6 +249,7 @@ class DockerRuntime:
                    "image_id": image["Id"], "environment_sha256": env_hash,
                    "argv": worker_argv, "artifact_paths": plan["payload"].get("artifacts", []),
                    "workspace_kind": binding["kind"],
+                   "channel_transport": "mailbox-v1" if protocol else None,
                    "phase": "workspace_pending"}
         if binding["kind"] == "git_worktree":
             receipt.update(repository=binding["repository"], revision=binding["revision"])
@@ -404,7 +408,9 @@ class DockerRuntime:
                 continue
             receipt = self._read(path.name)
             if receipt.get("worker_type") == "protocol_example":
-                self.channels[path.name] = WorkerChannel(
+                channel_type = (MailboxChannel if receipt.get("channel_transport") == "mailbox-v1"
+                                else WorkerChannel)  # pre-upgrade socket receipts
+                self.channels[path.name] = channel_type(
                     path, job_id=receipt["job_id"], attempt_id=path.name,
                     incarnation=receipt["incarnation"])
 

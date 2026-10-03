@@ -11,7 +11,7 @@ import pytest
 
 from coordinator.docker_runtime import DockerRuntime
 from coordinator.supervisor import Conflict, OwnershipUnknown, Supervisor
-from coordinator.worker_sdk import WorkerClient
+from coordinator.worker_sdk import MailboxWorkerClient
 from coordinator.worker_protocol import Frame, WorkerInbox
 from starforge_workbench.docker_worker import WorkerError
 
@@ -41,13 +41,15 @@ class FakeDocker:
         self.lose_create_response = False
         self.lose_start_response = False
         self.lose_rm_response = False
+        self.transport_label = "mailbox-v1"
 
     def __call__(self, argv, **kwargs):
         self.calls.append(argv)
         if "info" in argv:
             return json.dumps({"NCPU": 4, "MemTotal": 1024**3}).encode()
         if "image" in argv:
-            return json.dumps([{"Id": "image-1", "Config": {"Env": [], "Volumes": None}}]).encode()
+            return json.dumps([{"Id": "image-1", "Config": {"Env": [], "Volumes": None,
+                "Labels": {"io.starforge.worker.transport": self.transport_label}}}]).encode()
         if "create" in argv:
             self.create_count += 1
             labels = {}
@@ -359,7 +361,7 @@ def test_no_start_retention_keeps_real_git_administration(runtime, tmp_path, mon
     assert fake.create_count == 0
 
 
-def test_protocol_channel_reconnect_and_result_evidence(tmp_path, monkeypatch):
+def test_protocol_mailbox_reconnect_and_result_evidence(tmp_path, monkeypatch):
     if os.getuid() == 0 or os.getgid() == 0:
         pytest.skip("restricted runner needs non-root caller")
     root = tmp_path / "runtime"
@@ -372,15 +374,10 @@ def test_protocol_channel_reconnect_and_result_evidence(tmp_path, monkeypatch):
                             workspaces={"scratch": "scratch"}, command_fn=fake)
     spec = {**plan(), "worker_type": "protocol_example", "payload": {"input": {"value": 3}}}
     try:
-        try:
-            runtime_id = adapter.launch(spec)
-        except PermissionError as exc:
-            if exc.errno == errno.EPERM:
-                pytest.skip("sandbox forbids binding Unix sockets")
-            raise
-        client = WorkerClient(adapter.channels["a" * 32].connect_path,
-                              str(root / ("a" * 32) / "scratch" / "sender.json"),
-                              job_id="job", attempt_id="a" * 32, incarnation="inc")
+        runtime_id = adapter.launch(spec)
+        client = MailboxWorkerClient(str(root / ("a" * 32) / "channel"),
+                                     str(root / ("a" * 32) / "scratch" / "sender.json"),
+                                     job_id="job", attempt_id="a" * 32, incarnation="inc")
         assert adapter.protocol_ready(spec, runtime_id) is False
         client.send("hello", {"capabilities": []})
         client.send("ready", {})
@@ -427,6 +424,22 @@ def test_protocol_requires_scratch_and_profile_deadline(tmp_path):
     assert fake.create_count == 0
 
 
+def test_protocol_rejects_old_socket_image_before_create(tmp_path):
+    raw = profile()
+    raw["mounts"].append(dict(source="scratch", target="/scratch", read_only=False))
+    fake = FakeDocker()
+    fake.transport_label = "socket-v1"
+    root = tmp_path / "runtime"
+    root.mkdir(mode=0o700)
+    adapter = DockerRuntime(root, profiles={"offline": raw},
+                            workspaces={"scratch": "scratch"}, command_fn=fake)
+    spec = {**plan(), "worker_type": "protocol_example", "payload": {"input": {"value": 3}}}
+    with pytest.raises(WorkerError, match="mailbox transport label"):
+        adapter.launch(spec)
+    assert fake.create_count == 0
+    assert list(root.iterdir()) == []
+
+
 @pytest.mark.parametrize("declare,content,expected", [
     (False, '{"value":3}\n', False),
     (True, '{"value":4}\n', False),
@@ -451,7 +464,7 @@ def test_protocol_result_file_contract(tmp_path, monkeypatch, declare, content, 
         def close(self):
             pass
 
-    monkeypatch.setattr("coordinator.docker_runtime.WorkerChannel", LocalInboxChannel)
+    monkeypatch.setattr("coordinator.docker_runtime.MailboxChannel", LocalInboxChannel)
     adapter = DockerRuntime(root, profiles={"offline": raw},
                             workspaces={"scratch": "scratch"}, command_fn=fake)
     spec = {**plan(), "worker_type": "protocol_example", "payload": {"input": {"value": 3}}}

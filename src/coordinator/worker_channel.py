@@ -1,4 +1,4 @@
-"""Host-side bounded Unix worker channel, with host-only durable inbox state."""
+"""Host-side worker transports with host-only durable inbox state."""
 
 import errno
 import json
@@ -6,7 +6,10 @@ import os
 from pathlib import Path
 import socket
 import socketserver
+import stat
+import tempfile
 import threading
+import hashlib
 
 from .worker_protocol import MAX_FRAME, ProtocolError, WorkerInbox, decode_frame
 
@@ -88,4 +91,115 @@ class WorkerChannel:
         self.thread.join(timeout=2)
         if self.socket_path.is_socket() and self.socket_path.stat().st_ino == self.inode:
             self.socket_path.unlink()
+        os.close(self.directory_fd)
+
+
+class MailboxChannel:
+    """One-slot file transport; the durable inbox, not mailbox files, is authority.
+
+    Regular files cross the SELinux container/host boundary without granting a
+    container permission to connect to the host process's Unix socket domain.
+    A worker may alter mailbox bytes or fabricate an acknowledgement, but only
+    host-validated frames in the separate inbox can establish result evidence.
+    """
+
+    REQUEST = "request.json"
+    ACK = "ack.json"
+    POLL_SECONDS = 0.05
+    MAX_ACK = 512
+
+    def __init__(self, attempt_root, *, job_id, attempt_id, incarnation):
+        attempt = Path(attempt_root).absolute()
+        if (not attempt.is_dir() or attempt.is_symlink() or
+                attempt.stat().st_uid != os.getuid() or attempt.stat().st_mode & 0o077):
+            raise ValueError("attempt root must be private")
+        self.mount_dir = attempt / "channel"
+        self.inbox_dir = attempt / "host-inbox"
+        self.mount_dir.mkdir(mode=0o700, exist_ok=True)
+        self.inbox_dir.mkdir(mode=0o700, exist_ok=True)
+        for path in (self.mount_dir, self.inbox_dir):
+            if (path.is_symlink() or path.stat().st_uid != os.getuid() or
+                    path.stat().st_mode & 0o077):
+                raise ValueError("mailbox directory changed")
+        self.inbox = WorkerInbox(self.inbox_dir, job_id=job_id,
+                                 attempt_id=attempt_id, incarnation=incarnation)
+        self.directory_fd = os.open(self.mount_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._serve, name="mailbox-" + attempt_id, daemon=True)
+        self.thread.start()
+
+    def _request(self):
+        try:
+            fd = os.open(self.REQUEST, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self.directory_fd)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return None  # hostile symlink or inaccessible file cannot enter the inbox
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                    info.st_uid != os.getuid() or info.st_mode & 0o077 or
+                    info.st_size > MAX_FRAME):
+                return None
+            wire = os.read(fd, MAX_FRAME + 1)
+            if len(wire) != info.st_size or len(wire) > MAX_FRAME:
+                return None
+            return info.st_ino, wire
+        finally:
+            os.close(fd)
+
+    def _remove_request(self, inode):
+        try:
+            current = os.stat(self.REQUEST, dir_fd=self.directory_fd, follow_symlinks=False)
+            if current.st_ino == inode and stat.S_ISREG(current.st_mode):
+                os.unlink(self.REQUEST, dir_fd=self.directory_fd)
+                os.fsync(self.directory_fd)
+        except FileNotFoundError:
+            pass
+
+    def _ack(self, frame, wire, response):
+        body = {"seq": frame.seq, "event_id": frame.event_id,
+                "frame_sha256": hashlib.sha256(wire).hexdigest(), "response": response}
+        data = (json.dumps(body, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        if len(data) > self.MAX_ACK:
+            raise ProtocolError("mailbox acknowledgement too large")
+        fd, path = tempfile.mkstemp(prefix=".ack-", dir=self.mount_dir)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(Path(path).name, self.ACK,
+                       src_dir_fd=self.directory_fd, dst_dir_fd=self.directory_fd)
+            os.fsync(self.directory_fd)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def _serve(self):
+        # Fixed names plus a single pending sender frame bound legitimate queue
+        # depth. Invalid or replaced files never become host evidence.
+        while not self.stop_event.wait(self.POLL_SECONDS):
+            request = self._request()
+            if request is None:
+                continue
+            inode, wire = request
+            try:
+                frame = decode_frame(wire)
+                try:
+                    response = self.inbox.accept(frame)  # fsync before ack
+                except ProtocolError:
+                    response = {"status": "rejected"}
+                self._remove_request(inode)
+                self._ack(frame, wire, response)
+            except (ProtocolError, OSError, ValueError):
+                # A malformed or raced worker file is not authoritative. The
+                # sender retains its pending frame and eventually times out.
+                continue
+
+    def close(self):
+        self.stop_event.set()
+        self.thread.join(timeout=2)
+        if self.thread.is_alive():
+            raise RuntimeError("mailbox channel did not stop")
         os.close(self.directory_fd)
