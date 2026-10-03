@@ -5,8 +5,11 @@ reviewed user unit name and a workload-scope probe before instantiating it.
 """
 
 from dataclasses import dataclass
+import ctypes
+import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 from typing import Protocol
 
@@ -39,7 +42,7 @@ class UserUnit(Protocol):
     def snapshot(self) -> UnitGeneration: ...
     def cgroup_processes(self, cgroup: str) -> tuple[ProcessGeneration, ...] | None: ...
     def generation_alive(self, process: ProcessGeneration) -> bool | None: ...
-    def stop(self) -> None: ...
+    def stop(self, expected: UnitGeneration) -> None: ...
     def start(self) -> None: ...
 
 
@@ -49,6 +52,33 @@ class GpuProcessProbe(Protocol):
 
 class WorkloadScopeProbe(Protocol):
     def ended(self, owner: str) -> bool | None: ...
+
+
+class LibcPidfd:
+    """Use libc's pidfd entry points when Python lacks pidfd helpers."""
+
+    def __init__(self):
+        libc = ctypes.CDLL(None, use_errno=True)
+        try:
+            self._open = libc.pidfd_open
+            self._send = libc.pidfd_send_signal
+        except AttributeError:
+            raise EvidenceUnavailable("Exact process signaling is unavailable") from None
+        self._open.argtypes = (ctypes.c_int, ctypes.c_uint)
+        self._open.restype = ctypes.c_int
+        self._send.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+                               ctypes.c_uint)
+        self._send.restype = ctypes.c_int
+
+    def open(self, pid: int) -> int:
+        fd = self._open(pid, 0)
+        if fd < 0:
+            raise OSError(ctypes.get_errno(), "pidfd_open failed")
+        return fd
+
+    def send(self, fd: int, signum: int) -> None:
+        if self._send(fd, signum, None, 0) < 0:
+            raise OSError(ctypes.get_errno(), "pidfd_send_signal failed")
 
 
 class ExactUnitController:
@@ -79,6 +109,8 @@ class ExactUnitController:
         if current.state != 'inactive' or self._stopped_generation is None:
             return Observation.UNKNOWN, Observation.UNKNOWN, True
         captured = self._stopped_generation
+        if current.invocation != captured.invocation:
+            return Observation.UNKNOWN, Observation.UNKNOWN, True
         remaining = self.unit.cgroup_processes(captured.cgroup)
         if remaining is None:
             return Observation.UNKNOWN, Observation.UNKNOWN, True
@@ -114,7 +146,7 @@ class ExactUnitController:
                     current.main_pid not in {p.pid for p in current.processes}):
                 raise EvidenceUnavailable("Cannot identify exact active unit generation")
             self._stopped_generation = current
-            self.unit.stop()
+            self.unit.stop(current)
         elif action == 'START':
             process, context, _ = self.observe()
             if process is not Observation.ABSENT or context is not Observation.ABSENT:
@@ -128,11 +160,13 @@ class ExactUnitController:
 class SystemdUserUnit:
     """Fixed-argv user-systemd backend for one privately configured unit."""
 
-    def __init__(self, unit: str, *, cgroup_root: Path = Path('/sys/fs/cgroup')):
+    def __init__(self, unit: str, *, cgroup_root: Path = Path('/sys/fs/cgroup'),
+                 pidfd=None):
         if not re.fullmatch(r'[A-Za-z0-9_.@-]+\.service', unit):
             raise ValueError("An exact user service name is required")
         self.unit = unit
         self.cgroup_root = cgroup_root
+        self.pidfd = pidfd
 
     @staticmethod
     def _run(*args: str) -> str:
@@ -209,8 +243,37 @@ class SystemdUserUnit:
         return UnitGeneration(self.unit, state, fields['InvocationID'], cgroup,
                               main_pid, processes)
 
-    def stop(self) -> None:
-        self._run('stop', self.unit)
+    def stop(self, expected: UnitGeneration) -> None:
+        """Signal the captured main process, never a replacement unit name.
+
+        The unit's own watcher must stop its children on TERM. If it does not,
+        subsequent process/cgroup/GPU checks remain pending; no broad fallback
+        signal is sent here.
+        """
+        current = self.snapshot()
+        if (current.unit != expected.unit or current.invocation != expected.invocation or
+                current.main_pid != expected.main_pid):
+            raise EvidenceUnavailable("Unit invocation changed before exact stop")
+        main = next((p for p in expected.processes if p.pid == expected.main_pid), None)
+        if main is None:
+            raise EvidenceUnavailable("Captured main process is missing")
+        ops = self.pidfd or LibcPidfd()
+        try:
+            fd = ops.open(main.pid)
+        except OSError:
+            raise EvidenceUnavailable("Cannot bind captured main process") from None
+        try:
+            if self._start_ticks(main.pid) != main.start_ticks:
+                raise EvidenceUnavailable("Main process generation changed")
+            bound = self.snapshot()
+            if (bound.unit != expected.unit or bound.invocation != expected.invocation or
+                    bound.main_pid != expected.main_pid):
+                raise EvidenceUnavailable("Unit invocation changed after process binding")
+            ops.send(fd, signal.SIGTERM)
+        except OSError:
+            raise EvidenceUnavailable("Exact main process stop unavailable") from None
+        finally:
+            os.close(fd)
 
     def start(self) -> None:
         self._run('start', self.unit)
