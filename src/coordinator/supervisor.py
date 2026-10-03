@@ -501,34 +501,62 @@ class Supervisor:
         """Owner API boundary: caller authentication is required by the local service."""
         if not operation_id:
             raise ValueError("operation identity required")
-        with self._tx() as db:
-            row = db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
-            if not row:
-                raise KeyError(attempt_id)
-            old = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
-            if old and (old["attempt_id"] != attempt_id or old["kind"] != "owner_stop"):
-                raise Conflict("operation identity conflict")
-            if old:
-                # Repeat the exact stop if its confirmation was lost, but do
-                # not revoke a controller which acquired control afterwards.
-                already_recorded = True
-            else:
-                already_recorded = False
-            if row["state"] == "stopped":
+        try:
+            with self._tx() as db:
+                row = db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+                if not row:
+                    raise KeyError(attempt_id)
+                old = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
+                if old and (old["attempt_id"] != attempt_id or old["kind"] != "owner_stop"):
+                    raise Conflict("operation identity conflict")
+                if old:
+                    # Repeat the exact stop if its confirmation was lost, but do
+                    # not revoke a controller which acquired control afterwards.
+                    already_recorded = True
+                else:
+                    already_recorded = False
+                if row["state"] == "stopped":
+                    if not old:
+                        db.execute("INSERT INTO operations VALUES(?,?,?,?,?)", (
+                            operation_id, attempt_id, "owner_stop", "confirmed",
+                            _json({"state": "stopped"})))
+                    else:
+                        db.execute("UPDATE operations SET status='confirmed',response=? WHERE id=?", (
+                            _json({"state": "stopped"}), operation_id))
+                    return self._attempt(row)
                 if not old:
                     db.execute("INSERT INTO operations VALUES(?,?,?,?,?)", (
-                        operation_id, attempt_id, "owner_stop", "confirmed",
-                        _json({"state": "stopped"})))
-                else:
-                    db.execute("UPDATE operations SET status='confirmed',response=? WHERE id=?", (
-                        _json({"state": "stopped"}), operation_id))
-                return self._attempt(row)
-            if not old:
-                db.execute("INSERT INTO operations VALUES(?,?,?,?,?)", (operation_id, attempt_id, "owner_stop", "pending", None))
-            db.execute("UPDATE attempts SET cancel=1 WHERE id=?", (attempt_id,))
-            if not already_recorded:
-                db.execute("UPDATE meta SET generation=generation+1,controller=NULL,lease_until=0")
+                        operation_id, attempt_id, "owner_stop", "pending", None))
+                db.execute("UPDATE attempts SET cancel=1 WHERE id=?", (attempt_id,))
+                if not already_recorded:
+                    db.execute("UPDATE meta SET generation=generation+1,controller=NULL,lease_until=0")
+        except Unavailable:
+            self._emergency_stop_without_journal(attempt_id)
+            raise OwnershipUnknown("owner stop outcome uncertain; journal fencing unavailable") from None
         return self._stop_exact(attempt_id)
+
+    def _emergency_stop_without_journal(self, attempt_id):
+        """Best effort only: no durable fence or confirmation can be claimed.
+
+        The caller still holds the cross-process lock. A persisted runtime ID
+        and positive adapter ownership evidence are mandatory; a launch with
+        no saved ID must be left alone because its create outcome is unknown.
+        """
+        try:
+            item = self.inspect(attempt_id)
+            if item["state"] not in {"running", "unknown"} or not item["runtime_id"]:
+                return
+            observed = self.runtime.inspect(item["plan"], item["runtime_id"])
+            if (not observed["identity_ok"] or
+                    observed["runtime_id"] != item["runtime_id"]):
+                return
+            if not observed["stopped"]:
+                self.runtime.stop(item["plan"], item["runtime_id"])
+                observed = self.runtime.inspect(item["plan"], item["runtime_id"])
+            # Even a positive stopped observation cannot be reported as a
+            # confirmed owner stop without a committed cancel and fence.
+        except Exception:
+            return
 
     def _stop_exact(self, attempt_id):
         item = self.inspect(attempt_id)
@@ -576,11 +604,12 @@ class Supervisor:
 
     @_serialized
     def tick(self):
-        """Supervisor-owned watchdog; call periodically regardless of coordinator state."""
+        """Observe exits and enforce readiness/deadlines without coordinator liveness."""
         with self._tx() as db:
             now, meta = self._clock_check(db)
             rows = db.execute("SELECT * FROM attempts WHERE state!='stopped'").fetchall()
             due = []
+            observe = []
             for row in rows:
                 stop_at = row["deadline"]
                 if row["generation"] != meta["generation"] or meta["lease_until"] <= now:
@@ -588,6 +617,8 @@ class Supervisor:
                 if meta["blocked"] or now >= stop_at or row["cancel"]:
                     db.execute("UPDATE attempts SET cancel=1 WHERE id=?", (row["id"],))
                     due.append(row["id"])
+                elif row["state"] == "running":
+                    observe.append((row["id"], row["deadline"], json.loads(row["plan"])))
         stopped, uncertain = [], []
         for attempt_id in due:
             try:
@@ -597,6 +628,35 @@ class Supervisor:
                 else:
                     uncertain.append(attempt_id)
             except (OwnershipUnknown, Unavailable):
+                uncertain.append(attempt_id)
+        for attempt_id, deadline, plan in observe:
+            try:
+                # Exact runtime observation also records normal exits while
+                # the coordinator has no lease or is entirely absent.
+                saved = self.inspect(attempt_id)
+                observed = self.runtime.inspect(plan, saved["runtime_id"])
+                if (not observed["identity_ok"] or
+                        observed["runtime_id"] != saved["runtime_id"]):
+                    raise OwnershipUnknown("runtime ownership mismatch")
+                if observed["stopped"]:
+                    self._reconcile_owned(attempt_id)
+                    stopped.append(attempt_id)
+                    continue
+                if not observed["running"]:
+                    uncertain.append(attempt_id)
+                    continue
+                if plan["worker_type"] == "protocol_example":
+                    ready = self.runtime.protocol_ready(plan, saved["runtime_id"])
+                    start_at = deadline - plan["deadline_seconds"]
+                    if not ready and now >= start_at + min(30, plan["deadline_seconds"]):
+                        with self._tx() as db:
+                            db.execute("UPDATE attempts SET cancel=1 WHERE id=?", (attempt_id,))
+                        outcome = self._stop_exact(attempt_id)
+                        if outcome["state"] == "stopped":
+                            stopped.append(attempt_id)
+                        else:
+                            uncertain.append(attempt_id)
+            except Exception:
                 uncertain.append(attempt_id)
         if uncertain:
             raise WatchdogUncertain(stopped, uncertain)

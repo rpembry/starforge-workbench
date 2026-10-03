@@ -51,6 +51,24 @@ stop reports unknown until observation confirms termination.
 The watchdog processes every due attempt even when one has mismatched ownership
 or missing evidence. It reports which exact attempts stopped and which remain
 uncertain; it never stops a resource whose identity failed verification.
+It also inspects active attempts for normal process exit without a coordinator
+connection. For protocol workers, the host-acknowledged `hello` and `ready`
+sequence must be complete within 30 seconds of the durable launch intent (or
+the shorter job deadline). A worker still running without that evidence is
+stopped by the independent watchdog. A worker that exits before readiness is
+recorded as stopped; collection cannot mark it successful without complete
+protocol evidence. A failed runtime inspection remains uncertain and does not
+authorize a stop of an unverified resource.
+
+If an owner stop cannot commit to the journal, the owner endpoint reports an
+uncertain outcome. While holding the supervisor's cross-process lock, it may
+make a best-effort stop only for an attempt with a committed runtime ID and a
+fresh positive match of plan, receipt, labels, incarnation, and runtime ID.
+No committed ID, unreadable journal, or mismatched runtime means no emergency
+mutation. Even a positive post-stop inspection does not become a confirmed
+owner stop without durable cancel and fencing evidence. Investigate the
+attempt with the owner inspection endpoint after journal service is restored;
+do not infer cancellation or retry from the uncertain response.
 
 The default `strict` policy stops at lease expiry plus configured grace, capped
 by the original runtime deadline. Explicit `trusted_local` continuation stops
@@ -78,3 +96,10 @@ supervisor restarts and reconciles. The owner and control sockets both trust
 the same local UID; they are separate operation surfaces, not isolation from
 a malicious process running under that UID. No service installation or live
 Docker claim is made by these tests.
+
+Operator evidence remains open for a reviewed, digest-pinned protocol image,
+live two-worker admission and runtime measurements, independent resource
+reservation against actual host load, scratch review/archive disposition, and
+a fault matrix on a host with ordinary Docker access. The legacy Git runner is
+not a coordinator workspace adapter. Remote access and Starkeep testing belong
+to a separately approved later gate.

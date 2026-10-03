@@ -6,6 +6,7 @@ import hashlib
 import json
 
 from coordinator.supervisor import Conflict, Fenced, OwnershipUnknown, RecoveryUncertain, Supervisor, WatchdogUncertain
+from coordinator.store import Unavailable
 
 
 class Runtime:
@@ -14,6 +15,7 @@ class Runtime:
         self.starts = 0
         self.stops = 0
         self.fail_after_create = False
+        self.ready = False
 
     def validate(self, plan):
         if plan["profile_ref"] != "offline" or plan["workspace_ref"] != "scratch":
@@ -37,6 +39,10 @@ class Runtime:
         assert runtime_id == item["runtime_id"] and item["identity_ok"]
         self.stops += 1
         item.update(running=False, stopped=True, exit_code=143)
+
+    def protocol_ready(self, plan, runtime_id):
+        assert runtime_id == self.items[plan["attempt_id"]]["runtime_id"]
+        return self.ready
 
 
 @pytest.fixture
@@ -93,6 +99,46 @@ def test_orphan_budget_survives_restart(setup, mode, stop_at):
     assert restarted.inspect("attempt-1")["state"] == "stopped"
 
 
+def test_watchdog_observes_normal_exit_without_controller(setup):
+    supervisor, runtime, clock = setup
+    lease = supervisor.acquire("a")
+    supervisor.launch(plan(), controller="a", generation=lease["generation"], operation_id="launch")
+    runtime.items["attempt-1"].update(running=False, stopped=True, exit_code=0)
+    clock[0] = 1016  # coordinator lease expired; strict orphan grace not yet due
+    assert supervisor.tick() == ["attempt-1"]
+    assert supervisor.inspect("attempt-1")["state"] == "stopped"
+    assert runtime.stops == 0
+
+
+def test_protocol_readiness_timeout_is_bounded_and_owner_enforced(setup):
+    supervisor, runtime, clock = setup
+    lease = supervisor.acquire("a")
+    worker = plan(mode="trusted_local")
+    worker["worker_type"] = "protocol_example"
+    worker["deadline_seconds"] = 60
+    worker["orphan_policy"]["max_orphan_seconds"] = 60
+    supervisor.launch(worker, controller="a", generation=lease["generation"], operation_id="launch")
+    clock[0] = 1029.9
+    assert supervisor.tick() == []
+    clock[0] = 1030
+    assert supervisor.tick() == ["attempt-1"]
+    assert runtime.stops == 1 and supervisor.inspect("attempt-1")["cancel"] == 1
+
+
+def test_protocol_ready_survives_early_window(setup):
+    supervisor, runtime, clock = setup
+    lease = supervisor.acquire("a")
+    worker = plan(mode="trusted_local")
+    worker["worker_type"] = "protocol_example"
+    worker["deadline_seconds"] = 60
+    worker["orphan_policy"]["max_orphan_seconds"] = 60
+    supervisor.launch(worker, controller="a", generation=lease["generation"], operation_id="launch")
+    runtime.ready = True
+    clock[0] = 1030
+    assert supervisor.tick() == []
+    assert supervisor.inspect("attempt-1")["state"] == "running"
+
+
 def test_lost_launch_response_does_not_duplicate(setup):
     supervisor, runtime, clock = setup
     lease = supervisor.acquire("a")
@@ -117,6 +163,48 @@ def test_identity_mismatch_blocks_stop(setup):
     assert supervisor.inspect("attempt-1")["state"] == "unknown"
     assert supervisor.inspect("attempt-1")["cancel"] == 1
     assert runtime.stops == 0
+
+
+def test_owner_stop_storage_failure_only_stops_exact_saved_runtime(setup, monkeypatch):
+    supervisor, runtime, clock = setup
+    lease = supervisor.acquire("a")
+    supervisor.launch(plan(), controller="a", generation=lease["generation"], operation_id="launch")
+    def failed_tx():
+        raise Unavailable("journal write failed")
+    monkeypatch.setattr(supervisor, "_tx", failed_tx)
+    with pytest.raises(OwnershipUnknown, match="uncertain"):
+        supervisor.owner_stop("attempt-1", operation_id="emergency")
+    assert runtime.stops == 1
+    assert supervisor.inspect("attempt-1")["state"] == "running"
+    assert supervisor.inspect("attempt-1")["cancel"] == 0
+
+
+def test_owner_stop_storage_failure_never_stops_mismatched_runtime(setup, monkeypatch):
+    supervisor, runtime, clock = setup
+    lease = supervisor.acquire("a")
+    supervisor.launch(plan(), controller="a", generation=lease["generation"], operation_id="launch")
+    runtime.items["attempt-1"]["runtime_id"] = "different"
+    def failed_tx():
+        raise Unavailable("journal write failed")
+    monkeypatch.setattr(supervisor, "_tx", failed_tx)
+    with pytest.raises(OwnershipUnknown, match="uncertain"):
+        supervisor.owner_stop("attempt-1", operation_id="emergency")
+    assert runtime.stops == 0
+
+
+def test_owner_stop_storage_failure_does_not_adopt_unsaved_runtime(setup, monkeypatch):
+    supervisor, runtime, clock = setup
+    lease = supervisor.acquire("a")
+    runtime.fail_after_create = True
+    with pytest.raises(OwnershipUnknown):
+        supervisor.launch(plan(), controller="a", generation=lease["generation"], operation_id="launch")
+    assert supervisor.inspect("attempt-1")["runtime_id"] is None
+    def failed_tx():
+        raise Unavailable("journal write failed")
+    monkeypatch.setattr(supervisor, "_tx", failed_tx)
+    with pytest.raises(OwnershipUnknown, match="uncertain"):
+        supervisor.owner_stop("attempt-1", operation_id="emergency")
+    assert runtime.stops == 0 and runtime.items["attempt-1"]["running"]
 
 
 def test_clock_rewind_blocks_new_start_but_stops_existing(setup):

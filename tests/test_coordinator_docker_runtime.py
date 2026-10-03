@@ -156,8 +156,10 @@ def test_protocol_channel_reconnect_and_result_evidence(tmp_path, monkeypatch):
         client = WorkerClient(adapter.channels["a" * 32].connect_path,
                               str(root / ("a" * 32) / "scratch" / "sender.json"),
                               job_id="job", attempt_id="a" * 32, incarnation="inc")
+        assert adapter.protocol_ready(spec, runtime_id) is False
         client.send("hello", {"capabilities": []})
         client.send("ready", {})
+        assert adapter.protocol_ready(spec, runtime_id) is True
         (root / ("a" * 32) / "scratch" / "result.json").write_text('{"value":3}\n')
         client.send("artifact", {"path": "result.json"})
         client.send("result", {"ok": True, "summary": "fixture completed"})

@@ -234,6 +234,20 @@ class DockerRuntime:
             if not self.inspect(plan, observed["runtime_id"])["stopped"]:
                 raise WorkerError("stop not confirmed")
 
+    def protocol_ready(self, plan, runtime_id):
+        """Read only host-acknowledged, contiguous readiness for this exact worker."""
+        if plan["worker_type"] != "protocol_example":
+            raise ValueError("readiness applies only to protocol workers")
+        receipt = self._read(plan["attempt_id"])
+        if (receipt["plan_hash"] != hashlib.sha256(_json(plan).encode()).hexdigest() or
+                receipt["incarnation"] != plan["incarnation"] or
+                receipt["container_id"] != runtime_id):
+            raise WorkerError("runtime identity changed before readiness")
+        inbox = WorkerInbox(Path(receipt["attempt_path"]) / "host-inbox",
+                            job_id=receipt["job_id"], attempt_id=receipt["attempt_id"],
+                            incarnation=receipt["incarnation"])
+        return bool(inbox.state["hello"] and inbox.state["ready"] and not inbox.state["gaps"])
+
     def reopen_channels(self):
         """Restore only exact coordinator protocol receipts after service restart."""
         for path in self.root.iterdir():
