@@ -56,3 +56,24 @@ Exit codes: `0` success, `2` input/configuration, `4` not found, `5` conflict,
 `6` unavailable, `7` other HTTP error, `130` interrupted watch. Detailed reads
 are available only through the protected socket. Operators should avoid
 including private payloads or logs in public reports.
+
+## Supervisor relay seam
+
+`coordinator.dispatch.Dispatcher` relays durable `pending_commands()` through
+the supervisor's owner-only `control.sock`, using the store operation ID as the
+supervisor idempotency identity. It verifies the exact job, attempt,
+incarnation, and launch plan before applying observations. A lost launch
+response reconciles the same attempt; it does not allocate another worker.
+The relay retains unknown visibility when supervision is unavailable. It must
+run under one active coordinator controller with its lease renewed, and it
+must not be enabled until the supervisor service and approved runtime are
+configured together. The standalone API launcher currently does not start
+this relay.
+
+A cancellation committed before the supervisor has journaled launch is held
+without launching. That attempt remains unresolved until a reviewed durable
+prelaunch stop handshake is added. A stopped noncancelled attempt remains
+`finalizing` until verified worker result evidence is available. Logs and
+artifacts similarly require a reviewed bounded evidence contract over the
+supervisor boundary; no direct Docker or supervisor database reads are used by
+the API or CLI.
