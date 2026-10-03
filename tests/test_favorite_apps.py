@@ -224,6 +224,34 @@ def test_explicit_retry_refuses_unsafe_audit_file_without_launch(setup):
     assert desktop.launches == ['editor.desktop']
 
 
+def test_attempt_history_is_private_bounded_and_contains_counts_only(setup):
+    restore, _, _, _, _ = setup
+    preview_counts = {'launch': 1, 'preserve': 0, 'skip': 0, 'refuse': 0, 'unknown': 0}
+    result_counts = {'launch_requested': 1, 'launcher_accepted': 1,
+                     'verified_ready': 0, 'already_present': 0,
+                     'unresolved': 0, 'refused': 0}
+    for _ in range(70):
+        restore.record_attempt(phase='completed', selected_count=1,
+                               preview_counts=preview_counts, result_counts=result_counts)
+    history = json.loads(restore.attempts_path.read_text())
+    assert len(history['events']) == 64
+    assert history['events'][-1]['selected_count'] == 1
+    assert history['events'][-1]['boot_id'] == restore.generation()
+    assert 'editor.desktop' not in restore.attempts_path.read_text()
+    assert restore.attempts_path.stat().st_mode & 0o077 == 0
+
+
+def test_attempt_history_unsafe_file_is_refused(setup):
+    restore, _, _, _, _ = setup
+    restore.attempts_path.write_text('unsafe')
+    restore.attempts_path.chmod(0o644)
+    with pytest.raises(ValueError, match='mode 0600'):
+        restore.record_attempt(phase='cancelled', selected_count=0,
+                               preview_counts={key: 0 for key in ('launch','preserve','skip','refuse','unknown')},
+                               result_counts={key: 0 for key in ('launch_requested','launcher_accepted',
+                                                                  'verified_ready','already_present','unresolved','refused')})
+
+
 def test_explicit_retry_still_preserves_present_app_and_rejects_changed_identity(setup):
     restore, desktop, _, applications, _ = setup
     first = restore.preview(['Editor'])
