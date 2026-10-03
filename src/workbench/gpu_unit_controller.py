@@ -34,6 +34,7 @@ class UnitGeneration:
     cgroup: str
     main_pid: int
     processes: tuple[ProcessGeneration, ...]
+    start_job: bool | None = None  # None means job visibility is unavailable.
 
 
 class UserUnit(Protocol):
@@ -107,7 +108,8 @@ class ExactUnitController:
             return Observation.UNKNOWN, Observation.UNKNOWN, True
         if current.state == 'active':
             return Observation.PRESENT, Observation.UNKNOWN, True
-        if current.state != 'inactive' or self._stopped_generation is None:
+        if (current.state != 'inactive' or current.start_job is not False or
+                self._stopped_generation is None):
             return Observation.UNKNOWN, Observation.UNKNOWN, True
         captured = self._stopped_generation
         if current.invocation != captured.invocation:
@@ -134,6 +136,14 @@ class ExactUnitController:
             # indistinguishable without positive workload-scope attribution.
             return Observation.ABSENT, Observation.UNKNOWN, True
         if self.gpu.pids() != gpu_pids or self.scopes.permitted_gpu_pids(active_leases) != permitted:
+            return Observation.ABSENT, Observation.UNKNOWN, True
+        try:
+            final = self.unit.snapshot()
+        except EvidenceUnavailable:
+            return Observation.ABSENT, Observation.UNKNOWN, True
+        if (final.unit != current.unit or final.state != 'inactive' or
+                final.start_job is not False or
+                final.invocation != captured.invocation):
             return Observation.ABSENT, Observation.UNKNOWN, True
         # The unit's existing watcher remains the idle authority after START.
         return Observation.ABSENT, Observation.ABSENT, True
@@ -234,22 +244,26 @@ class SystemdUserUnit:
 
     def snapshot(self) -> UnitGeneration:
         output = self._run('show', self.unit, '--no-pager', '-p', 'ActiveState',
-                           '-p', 'MainPID', '-p', 'ControlGroup', '-p', 'InvocationID')
+                           '-p', 'MainPID', '-p', 'ControlGroup', '-p', 'InvocationID',
+                           '-p', 'Job')
         fields = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
-        if set(fields) != {'ActiveState', 'MainPID', 'ControlGroup', 'InvocationID'}:
+        if set(fields) != {'ActiveState', 'MainPID', 'ControlGroup', 'InvocationID', 'Job'}:
             raise EvidenceUnavailable("Incomplete user unit properties")
         try:
             main_pid = int(fields['MainPID'])
         except ValueError:
             raise EvidenceUnavailable("Invalid main PID") from None
         state = fields['ActiveState']
+        job = fields['Job']
+        start_job = False if job == '0' else (True if re.fullmatch(r'[1-9][0-9]*(?:/.*)?', job)
+                                                else None)
         cgroup = fields['ControlGroup']
         processes = self.cgroup_processes(cgroup) if state == 'active' else ()
         if state == 'active' and (processes is None or main_pid <= 0 or
                                   main_pid not in {p.pid for p in processes}):
             raise EvidenceUnavailable("Active unit generation is incomplete")
         return UnitGeneration(self.unit, state, fields['InvocationID'], cgroup,
-                              main_pid, processes)
+                              main_pid, processes, start_job)
 
     def stop(self, expected: UnitGeneration) -> None:
         """Signal the captured main process, never a replacement unit name.

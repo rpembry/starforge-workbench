@@ -233,6 +233,69 @@ def test_synthetic_ollama_request_requires_cached_model_and_bounded_body():
         provider.generate()
 
 
+@pytest.mark.parametrize('moment', ['before-generate', 'after-generate'])
+def test_synchronous_status_rejects_granted_but_stale_without_guard_tick(moment):
+    class InconsistentLease:
+        stale = False
+
+        def acquire(self, _key, _ttl):
+            return {'token': 'synthetic-token'}
+
+        def status(self, _token):
+            return {'token': 'synthetic-token', 'granted': True,
+                    'stale': self.stale, 'expires_at_monotonic': 250.}
+
+        def finish(self, _token):
+            return {'closing': True}
+
+    lease = InconsistentLease()
+    class MutatingProvider(FakeProvider):
+        def start(self):
+            super().start()
+            if moment == 'before-generate':
+                lease.stale = True
+
+        def generate(self):
+            super().generate()
+            if moment == 'after-generate':
+                lease.stale = True
+
+    provider = MutatingProvider(lambda: False)
+    job = SingleSyntheticRequest(lease, provider, clock=lambda: 10.,
+                                 watch_interval=5)
+    with pytest.raises(RequestUnavailable, match='stale or expired'):
+        job.run('synthetic-stale')
+    assert provider.starts == 1
+    assert provider.generates == (0 if moment == 'before-generate' else 1)
+    assert provider.stops >= 1
+
+
+@pytest.mark.parametrize('mutated', [
+    {'token': 'other-token', 'granted': True, 'stale': False,
+     'expires_at_monotonic': 250.},
+    {'token': 'synthetic-token', 'granted': True, 'stale': False,
+     'expires_at_monotonic': 10.},
+    {'token': 'synthetic-token', 'granted': True, 'stale': None,
+     'expires_at_monotonic': 250.},
+])
+def test_mismatched_expired_or_unknown_grant_never_starts_provider(mutated):
+    class BadLease:
+        def acquire(self, _key, _ttl):
+            return {'token': 'synthetic-token'}
+
+        def status(self, _token):
+            return mutated
+
+        def finish(self, _token):
+            return {'closing': True}
+
+    provider = FakeProvider(lambda: False)
+    job = SingleSyntheticRequest(BadLease(), provider, clock=lambda: 10.)
+    with pytest.raises(RequestUnavailable):
+        job.run('synthetic-invalid')
+    assert provider.starts == provider.generates == 0
+
+
 class FakeRequestUnit:
     unit = 'example-request.service'
 
@@ -360,4 +423,46 @@ def test_full_fake_stack_exact_miner_and_request_scopes(tmp_path):
     directory.rmdir()
     assert adapter.tick() == 'START'
     assert start_permitted(path) and miner_unit.starts == 1
+    registry.close()
+
+
+def test_prechecked_start_cannot_grant_during_activation_or_pending_job(tmp_path):
+    """The prior gate result alone is never accepted as current absence."""
+    path, registry, _, _, _ = state(tmp_path)
+    assert start_permitted(path)  # A start job checked the gate first.
+    registry.close()
+    registry = Registry(path, 'boot-one')
+    unit = FakeUnit()
+    class Gpu:
+        visible = {102}
+
+        def pids(self):
+            return self.visible
+    class Scopes:
+        def ended(self, _owner):
+            return False
+
+        def permitted_gpu_pids(self, _leases):
+            return set()
+    gpu = Gpu()
+    controller = ExactUnitController(unit, gpu, Scopes())
+    adapter = LocalAdapter(registry, controller, clock_id='boot-one', clock=lambda: 10.)
+    unit.state = 'activating'
+    lease = adapter.acquire('scope-owner', 'activation-race', 60)
+    assert not start_permitted(path)  # New gate checks cannot pass now.
+    assert adapter.tick() == 'HOLD'
+    assert not adapter.status('scope-owner', lease['token'])['granted']
+    unit.state = 'active'
+    assert adapter.tick() == 'STOP'
+    unit.remaining = ()
+    unit.alive.clear()
+    gpu.visible = set()
+    unit.start_job = True  # A queued/restarting job is also unknown.
+    assert adapter.tick() == 'HOLD'
+    unit.start_job = None  # Unparseable systemd Job property fails closed.
+    assert adapter.tick() == 'HOLD'
+    assert not adapter.status('scope-owner', lease['token'])['granted']
+    unit.start_job = False
+    assert adapter.tick() == 'HOLD'
+    assert adapter.status('scope-owner', lease['token'])['granted']
     registry.close()

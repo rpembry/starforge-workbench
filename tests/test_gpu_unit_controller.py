@@ -25,12 +25,14 @@ class FakeUnit:
         self.alive = {101, 102}
         self.stops = 0
         self.starts = 0
+        self.start_job = False
         self.replace_on_stop = False
 
     def snapshot(self):
         return UnitGeneration(self.unit, self.state, self.invocation, self.cgroup,
                               self.processes[0].pid if self.state == 'active' else 0,
-                              self.processes if self.state == 'active' else ())
+                              self.processes if self.state == 'active' else (),
+                              self.start_job)
 
     def cgroup_processes(self, _cgroup):
         return self.remaining
@@ -213,6 +215,37 @@ def test_systemd_backend_uses_fixed_user_unit_argv(monkeypatch):
     assert calls == [('systemctl', '--user', 'start', 'fixture-idle.service')]
     with pytest.raises(ValueError):
         SystemdUserUnit('fixture-idle.service;other')
+
+
+@pytest.mark.parametrize(('job', 'expected'), [
+    ('0', False), ('17/start', True), ('unavailable', None),
+])
+def test_systemd_snapshot_fences_unknown_or_pending_start_job(monkeypatch, job, expected):
+    unit = SystemdUserUnit('fixture-idle.service')
+    output = (f'ActiveState=inactive\nMainPID=0\nControlGroup=\n'
+              f'InvocationID=generation-one\nJob={job}\n')
+    monkeypatch.setattr(unit, '_run', lambda *_args: output)
+    assert unit.snapshot().start_job is expected
+
+
+def test_start_job_appearing_during_exit_observation_blocks_grant(monkeypatch):
+    unit, gpu = FakeUnit(), FakeGpu()
+    controller = ExactUnitController(unit, gpu, FakeScopes())
+    controller.apply('STOP')
+    unit.remaining = ()
+    unit.alive.clear()
+    gpu.visible = set()
+    original = unit.snapshot
+    calls = 0
+    def changing_snapshot():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            unit.state = 'activating'
+            unit.start_job = True
+        return original()
+    monkeypatch.setattr(unit, 'snapshot', changing_snapshot)
+    assert controller.observe()[:2] == (O.ABSENT, O.UNKNOWN)
 
 
 def test_systemd_stop_signals_only_captured_main_pidfd(monkeypatch):

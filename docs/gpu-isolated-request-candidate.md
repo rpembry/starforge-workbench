@@ -45,6 +45,17 @@ lease was acquired. The existing watcher keeps its lock, display, input-idle,
 and any-hour policy after the hold clears. A scoped peer's old `release`
 operation is deliberately treated as `finish`; it cannot skip scope exit.
 
+The `ExecCondition=` result is a **one-time** check, so the candidate depends
+on the user-systemd activation state being observable throughout the gap
+between that check and `ExecStart`. The controller now refuses to grant while
+the unit is `activating`, while a start `Job` is pending, or when that job
+property is unavailable or unrecognized. If acquisition commits before a
+new condition check, the durable hold makes that check skip startup. Fake
+interleaving tests cover both orders, but do not establish the real host's
+timing. The systemd documentation says `ExecCondition=` runs during the
+[activation transition](https://github.com/systemd/systemd/blob/main/man/systemd.service.xml);
+the exact `ActiveState`/`Job` observations still need a controlled host check.
+
 ## Commissioning gate and rollback
 
 Before any live test, review the exact private unit and drop-in, registry
@@ -56,6 +67,15 @@ candidate must be revised before inference. Verify the miner's captured
 generation can be recovered or plan an explicit operator recovery after an
 adapter restart. No arbitrary PID signaling or registry deletion is a
 recovery method.
+
+Before enabling a grant-capable adapter, verify with an inert test unit that
+`ActiveState` stays `activating` or a pending `Job` stays visible after a
+successful `ExecCondition=` check until the watcher has started or the job
+has ended. Also verify the local `systemctl show -p Job` format parses as
+expected. If the host can report `inactive` with no job in that gap, a one-time
+condition is insufficient: keep this path disabled and add a serialized
+watcher launch gate before any Ollama inference. The synthetic tests cannot
+substitute for this host-specific activation check.
 
 The first reviewed test would install the adapter and one **disabled** test
 unit, add the miner `ExecCondition`, observe gate behavior with fake lease

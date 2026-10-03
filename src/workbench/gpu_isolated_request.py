@@ -7,6 +7,7 @@ miner unit, SSH tunnel, or systemd configuration at import time.
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -159,18 +160,31 @@ class SingleSyntheticRequest:
         self.grant_timeout = grant_timeout
         self.watch_interval = watch_interval
 
+    def _grant_is_current(self, token: str) -> bool:
+        """Treat mismatched, stale, expired, or malformed status as unsafe."""
+        state = self.leases.status(token)
+        if not isinstance(state, dict):
+            raise RequestUnavailable('Lease status is incomplete or mismatched')
+        expiry = state.get('expires_at_monotonic')
+        if (state.get('token') != token or type(state.get('granted')) is not bool or
+                type(state.get('stale')) is not bool or
+                type(expiry) not in (int, float) or not math.isfinite(expiry)):
+            raise RequestUnavailable('Lease status is incomplete or mismatched')
+        if state['stale'] or self.clock() >= expiry:
+            raise RequestUnavailable('Lease became stale or expired')
+        return state['granted']
+
     def run(self, key: str) -> None:
-        token = self.leases.acquire(key, self.TTL)['token']
+        token = self.leases.acquire(key, self.TTL).get('token')
+        if not isinstance(token, str) or not token:
+            raise RequestUnavailable('Lease acquisition is incomplete')
         failure = []
         finished = threading.Event()
         watcher = None
         try:
             deadline = self.clock() + self.grant_timeout
             while True:
-                state = self.leases.status(token)
-                if state.get('stale') is True:
-                    raise RequestUnavailable('Lease became stale before grant')
-                if state.get('granted') is True:
+                if self._grant_is_current(token):
                     break
                 if self.clock() >= deadline:
                     raise RequestUnavailable('Miner exit was not confirmed in time')
@@ -179,8 +193,7 @@ class SingleSyntheticRequest:
             def guard():
                 while not finished.wait(self.watch_interval):
                     try:
-                        status = self.leases.status(token)
-                        if status.get('granted') is True and status.get('stale') is False:
+                        if self._grant_is_current(token):
                             continue
                     except RequestUnavailable:
                         pass
@@ -191,10 +204,10 @@ class SingleSyntheticRequest:
             watcher = threading.Thread(target=guard, daemon=True)
             watcher.start()
             self.provider.start()
-            if failure or self.leases.status(token).get('granted') is not True:
+            if failure or not self._grant_is_current(token):
                 raise RequestUnavailable('Lease grant was lost before inference')
             self.provider.generate()
-            if failure or self.leases.status(token).get('granted') is not True:
+            if failure or not self._grant_is_current(token):
                 raise RequestUnavailable('Lease grant was lost during inference')
         finally:
             finished.set()
