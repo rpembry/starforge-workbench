@@ -34,6 +34,7 @@ wb-mcp = "workbench.mcp_server:main"
 coord = "coordinator.cli:main"
 coord-server = "coordinator.server:main"
 coord-supervisor = "coordinator.supervisor_service:main"
+coord-ui = "workbench.coordinator_local:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
