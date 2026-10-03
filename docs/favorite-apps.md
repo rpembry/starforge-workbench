@@ -6,16 +6,16 @@ unknown running status. Favorites verified absent or whose running status is
 unknown start checked. Verified open apps and entries with unsafe identities
 start unchecked. An unresolved prior launch also starts checked but requires a
 separate duplicate-risk retry confirmation.
-Nothing is opened until the user previews and confirms. The user can go Back
-to change the selection, and confirms
-before opening them. Unknown status requires an explicit **Open anyway** choice
+Choose **Launch selected** after reviewing the checklist. The dialog then
+rechecks the selection and asks for confirmation before opening apps; **Back**
+returns to the checklist without opening anything. Unknown status requires an explicit **Open anyway** choice
 because another window may already exist. An unresolved same-boot launch is
 labeled separately. Retrying it requires the user to check existing windows
 and explicitly choose **I checked; retry** after a duplicate-window warning.
 Each deliberate retry is recorded in a private audit file before it is sent to
 the desktop launcher. The entry never starts apps at login. Back to the list
 refreshes status without requesting a launch or discarding a receipt.
-Choosing Preview without selecting anything explains that no app was opened
+Choosing Launch selected without selecting anything explains that no app was opened
 and returns to the list. Unknown apps require a separate duplicate-risk
 confirmation before a launch request.
 The result dialog says when all selected apps were already open, when no app

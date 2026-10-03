@@ -53,7 +53,9 @@ def _dialog(*args):
                                 timeout=3600, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValueError('Favorite Apps could not open a graphical dialog; check your desktop session') from exc
-    if result.returncode not in (0, 1) or result.stderr.strip():
+    # GTK may print a warning after a successful selection. A zero exit code
+    # still means Zenity returned the user's choice.
+    if result.returncode not in (0, 1) or (result.returncode == 1 and result.stderr.strip()):
         raise ValueError('Favorite Apps could not open a graphical dialog; check your desktop session')
     return result
 
@@ -106,8 +108,8 @@ def _run_gui(restorer, context):
             rows.extend(['TRUE' if item['name'] in selected else 'FALSE',
                          item['name'], label, item['evidence']])
         picked = _dialog('--list', '--checklist', '--title=Favorite Apps',
-                         '--text=Ready apps and apps with unverified running status are checked. Review the selection, then choose Preview. Already open apps stay open.',
-                         '--width=900', '--height=580', '--ok-label=Preview',
+                         '--text=Ready apps and apps with unverified running status are checked. Review the selection, then choose Launch selected. Unknown status needs another confirmation. Already open apps stay open.',
+                         '--width=900', '--height=580', '--ok-label=Launch selected',
                          '--separator=\n', '--column=Open', '--column=Favorite',
                          '--column=Status', '--column=Reason', *rows)
         if picked.returncode == 1:
@@ -127,7 +129,7 @@ def _run_gui(restorer, context):
             _dialog('--info', '--title=Favorite Apps', '--width=700',
                     '--ok-label=Back to favorites',
                     '--text=No apps are selected, so nothing was opened. '
-                    'Ready apps and apps with unverified running status start checked. Select an app and choose Preview. '
+                    'Ready apps and apps with unverified running status start checked. Select an app and choose Launch selected. '
                     'An app marked Running status unknown may already be open; opening it requires a separate confirmation.')
             continue
         selected_preview = restorer.preview(selected)

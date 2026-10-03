@@ -47,6 +47,7 @@ def test_gui_requires_review_then_uses_exact_preview_token(monkeypatch):
     assert restorer.attempts[-1]['phase'] == 'completed'
     assert restorer.attempts[-1]['result_counts']['launch_requested'] == 1
     assert calls[0].count('TRUE') == 2
+    assert '--ok-label=Launch selected' in calls[0]
     assert 'PWA: refuse' in next(arg for arg in calls[1] if arg.startswith('--text='))
 
 
@@ -162,6 +163,31 @@ def test_zenity_display_failure_is_not_cancel(monkeypatch):
         run_gui(restorer)
     assert restorer.attempts[-1]['phase'] == 'error'
     assert restorer.attempts[-1]['failure_reason'] == 'display_error'
+
+
+def test_zenity_warning_after_success_does_not_discard_selection(monkeypatch):
+    import starforge_workbench.favorite_apps_ui as ui
+    monkeypatch.setattr(ui.subprocess, 'run', lambda *args, **kwargs:
+                        SimpleNamespace(returncode=0, stdout='Editor\n',
+                                        stderr='Gtk-WARNING: harmless rendering warning'))
+    result = ui._dialog('--list', '--checklist')
+    assert result.stdout == 'Editor\n'
+
+
+def test_zenity_cancel_without_error_is_distinct_from_failure(monkeypatch):
+    import starforge_workbench.favorite_apps_ui as ui
+    monkeypatch.setattr(ui.subprocess, 'run', lambda *args, **kwargs:
+                        SimpleNamespace(returncode=1, stdout='', stderr=''))
+    assert ui._dialog('--list').returncode == 1
+
+
+def test_zenity_nonzero_error_still_fails(monkeypatch):
+    import pytest
+    import starforge_workbench.favorite_apps_ui as ui
+    monkeypatch.setattr(ui.subprocess, 'run', lambda *args, **kwargs:
+                        SimpleNamespace(returncode=2, stdout='', stderr='Gtk failed'))
+    with pytest.raises(ValueError, match='could not open a graphical dialog'):
+        ui._dialog('--list')
 
 
 def test_unresolved_receipt_requires_separate_confirm_and_back_does_not_retry(monkeypatch):
