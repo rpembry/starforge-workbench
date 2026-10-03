@@ -32,16 +32,15 @@ GPU work, or lost binding returns unknown and retains the hold. Restored
 leases are already fenced until controller reobservation. These contracts
 still need a real supervisor implementation and independent host validation.
 
-## Future watcher hold check
+## Miner start gate candidate
 
-Before a live cutover, the existing idle watcher must check durable hold
-state through a narrowly scoped local read interface **before every miner
-start** and stop its owned runner when a hold appears. Missing, stale, or
-unavailable hold state must prevent a start. Restarting the watcher must not
-clear an active hold; its lock/display/input idle rules and any-hour default
-remain in force. The watcher must terminate and reap the miner to release
-VRAM, rather than pause it with `SIGSTOP`. No installed watcher or service is
-changed by this document or source slice.
+The follow-on [isolated request candidate](gpu-isolated-request-candidate.md)
+adds a read-only, fail-closed registry check suitable for a reviewed systemd
+`ExecCondition=` on the watcher user unit. It prevents a new watcher start
+while a durable hold exists or the registry is unavailable. The exact-unit
+controller still stops an already-running watcher and verifies exit. The
+watcher's lock/display/input policy remains authoritative after restart. No
+installed watcher or service is changed by this source slice.
 
 An Ollama request proxy is a separate follow-on. An unproxied direct local
 Ollama call can still bypass reservations, and this scope contract does not

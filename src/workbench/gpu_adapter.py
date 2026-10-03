@@ -14,6 +14,7 @@ from typing import Protocol
 
 from .gpu_policy import Observation, ReservationPolicy
 from .gpu_registry import Registry, RegistryError, private_parent
+from .gpu_scope import ScopeBinding
 
 
 class OwnedController(Protocol):
@@ -67,9 +68,25 @@ class LocalAdapter:
     def release(self, owner: str, token: str) -> dict:
         with self.lock:
             self._available()
+            if owner.startswith('scope1.'):
+                # A scoped peer is still alive when it calls this method.
+                # The legacy immediate release must not restart the miner
+                # before its entire cgroup has ended.
+                ScopeBinding.from_owner_key(owner)
+                self.policy.finish(owner, token, self.clock())
+                self._persist()
+                return {'closing': True}
             self.policy.release(owner, token, self.clock())
             self._persist()
             return {'released': True}
+
+    def finish(self, owner: str, token: str) -> dict:
+        """Fence a scoped job until authoritative whole-scope exit evidence."""
+        with self.lock:
+            self._available()
+            self.policy.finish(owner, token, self.clock())
+            self._persist()
+            return {'closing': True}
 
     def status(self, owner: str, token: str) -> dict:
         with self.lock:
@@ -126,6 +143,8 @@ class _Handler(socketserver.StreamRequestHandler):
                 result = self.server.adapter.renew(owner, data['token'], data['ttl'])
             elif op == 'release' and set(data) == {'op', 'token'}:
                 result = self.server.adapter.release(owner, data['token'])
+            elif op == 'finish' and set(data) == {'op', 'token'}:
+                result = self.server.adapter.finish(owner, data['token'])
             elif op == 'status' and set(data) == {'op', 'token'}:
                 result = self.server.adapter.status(owner, data['token'])
             else:

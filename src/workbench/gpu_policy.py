@@ -181,6 +181,21 @@ class ReservationPolicy:
         del self._leases[token]
         self._retire(token, now)
 
+    def finish(self, owner: str, token: str, now: float) -> None:
+        """Close a scoped job only after its supervisor proves the scope ended.
+
+        The caller is still inside its scope when it requests closure. Dropping
+        the hold immediately would race its own process and GPU children.
+        """
+        if token not in self._leases:
+            if any(r.owner == owner and r.token == token and r.retain_until is not None
+                   for r in self._acquisitions.values()):
+                return
+        lease = self._get(owner, token)
+        lease.granted = False
+        lease.stale = True
+        lease.expires_at = min(lease.expires_at, now)
+
     def reconcile(self, *, now: float, owned_process: Observation,
                   owned_context: Observation, workload_ended, idle_allowed: bool) -> str:
         """Return STOP, HOLD, or START; never a process-control instruction to a client.
