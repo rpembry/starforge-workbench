@@ -56,9 +56,13 @@ old title or revision argument. A separate `thread/read` followed by
 Strict mode therefore reports `blocked` with reason
 `provider_has_no_atomic_expected_title_rename` for a real eligible row.
 The approved practical mode uses the supported app-server method with the
-disclosed race. Codex 0.155.1 stores an explicit app-server name separately
-from its generated title; the read-only catalog uses the chosen `name` when
-present, otherwise `title`. The catalog uses SQLite `mode=ro` for metadata,
+disclosed race. Codex 0.155.1 stores explicit names differently by history
+mode: legacy threads write `title`, while paginated threads write `name`.
+The read-only catalog uses the mode-specific saved field; for legacy titles
+still derived from the first message, it asks the supported metadata-only
+`thread/read` operation to resolve a possible name index. An unset paginated
+name remains unset rather than being treated as the generated title. The
+catalog uses SQLite `mode=ro` for metadata,
 consistent with the launcher's existing binding validation. It never edits
 Codex's database or session files, touches an active writer lock, injects
 keystrokes, or restarts an existing Codex process. A supported provider API
@@ -100,12 +104,15 @@ Do not use real thread IDs or private labels in public fixtures, screenshots,
 issues, or PR text. Any further live rename check needs explicit authorization
 for a disposable thread and a reviewed preview.
 
-On 2026-10-03, an authorized disposable check in a separate Codex home
-completed preview, confirmed practical apply, readback, and undo using the
-supported app-server rename method. A final supported `thread/read` confirmed
-the restored name. The app-server-created disposable thread was classified as
-`vscode`, so this check used a **test-only source adapter** for Workbench's
-CLI-source predicate. It proves the live provider name operation and
-readback against an isolated store; it does not prove an existing CLI-bound
-user context or installed Workbench client rollout. The disposable thread was
-retained. No existing user title was changed.
+On 2026-10-03, authorized disposable checks in separate Codex homes completed
+preview, confirmed practical apply, readback, and undo for both paginated and
+legacy history modes using the supported app-server rename method. Supported
+metadata-only `thread/read` confirmed each restored name. Creating a legacy
+thread through app-server required its documented `experimentalApi` capability;
+ordinary rename and read requests did not. App-server-created disposable
+threads were classified as `vscode`, so these checks used a **test-only source
+adapter** for Workbench's CLI-source predicate. They prove the live provider
+name operations and mode-specific readback against isolated stores; they do
+not prove an existing CLI-bound user context or installed Workbench client
+rollout. Both disposable threads were retained. No existing user title was
+changed.

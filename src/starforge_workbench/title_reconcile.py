@@ -102,18 +102,78 @@ class CodexCatalog:
         for path in self.codex_root.glob('state*.sqlite'):
             uri = path.resolve().as_uri() + '?mode=ro'
             with sqlite3.connect(uri, uri=True, timeout=2) as db:
-                # Codex app-server thread/name/set persists the chosen display
-                # name separately from the generated title in 0.155.1.
                 columns = {item[1] for item in db.execute('PRAGMA table_info(threads)')}
-                effective_title = "COALESCE(NULLIF(name, ''), title)" if 'name' in columns else 'title'
-                row = db.execute(f'SELECT id, cwd, {effective_title}, archived, source FROM threads WHERE id=?',
+                name = 'name' if 'name' in columns else 'NULL'
+                mode = 'history_mode' if 'history_mode' in columns else "'legacy'"
+                first = 'first_user_message' if 'first_user_message' in columns else 'NULL'
+                row = db.execute(f'SELECT id, cwd, title, {name}, archived, source, {mode}, {first} '
+                                 'FROM threads WHERE id=?',
                                  (thread_id,)).fetchone()
                 if row:
                     rows.append(row)
         if len(rows) != 1:
             return None
-        identity, cwd, title, archived, source = rows[0]
+        identity, cwd, generated_title, saved_name, archived, source, history_mode, first_message = rows[0]
+        if history_mode == 'paginated':
+            title = (saved_name or '').strip()
+        elif history_mode == 'legacy':
+            title = (generated_title or '').strip()
+            if not title or (first_message is not None and title == first_message.strip()):
+                # Legacy Codex consults its name index only when SQLite title
+                # is derived from the first message. Let the supported read API
+                # resolve that index; never infer it from the paginated name.
+                title = self._read_supported_name(thread_id)
+        else:
+            title = self._read_supported_name(thread_id)
         return {'id': identity, 'cwd': cwd, 'title': title, 'archived': bool(archived), 'source': source}
+
+    def _read_supported_name(self, thread_id: str) -> str:
+        if not self.executable:
+            raise ConnectionError('Codex read interface unavailable')
+        process = subprocess.Popen([self.executable, 'app-server', '--stdio'],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, bufsize=0,
+                                   env={**os.environ, 'CODEX_HOME': str(self.codex_root)})
+        pending = b''
+        def request(identity, method, params):
+            nonlocal pending
+            process.stdin.write((json.dumps({'jsonrpc': '2.0', 'id': identity,
+                                             'method': method, 'params': params}) + '\n').encode())
+            process.stdin.flush()
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                if b'\n' in pending:
+                    line, pending = pending.split(b'\n', 1)
+                    message = json.loads(line)
+                    if message.get('id') == identity:
+                        return message
+                    continue
+                ready, _, _ = select.select([process.stdout], [], [], deadline - time.monotonic())
+                if not ready:
+                    break
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                pending += chunk
+            raise ConnectionError('Codex read acknowledgement unavailable')
+        try:
+            initialized = request(1, 'initialize', {'clientInfo': {'name': 'starforge-workbench', 'version': '0.2.0'}})
+            if 'result' not in initialized:
+                raise ConnectionError('Codex read initialization unavailable')
+            process.stdin.write((json.dumps({'jsonrpc': '2.0', 'method': 'initialized', 'params': {}}) + '\n').encode())
+            process.stdin.flush()
+            response = request(2, 'thread/read', {'threadId': thread_id, 'includeTurns': False})
+            thread = response.get('result', {}).get('thread', {})
+            if thread.get('id') != thread_id:
+                raise ConnectionError('Codex read identity mismatch')
+            return (thread.get('name') or '').strip()
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
 
     def rename_if_title(self, thread_id: str, expected: str, desired: str):
         raise NotImplementedError('Codex 0.155.1 has no atomic expected-title rename')

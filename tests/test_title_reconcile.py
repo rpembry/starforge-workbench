@@ -277,10 +277,85 @@ def test_catalog_uses_saved_name_over_generated_title(tmp_path, monkeypatch):
     root = tmp_path / 'codex-home'
     root.mkdir()
     with __import__('sqlite3').connect(root / 'state_test.sqlite') as db:
-        db.execute('CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, name TEXT, archived INTEGER, source TEXT)')
-        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?)', (A, '/synthetic/a', 'Generated title', 'Chosen name', 0, 'cli'))
+        db.execute('CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, name TEXT, archived INTEGER, source TEXT, history_mode TEXT, first_user_message TEXT)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)', (A, '/synthetic/a', 'Generated title', 'Chosen name', 0, 'cli', 'paginated', 'First prompt'))
     monkeypatch.setenv('CODEX_HOME', str(root))
     assert CodexCatalog().read(A)['title'] == 'Chosen name'
+
+
+def test_legacy_title_ignores_stale_paginated_name_column(tmp_path, monkeypatch):
+    root = tmp_path / 'codex-home'
+    root.mkdir()
+    with __import__('sqlite3').connect(root / 'state_test.sqlite') as db:
+        db.execute('CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, name TEXT, archived INTEGER, source TEXT, history_mode TEXT, first_user_message TEXT)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)', (A, '/synthetic/a', 'Manual legacy title', 'Stale unused name', 0, 'cli', 'legacy', 'First prompt'))
+    monkeypatch.setenv('CODEX_HOME', str(root))
+    assert CodexCatalog().read(A)['title'] == 'Manual legacy title'
+
+
+def test_legacy_manual_edit_blocks_practical_write_even_with_stale_name(tmp_path, monkeypatch):
+    root = tmp_path / 'codex-home'
+    root.mkdir()
+    path = root / 'state_test.sqlite'
+    with __import__('sqlite3').connect(path) as db:
+        db.execute('CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, name TEXT, archived INTEGER, source TEXT, history_mode TEXT, first_user_message TEXT)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)', (A, '/synthetic/a', 'Initial legacy title', 'Stale unused name', 0, 'cli', 'legacy', 'First prompt'))
+    monkeypatch.setenv('CODEX_HOME', str(root))
+    catalog = CodexCatalog(executable='synthetic-provider')
+    writes = []
+    catalog.rename_practical = lambda identity, desired: writes.append((identity, desired)) or 'applied'
+    context = {'id': 'alpha', 'title': 'Desired', 'provider': 'codex', 'cwd': '/synthetic/a'}
+    binding = {'id': A, 'provider': 'codex', 'cwd': '/synthetic/a'}
+    service = Reconciler(lambda: [context], lambda _: binding, catalog, tmp_path / 'workbench-state')
+    plan = service.preview(['alpha'])
+    with __import__('sqlite3').connect(path) as db:
+        db.execute('UPDATE threads SET title=? WHERE id=?', ('Later manual title', A))
+    result = service.apply(plan['plan_id'], selected=['alpha'], mode='practical', confirm_non_atomic=True)
+    assert result['results']['alpha']['status'] == 'conflict'
+    assert writes == []
+
+
+def test_legacy_derived_title_uses_supported_read_for_index(tmp_path, monkeypatch):
+    root = tmp_path / 'codex-home'
+    root.mkdir()
+    with __import__('sqlite3').connect(root / 'state_test.sqlite') as db:
+        db.execute('CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, name TEXT, archived INTEGER, source TEXT, history_mode TEXT, first_user_message TEXT)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)', (A, '/synthetic/a', 'First prompt', 'Stale unused name', 0, 'cli', 'legacy', 'First prompt'))
+    monkeypatch.setenv('CODEX_HOME', str(root))
+    monkeypatch.setattr(CodexCatalog, '_read_supported_name', lambda self, _: 'Indexed legacy name')
+    assert CodexCatalog().read(A)['title'] == 'Indexed legacy name'
+
+
+def test_legacy_derived_title_supported_read_requests_exact_metadata_only(tmp_path, monkeypatch):
+    root = tmp_path / 'codex-home'
+    root.mkdir()
+    with __import__('sqlite3').connect(root / 'state_test.sqlite') as db:
+        db.execute('CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, name TEXT, archived INTEGER, source TEXT, history_mode TEXT, first_user_message TEXT)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)', (A, '/synthetic/a', 'First prompt', None, 0, 'cli', 'legacy', 'First prompt'))
+    fake = tmp_path / 'fake-codex'
+    fake.write_text('''#!/usr/bin/env python3
+import json, sys
+first=json.loads(sys.stdin.readline())
+print(json.dumps({'id':first['id'],'result':{}}), flush=True)
+json.loads(sys.stdin.readline())
+second=json.loads(sys.stdin.readline())
+assert second['method']=='thread/read'
+assert second['params']=={'threadId':'11111111-1111-4111-8111-111111111111','includeTurns':False}
+print(json.dumps({'id':second['id'],'result':{'thread':{'id':second['params']['threadId'],'name':'Indexed legacy name'}}}), flush=True)
+''')
+    fake.chmod(0o700)
+    monkeypatch.setenv('CODEX_HOME', str(root))
+    assert CodexCatalog(executable=str(fake)).read(A)['title'] == 'Indexed legacy name'
+
+
+def test_paginated_unset_name_does_not_pretend_generated_title_is_saved(tmp_path, monkeypatch):
+    root = tmp_path / 'codex-home'
+    root.mkdir()
+    with __import__('sqlite3').connect(root / 'state_test.sqlite') as db:
+        db.execute('CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, name TEXT, archived INTEGER, source TEXT, history_mode TEXT, first_user_message TEXT)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)', (A, '/synthetic/a', 'Generated title', None, 0, 'cli', 'paginated', 'First prompt'))
+    monkeypatch.setenv('CODEX_HOME', str(root))
+    assert CodexCatalog().read(A)['title'] == ''
 
 
 def test_provider_root_change_invalidates_preview(fixture, tmp_path):
