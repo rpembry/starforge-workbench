@@ -26,9 +26,24 @@ def _now():
 
 
 def _private_dir(path: Path):
+    missing = []
+    current = path
+    while not current.exists():
+        if current.is_symlink():
+            raise ValueError('Unsafe reconciliation state directory')
+        missing.append(current)
+        current = current.parent
+    if current.is_symlink():
+        raise ValueError('Unsafe reconciliation state directory')
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o700)
+        parent_fd = os.open(directory.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
     if path.is_symlink():
         raise ValueError('Unsafe reconciliation state directory')
-    path.mkdir(parents=True, mode=0o700, exist_ok=True)
     if path.stat().st_uid != os.getuid() or path.stat().st_mode & 0o077:
         raise ValueError('Reconciliation state directory must be private')
 

@@ -301,6 +301,24 @@ def test_audit_write_failure_leaves_fence_after_actual_rename(fixture, monkeypat
     assert service.preview(['alpha'])['rows'][0]['reason'] == 'unresolved_provider_outcome'
 
 
+def test_new_uncertain_directory_parent_is_synced_before_provider_send(fixture, monkeypatch):
+    service, cat, *_ = fixture
+    plan = service.preview(['alpha'])
+    synced = []
+    original_fsync = title_module.os.fsync
+    def record_fsync(fd):
+        synced.append(Path(__import__('os').readlink(f'/proc/self/fd/{fd}')))
+        return original_fsync(fd)
+    monkeypatch.setattr(title_module.os, 'fsync', record_fsync)
+    original_rename = cat.rename_if_title
+    def verify_order(identity, expected, desired):
+        assert service.state / 'uncertain' in synced
+        assert service.state in synced  # parent entry for uncertain/ is durable
+        return original_rename(identity, expected, desired)
+    cat.rename_if_title = verify_order
+    assert service.apply(plan['plan_id'], selected=['alpha'])['results']['alpha']['status'] == 'applied'
+
+
 def test_malformed_matching_ack_after_send_is_unknown(tmp_path):
     fake = tmp_path / 'fake-codex'
     fake.write_text('''#!/usr/bin/env python3
