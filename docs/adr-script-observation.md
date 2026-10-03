@@ -21,7 +21,8 @@ only process-level evidence; domain result, artifacts, external effects and
 human acceptance remain unknown. No log text is interpreted as progress.
 The callable requires the main thread for signal forwarding. It installs
 TERM/INT forwarding before spawning the child, including a pending-signal
-handoff across process creation. Publication runs in a daemon thread with a
+handoff across process creation. Each received signal is forwarded once to
+the direct child. Publication runs in a daemon thread with a
 100 ms wait per event. A failed or blocked `started` publication suppresses
 the terminal publication, leaving an explicit evidence gap; it never holds the
 child exit. This is a bounded best-effort source seam, not a durable outbox.
@@ -47,7 +48,9 @@ reject conflicting replay and record receive time independently. No such
 ingest path or durable outbox is enabled here. `read_status` is a pure,
 redacted projection for an eventual Workbench adapter. Its freshness reflects
 receive evidence; it has no schedule inputs yet, so it makes no due/overdue
-claim. It does not write another ledger.
+claim. Event occurrence times are parsed as UTC instants before ordering;
+sequence and event ID break identical-time ties deterministically. It does not
+write another ledger.
 
 `rgb_cue` yields a semantic producer **proposal** only. RGB #3 has not yet
 established its final wire version. The output is neither sent nor routed, and

@@ -139,12 +139,12 @@ def run_observed(identity: ScriptIdentity, argv: Sequence[str],
         return done.wait(REPORT_WAIT_SECONDS) and bool(succeeded)
 
     child = None
-    pending_signal = None
+    pending_signals = []
 
     def forward(signum, _frame):
-        nonlocal pending_signal
-        pending_signal = signum
-        if child is not None:
+        if child is None:
+            pending_signals.append(signum)
+        else:
             # Popen.send_signal checks whether its exact child has been reaped.
             child.send_signal(signum)
 
@@ -157,8 +157,9 @@ def run_observed(identity: ScriptIdentity, argv: Sequence[str],
         except OSError as exc:
             report(2, "launch_failed", {"error": type(exc).__name__})
             return 127
-        if pending_signal is not None:
-            child.send_signal(pending_signal)
+        for signum in pending_signals:
+            child.send_signal(signum)
+        pending_signals.clear()
         started_reported = report(1, "started", {"pid_known": True})
         result = child.wait()
         if started_reported:
@@ -186,7 +187,9 @@ def read_status(events: Sequence[Mapping[str, object]], *, identity: ScriptIdent
         freshness = "unknown"
     else:
         freshness = "current"
-    latest = max(events, key=lambda event: (event["occurred_at"], event["seq"]), default=None)
+    latest = max(events, key=lambda event: (
+        datetime.fromisoformat(event["occurred_at"].replace("Z", "+00:00")),
+        event["seq"], event["event_id"]), default=None)
     if latest is None:
         state = "unknown"
     elif latest["kind"] == "started":

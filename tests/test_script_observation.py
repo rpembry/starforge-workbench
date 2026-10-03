@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 import json
+import inspect
 from pathlib import Path
 import os
 import signal
@@ -13,6 +14,7 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from workbench.script_observation import ScriptIdentity, read_status, rgb_cue, run_observed, validate_event
+import workbench.script_observation as observation
 
 
 IDENTITY = ScriptIdentity("example-script", "r1", "local-adapter")
@@ -104,6 +106,75 @@ def test_identity_rejects_unicode_and_raw_events_require_source_binding():
         rgb_cue(forged, identity=IDENTITY)
     with pytest.raises(ValueError):
         validate_event(dict(events[-1], kind=["exited"]), IDENTITY)
+
+
+def test_status_orders_utc_times_not_timestamp_strings():
+    events = []
+    run_observed(IDENTITY, [sys.executable, "-c", "pass"], events.append)
+    started = dict(events[0], occurred_at="2026-01-01T12:00:00Z")
+    exited = dict(events[1], occurred_at="2026-01-01T12:00:00.100000Z")
+    now = datetime.now(timezone.utc)
+    status = read_status([started, exited], identity=IDENTITY,
+                         received_at=now, now=now, freshness_seconds=60)
+    assert status["state"] == "process_exit_zero"
+
+
+def test_term_after_child_assignment_is_forwarded_once(monkeypatch):
+    class FakeChild:
+        def __init__(self):
+            self.signals = []
+
+        def send_signal(self, signum):
+            self.signals.append(signum)
+
+        def wait(self):
+            return -signal.SIGTERM
+
+    child = FakeChild()
+    monkeypatch.setattr(observation.subprocess, "Popen", lambda *_args, **_kwargs: child)
+    source, first_line = inspect.getsourcelines(observation.run_observed)
+    handoff_line = first_line + next(i for i, line in enumerate(source)
+                                     if "for signum in pending_signals:" in line)
+    fired = False
+
+    def trace(frame, event, arg):
+        nonlocal fired
+        if (event == "line" and not fired and frame.f_code.co_filename == observation.__file__
+                and frame.f_lineno == handoff_line):
+            fired = True
+            signal.raise_signal(signal.SIGTERM)
+        return trace
+
+    old_trace = sys.gettrace()
+    try:
+        sys.settrace(trace)
+        assert run_observed(IDENTITY, ["fixture"], lambda _event: None) == 143
+    finally:
+        sys.settrace(old_trace)
+    assert fired
+    assert child.signals == [signal.SIGTERM]
+
+
+def test_term_during_child_creation_is_forwarded_after_assignment(monkeypatch):
+    class FakeChild:
+        signals = None
+
+        def send_signal(self, signum):
+            self.signals.append(signum)
+
+        def wait(self):
+            return -signal.SIGTERM
+
+    child = FakeChild()
+    child.signals = []
+
+    def popen(*_args, **_kwargs):
+        signal.raise_signal(signal.SIGTERM)
+        return child
+
+    monkeypatch.setattr(observation.subprocess, "Popen", popen)
+    assert run_observed(IDENTITY, ["fixture"], lambda _event: None) == 143
+    assert child.signals == [signal.SIGTERM]
 
 
 def test_term_is_forwarded_to_direct_child():
