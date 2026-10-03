@@ -6,13 +6,15 @@
   const cards = document.getElementById('cards');
   const connection = document.getElementById('connection');
   const pending = new Map();
+  const dynamic = [];
   let generation = 0;
   const zone = document.body.dataset.timezone;
   const time = value => {
     if (!value) return 'unknown';
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? 'unknown' : new Intl.DateTimeFormat(undefined, {
-      dateStyle: 'medium', timeStyle: 'short', timeZone: zone, timeZoneName: 'short'
+      year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+      timeZone: zone, timeZoneName: 'short'
     }).format(date);
   };
   const el = (tag, text, className) => {
@@ -32,18 +34,43 @@
     try { localStorage.setItem('workbench-status-widgets', JSON.stringify(choice)); } catch (_) {}
   }
   const selected = () => boxes.filter(box => box.checked).map(box => box.dataset.widget);
-  function addLine(card, label, value) { card.append(el('p', `${label}: ${value}`)); }
+  function addLine(card, label, value) {
+    const line = el('p', `${label}: ${value}`);
+    card.append(line);
+    return line;
+  }
+  function freshness(widget, item, now) {
+    if (widget === 'attention') return 'current status unknown';
+    const observed = widget === 'allowances' ? item.observed_at : item.heartbeat_at;
+    const age = now - new Date(observed).getTime();
+    if (!Number.isFinite(age)) return 'unknown';
+    if (widget === 'allowances') {
+      const reset = item.reset_at ? new Date(item.reset_at).getTime() : Infinity;
+      return age > 3600000 || reset <= now ? 'stale' : 'manual';
+    }
+    return age > 90000 ? widget === 'hosts' ? 'disconnected' : 'stale' : 'fresh';
+  }
+  function updateDynamic() {
+    const now = Date.now();
+    for (const entry of dynamic) {
+      entry.freshness.textContent = freshness(entry.widget, entry.item, now);
+      if (entry.countdown) {
+        const delta = new Date(entry.item.reset_at).getTime() - now;
+        const minutes = Math.ceil(delta / 60000);
+        entry.countdown.textContent = `Countdown: ${!Number.isFinite(delta) ? 'unknown' :
+          delta <= 0 ? 'refresh due; awaiting new evidence' : `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`}`;
+      }
+    }
+  }
   function renderItem(widget, item, container) {
     const card = el('div', '', 'card');
+    let countdown = null;
     if (widget === 'allowances') {
       card.append(el('strong', `${item.provider} · ${item.product} · ${item.profile}`));
       addLine(card, 'Bucket / window', `${item.bucket} / ${item.window}`);
       addLine(card, 'Remaining', item.remaining_percent === null ? 'unknown' : `${item.remaining_percent}% (manual)`);
       addLine(card, 'Reset', item.reset_at ? time(item.reset_at) : 'unknown');
-      if (item.reset_at) {
-        const delta = new Date(item.reset_at).getTime() - Date.now();
-        addLine(card, 'Countdown', delta <= 0 ? 'refresh due; awaiting new evidence' : `${Math.ceil(delta / 60000)} minutes`);
-      }
+      countdown = item.reset_at ? addLine(card, 'Countdown', 'unknown') : null;
       addLine(card, 'Observed', time(item.observed_at));
     } else if (widget === 'attention') {
       card.append(el('strong', item.title || 'Untitled attention'));
@@ -60,8 +87,12 @@
       addLine(card, 'Last heartbeat', time(item.heartbeat_at));
       addLine(card, 'Last success', time(item.last_success_at));
     }
-    card.append(el('small', `Source: ${widget === 'allowances' ? 'manual observation' : 'Workbench'} · ${item.freshness || 'current status unknown'}`, 'muted'));
+    const source = el('small', `Source: ${widget === 'allowances' ? 'manual observation' : 'Workbench'} · `, 'muted');
+    const state = el('span', 'unknown');
+    source.append(state);
+    card.append(source);
     container.append(card);
+    dynamic.push({widget, item, freshness: state, countdown});
   }
   async function load(widget, token) {
     const controller = new AbortController();
@@ -78,6 +109,7 @@
       if (!data.items.length) section.append(el('p', widget === 'allowances' ? 'No observations. Allowance is unknown.' :
         widget === 'hosts' ? 'No collector reports. Host visibility is unknown.' : 'No current items reported.'));
       for (const item of data.items) renderItem(widget, item, section);
+      updateDynamic();
       if (data.truncated) section.append(el('p', 'More items exist; open full Workbench.'));
     } catch (error) {
       if (controller.signal.aborted || token !== generation) return;
@@ -90,6 +122,7 @@
     generation++;
     for (const request of pending.values()) request.abort();
     pending.clear();
+    dynamic.length = 0;
     const choice = selected();
     cards.replaceChildren();
     connection.textContent = navigator.onLine ? 'Foreground check requested.' : 'Offline; check again when connected.';
@@ -110,8 +143,12 @@
     for (const box of boxes) box.checked = defaults.includes(box.dataset.widget);
     saveChoices(defaults); refresh();
   });
-  window.addEventListener('online', () => { connection.textContent = 'Online. Refresh to check current status.'; });
+  window.addEventListener('online', () => { updateDynamic(); connection.textContent = 'Online. Refresh to check current status.'; });
   window.addEventListener('offline', refresh);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) connection.textContent = 'View resumed. Refresh to check current status.'; });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) { updateDynamic(); connection.textContent = 'View resumed. Refresh to check current status.'; }
+  });
+  window.addEventListener('pageshow', () => { updateDynamic(); });
+  window.setInterval(() => { if (!document.hidden) updateDynamic(); }, 30000);
   refresh();
 })();
