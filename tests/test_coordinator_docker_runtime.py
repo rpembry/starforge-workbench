@@ -12,6 +12,7 @@ import pytest
 from coordinator.docker_runtime import DockerRuntime
 from coordinator.supervisor import Conflict, OwnershipUnknown, Supervisor
 from coordinator.worker_sdk import WorkerClient
+from coordinator.worker_protocol import Frame, WorkerInbox
 from starforge_workbench.docker_worker import WorkerError
 
 
@@ -396,6 +397,82 @@ def test_protocol_channel_reconnect_and_result_evidence(tmp_path, monkeypatch):
         assert {entry["path"] for entry in manifest["files"]} == {"output.txt", "file-0", "exit.json"}
         assert not (root / ("a" * 32) / "channel" / "worker-inbox.json").exists()
         assert (root / ("a" * 32) / "host-inbox" / "worker-inbox.json").exists()
+    finally:
+        adapter.close_channels()
+
+
+def test_protocol_requires_scratch_and_profile_deadline(tmp_path):
+    raw = profile()
+    raw["mounts"].append(dict(source="scratch", target="/scratch", read_only=False))
+    fake = FakeDocker()
+    root = tmp_path / "runtime"
+    root.mkdir(mode=0o700)
+    adapter = DockerRuntime(root, profiles={"offline": raw}, workspaces={
+        "scratch": "scratch",
+        "reviewed": {"kind": "git_worktree", "repository": str(tmp_path / "repo"),
+                     "revision": "a" * 40}}, command_fn=fake)
+    spec = {**plan(), "worker_type": "protocol_example", "payload": {"input": {"value": 3}}}
+    with pytest.raises(ValueError, match="profile timeout"):
+        adapter.validate({**spec, "deadline_seconds": 31})
+    # Use a real local Git repository to get past workspace source validation.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git_local = lambda *args: subprocess.check_output(["git", "-C", str(repo), *args])
+    git_local("init", "-q")
+    git_local("-c", "user.email=test@example.invalid", "-c", "user.name=Test",
+              "commit", "--allow-empty", "-qm", "seed")
+    adapter.workspaces["reviewed"]["revision"] = git_local("rev-parse", "HEAD").decode().strip()
+    with pytest.raises(ValueError, match="scratch workspace"):
+        adapter.validate({**spec, "workspace_ref": "reviewed"})
+    assert fake.create_count == 0
+
+
+@pytest.mark.parametrize("declare,content,expected", [
+    (False, '{"value":3}\n', False),
+    (True, '{"value":4}\n', False),
+    (True, '{"value":3}\n', True),
+])
+def test_protocol_result_file_contract(tmp_path, monkeypatch, declare, content, expected):
+    if os.getuid() == 0 or os.getgid() == 0:
+        pytest.skip("restricted runner needs non-root caller")
+    root = tmp_path / "runtime"
+    root.mkdir(mode=0o700)
+    raw = profile()
+    raw["mounts"].append(dict(source="scratch", target="/scratch", read_only=False))
+    fake = FakeDocker()
+    monkeypatch.setattr("coordinator.docker_runtime.verify_container", lambda item, receipt, p: None)
+    class LocalInboxChannel:
+        def __init__(self, attempt, *, job_id, attempt_id, incarnation):
+            (attempt / "channel").mkdir(mode=0o700)
+            (attempt / "host-inbox").mkdir(mode=0o700)
+            self.inbox = WorkerInbox(attempt / "host-inbox", job_id=job_id,
+                                     attempt_id=attempt_id, incarnation=incarnation)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("coordinator.docker_runtime.WorkerChannel", LocalInboxChannel)
+    adapter = DockerRuntime(root, profiles={"offline": raw},
+                            workspaces={"scratch": "scratch"}, command_fn=fake)
+    spec = {**plan(), "worker_type": "protocol_example", "payload": {"input": {"value": 3}}}
+    try:
+        runtime_id = adapter.launch(spec)
+        inbox = adapter.channels["a" * 32].inbox
+        seq = 0
+        def send(kind, data):
+            nonlocal seq
+            seq += 1
+            inbox.accept(Frame(job_id="job", attempt_id="a" * 32, incarnation="inc",
+                               seq=seq, event_id=f"event-{seq}", kind=kind, data=data))
+        send("hello", {"capabilities": []})
+        send("ready", {})
+        (root / ("a" * 32) / "scratch" / "result.json").write_text(content)
+        if declare:
+            send("artifact", {"path": "result.json"})
+        send("result", {"ok": True, "summary": "fixture completed"})
+        fake.item["State"].update(Status="exited", Running=False, ExitCode=0)
+        manifest = json.loads(open(adapter.collect(spec, runtime_id)).read())
+        assert manifest["execution_ok"] is expected
     finally:
         adapter.close_channels()
 

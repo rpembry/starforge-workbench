@@ -47,10 +47,12 @@ contains only its event socket. The host controller must set arbitrary numeric
 non-root UID/GID, read-only root, network none, dropped capabilities, no new
 privileges, PID/CPU/memory/time limits, and no container Git. The current
 `DockerRuntime` adapter supports ordinary commands and the fixed
-`protocol_example` worker with scratch input. It mounts only that attempt's
+`protocol_example` worker only with a scratch workspace. Its job deadline may
+not exceed the approved profile timeout. It mounts only that attempt's
 event socket; inbox state stays in a separate host-only directory. Host
 collection requires positive process exit, readiness, a worker result, and
-valid declared scratch artifacts before execution success. Socket reconnect
+the declared `result.json` artifact with JSON content matching the bounded
+input's `value` before execution success. Socket reconnect
 and fake-Docker tests pass; the Docker mount/entrypoint path and supported
 pinned images still require opt-in live runtime verification.
 

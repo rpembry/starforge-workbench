@@ -37,6 +37,8 @@ def protocol_execution_result(exit_code, inbox_state):
         return False
     if not inbox_state["ready"] or result is None or not inbox_state["artifacts_complete"]:
         return None
+    if "result.json" not in inbox_state["artifacts"]:
+        return False
     return True
 
 
@@ -98,8 +100,12 @@ class DockerRuntime:
             raise ValueError("unregistered worker adapter")
         if not re.fullmatch(r"[0-9a-f]{32}", plan["attempt_id"]):
             raise ValueError("invalid attempt identity")
+        if plan["deadline_seconds"] > self.profiles[plan["profile_ref"]].timeout_seconds:
+            raise ValueError("job deadline exceeds approved profile timeout")
         payload = plan["payload"]
         if kind == "protocol_example":
+            if binding["kind"] != "scratch":
+                raise ValueError("protocol example requires a scratch workspace")
             if set(payload) != {"input"} or not isinstance(payload["input"], dict):
                 raise ValueError("protocol example requires bounded input only")
             if len(_json(payload["input"]).encode()) > 65_536:
@@ -465,6 +471,7 @@ class DockerRuntime:
             save("status.txt", git(receipt["worktree"], "status", "--porcelain",
                                    "--untracked-files=all", "--ignored"))
         total = 0
+        result_matches_input = False
         for index, name in enumerate(declarations):
             path = source / name
             if path.resolve() != path.absolute() or not path.is_file() or path.is_symlink():
@@ -473,12 +480,21 @@ class DockerRuntime:
             total += size
             if size > MAX_ARTIFACT or total > MAX_ARTIFACT:
                 raise WorkerError("declared artifacts exceed aggregate limit")
-            save("file-" + str(index), path.read_bytes())
+            data = path.read_bytes()
+            save("file-" + str(index), data)
             files[-1]["source_relative_path"] = name
+            if protocol and name == "result.json":
+                try:
+                    result_matches_input = json.loads(data) == {
+                        "value": plan["payload"]["input"].get("value")}
+                except (UnicodeDecodeError, ValueError, TypeError):
+                    result_matches_input = False
         save("exit.json", _json({"exit_code": observed["exit_code"],
                                  "runtime_id": runtime_id}).encode())
         if inbox:
             execution_ok = protocol_execution_result(observed["exit_code"], inbox.state)
+            if execution_ok is True and not result_matches_input:
+                execution_ok = False
         else:
             execution_ok = observed["exit_code"] == 0 if observed["exit_code"] is not None else None
         atomic(output / "manifest.json", {"attempt_id": plan["attempt_id"],
