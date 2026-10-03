@@ -14,7 +14,10 @@
 !/src/**/*.sql
 !/src/**/*.html
 !/src/**/*.js
+!/src/workbench/static/status-manifest.webmanifest
 !/src/workbench/static/workbench-logo.png
+!/src/workbench/static/status-icon-192.png
+!/src/workbench/static/status-icon-512.png
 !/src/**/htmx-LICENSE.txt
 !/bin/
 !/bin/ai-workbench

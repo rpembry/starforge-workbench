@@ -167,6 +167,10 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     def attention():
         return repository.dashboard()['attention']
 
+    @app.get('/api/status/config')
+    def status_config(who=Depends(operator)):
+        return {'profile': who.name, 'timezone': settings.reporting_timezone}
+
     @app.get('/api/status/{widget}', dependencies=[Depends(operator)])
     def status_widget(widget: Literal['allowances', 'attention', 'jobs', 'hosts']):
         from .status import read_widget
@@ -500,9 +504,29 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     def everyday_guide(request: Request):
         return templates.TemplateResponse(request=request, name='guide.html', context={})
 
-    @app.get('/status', response_class=HTMLResponse, dependencies=[Depends(operator)])
-    def status_view(request: Request):
-        return templates.TemplateResponse(request=request, name='status.html', context={'timezone': settings.reporting_timezone})
+    @app.get('/status', dependencies=[Depends(operator)])
+    def status_redirect():
+        return RedirectResponse('/status/', status_code=307)
+
+    @app.get('/status/', dependencies=[Depends(operator)])
+    def status_view():
+        return FileResponse(Path(__file__).with_name('static')/'status-shell.html', media_type='text/html')
+
+    @app.get('/status/manifest.webmanifest', dependencies=[Depends(operator)])
+    def status_manifest():
+        return FileResponse(Path(__file__).with_name('static')/'status-manifest.webmanifest',
+                            media_type='application/manifest+json')
+
+    @app.get('/status/sw.js', dependencies=[Depends(operator)])
+    def status_service_worker():
+        return FileResponse(Path(__file__).with_name('static')/'status-sw.js',
+                            media_type='application/javascript', headers={'Service-Worker-Allowed': '/status/'})
+
+    @app.get('/status/icon-{size}.png', dependencies=[Depends(operator)])
+    def status_icon(size: int):
+        if size not in {192, 512}:
+            raise Problem(404, 'not_found', 'Unknown status icon')
+        return FileResponse(Path(__file__).with_name('static')/f'status-icon-{size}.png', media_type='image/png')
 
     @app.get('/flow', response_class=HTMLResponse, dependencies=[Depends(operator)])
     def flow_view(request: Request, offset: int = Query(0, ge=0)):
