@@ -45,7 +45,9 @@ def install(app, operator, socket: str, *, factory=None):
 
     @app.middleware("http")
     async def local_browser_only(request: Request, call_next):
-        local_hosts = {"localhost", "127.0.0.1", "::1", "testserver"}
+        from urllib.parse import urlsplit
+        local_hosts = {"localhost", "127.0.0.1", "::1", "testserver",
+                       urlsplit(getattr(app.state, "coordinator_origin", "")).hostname}
         local_clients = {"localhost", "127.0.0.1", "::1", "testclient"}
         forwarded = any(name in request.headers for name in (
             "forwarded", "x-forwarded-for", "x-forwarded-host", "cf-connecting-ip"))

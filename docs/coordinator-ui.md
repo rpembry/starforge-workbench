@@ -9,12 +9,21 @@ without a separate security and operations review.
 
 The launcher accepts an existing owner-owned `0600` coordinator Unix socket,
 an unused local port, and an optional loopback Workbench dashboard origin. It
-binds only `127.0.0.1` and prints a one-use activation URL. The activation
+binds only `127.0.0.1` and prints a one-use activation URL at a fresh
+`coordinator-ui-<random>.localhost` hostname. Startup checks that the hostname
+resolves only to loopback. The host-only browser cookie is scoped to this
+per-process hostname, so opening another service on `127.0.0.1` or
+`localhost` does not transmit the coordinator session to it. The activation
+page uses a same-origin referrer policy: it suppresses referrers to the
+optional Workbench link while allowing stock Chromium to send its exact
+Origin on local form POSTs. `Origin: null` remains rejected. The activation
 secret is generated in process memory, expires after five minutes, and is
 carried in the URL fragment, which the browser removes before exchanging it.
 A successful exchange creates one `HttpOnly`, `SameSite=Strict` browser session
 in process memory. The session expires after eight hours or when the process
-stops. No Workbench bearer token grants access. All unsafe UI requests require
+stops; **End local session** revokes it immediately. Re-entry after expiry or
+logout requires restarting the explicit local companion for a new one-use
+activation. No Workbench bearer token grants access. All unsafe UI requests require
 the exact local Origin and a session CSRF token. The coordinator socket remains
 protected by its own owner-only permissions. Browser Host and peer checks are
 defense in depth, not the authorization boundary against a reverse proxy.

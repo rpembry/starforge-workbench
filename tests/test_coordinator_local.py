@@ -7,7 +7,7 @@ import httpx
 from test_coordinator_ui import FakeCoordinator, JOB_ID, KEY
 from workbench.coordinator_local import create_local_app
 
-ORIGIN = "http://127.0.0.1:8177"
+ORIGIN = "http://coordinator-ui-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.localhost:8177"
 SECRET = "synthetic-one-use-activation-secret-123456789"
 
 
@@ -33,10 +33,16 @@ def test_activation_session_csrf_and_no_workbench_bearer_bypass():
             assert activated.status_code == 200
             assert "httponly" in activated.headers["set-cookie"].lower()
             assert "samesite=strict" in activated.headers["set-cookie"].lower()
+            cookie = next(item for item in browser.cookies.jar if item.name == "coord_ui_session")
+            assert cookie.domain == "coordinator-ui-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.localhost"
+            assert not cookie.domain_specified
+            assert "cookie" not in browser.build_request("GET", "http://127.0.0.1:8027/").headers
+            assert "cookie" not in browser.build_request("GET", "http://localhost:8027/").headers
             repeated = await browser.post("/activate", json={"secret": SECRET}, headers={"Origin": ORIGIN})
             assert repeated.status_code == 403
             page = await browser.get(f"/coordinator/jobs/{JOB_ID}")
             assert page.status_code == 200
+            assert page.headers["referrer-policy"] == "same-origin"
             csrf = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
             action = f"/ui/coordinator/jobs/{JOB_ID}/cancel"
             data = {"version": 7, "key": KEY, "confirmed": "yes"}
@@ -49,6 +55,12 @@ def test_activation_session_csrf_and_no_workbench_bearer_bypass():
             remote = await browser.get("/coordinator", headers={"Host": "public.example",
                                                                "Authorization": "Bearer " + "x" * 40})
             assert remote.status_code == 403
+            assert (await browser.post("/logout", data={"csrf_token": "wrong"},
+                                       headers={"Origin": ORIGIN})).status_code == 403
+            logged_out = await browser.post("/logout", data={"csrf_token": csrf},
+                                            headers={"Origin": ORIGIN})
+            assert logged_out.status_code == 303
+            assert (await browser.get("/coordinator")).status_code == 401
     asyncio.run(scenario())
 
 
@@ -91,6 +103,9 @@ def test_validation_requires_exact_loopback_origin():
     with pytest.raises(ValueError):
         create_local_app("/tmp/fake-coordinator.sock", activation_secret=SECRET,
                          origin="https://public.example")
+    with pytest.raises(ValueError):
+        create_local_app("/tmp/fake-coordinator.sock", activation_secret=SECRET,
+                         origin="http://127.0.0.1:8177")
     with pytest.raises(ValueError):
         create_local_app("/tmp/fake-coordinator.sock", activation_secret=SECRET,
                          origin=ORIGIN, workbench_url="https://public.example")
