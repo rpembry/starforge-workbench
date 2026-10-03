@@ -1,6 +1,7 @@
 """Host-side worker transports with host-only durable inbox state."""
 
 import errno
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -108,6 +109,34 @@ class MailboxChannel:
     POLL_SECONDS = 0.05
     MAX_ACK = 512
 
+    @staticmethod
+    def _lock_inbox(inbox_dir):
+        """Keep a host-only inode locked for this channel's entire lifetime."""
+        directory_fd = os.open(inbox_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            fd = os.open("channel.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                         0o600, dir_fd=directory_fd)
+            try:
+                info = os.fstat(fd)
+                current = os.stat("channel.lock", dir_fd=directory_fd, follow_symlinks=False)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                        info.st_uid != os.getuid() or info.st_mode & 0o077 or
+                        (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino)):
+                    raise ValueError("mailbox lock path changed")
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise ValueError("mailbox channel already served") from None
+                current = os.stat("channel.lock", dir_fd=directory_fd, follow_symlinks=False)
+                if (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino):
+                    raise ValueError("mailbox lock path changed")
+                return fd
+            except BaseException:
+                os.close(fd)
+                raise
+        finally:
+            os.close(directory_fd)
+
     def __init__(self, attempt_root, *, job_id, attempt_id, incarnation):
         attempt = Path(attempt_root).absolute()
         if (not attempt.is_dir() or attempt.is_symlink() or
@@ -121,12 +150,22 @@ class MailboxChannel:
             if (path.is_symlink() or path.stat().st_uid != os.getuid() or
                     path.stat().st_mode & 0o077):
                 raise ValueError("mailbox directory changed")
-        self.inbox = WorkerInbox(self.inbox_dir, job_id=job_id,
-                                 attempt_id=attempt_id, incarnation=incarnation)
-        self.directory_fd = os.open(self.mount_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        self.stop_event = threading.Event()
-        self.thread = threading.Thread(target=self._serve, name="mailbox-" + attempt_id, daemon=True)
-        self.thread.start()
+        self.lock_fd = self._lock_inbox(self.inbox_dir)
+        try:
+            self.inbox = WorkerInbox(self.inbox_dir, job_id=job_id,
+                                     attempt_id=attempt_id, incarnation=incarnation)
+            self.directory_fd = os.open(self.mount_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                self.stop_event = threading.Event()
+                self.thread = threading.Thread(target=self._serve, name="mailbox-" + attempt_id, daemon=True)
+                self.thread.start()
+                self.closed = False
+            except BaseException:
+                os.close(self.directory_fd)
+                raise
+        except BaseException:
+            os.close(self.lock_fd)
+            raise
 
     def _request(self):
         try:
@@ -198,8 +237,12 @@ class MailboxChannel:
                 continue
 
     def close(self):
+        if self.closed:
+            return
         self.stop_event.set()
         self.thread.join(timeout=2)
         if self.thread.is_alive():
             raise RuntimeError("mailbox channel did not stop")
         os.close(self.directory_fd)
+        os.close(self.lock_fd)
+        self.closed = True

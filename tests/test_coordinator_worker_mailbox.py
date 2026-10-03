@@ -54,6 +54,69 @@ def test_mailbox_ack_follows_durable_host_inbox_and_restart_replays(tmp_path):
         channel.close()
 
 
+def test_mailbox_second_owner_fails_before_loading_inbox(tmp_path, monkeypatch):
+    attempt, _, channel, client = mailbox(tmp_path)
+    try:
+        client.send("hello", {"capabilities": []})
+        client.send("ready", {})
+        inbox_path = attempt / "host-inbox" / "worker-inbox.json"
+        before = inbox_path.read_bytes()
+        assert channel.inbox.state["ready"] is True
+        def must_not_load(*args, **kwargs):
+            raise AssertionError("second owner loaded inbox")
+        with monkeypatch.context() as patch:
+            patch.setattr("coordinator.worker_channel.WorkerInbox", must_not_load)
+            with pytest.raises(ValueError, match="already served"):
+                MailboxChannel(attempt, job_id="job", attempt_id="attempt", incarnation="first")
+        assert inbox_path.read_bytes() == before
+        assert channel.inbox.state["ready"] is True
+        client.send("heartbeat", {})
+        assert channel.inbox.state["last_seq"] == 3
+    finally:
+        channel.close()
+    restarted = MailboxChannel(attempt, job_id="job", attempt_id="attempt", incarnation="first")
+    try:
+        assert restarted.inbox.state["last_seq"] == 3
+        assert restarted.inbox.state["ready"] is True
+        client.send("heartbeat", {})
+        assert restarted.inbox.state["last_seq"] == 4
+    finally:
+        restarted.close()
+        restarted.close()  # cleanup cannot close a reused descriptor twice
+
+
+def test_mailbox_lock_path_rejects_symlink_and_hardlink(tmp_path):
+    attempt = tmp_path / "attempt"
+    attempt.mkdir(mode=0o700)
+    inbox = attempt / "host-inbox"
+    inbox.mkdir(mode=0o700)
+    outside = tmp_path / "outside"
+    outside.write_text("untouched")
+    lock = inbox / "channel.lock"
+    lock.symlink_to(outside)
+    with pytest.raises(OSError):
+        MailboxChannel(attempt, job_id="job", attempt_id="attempt", incarnation="first")
+    assert outside.read_text() == "untouched"
+    lock.unlink()
+    os.link(outside, lock)
+    with pytest.raises(ValueError, match="lock path changed"):
+        MailboxChannel(attempt, job_id="job", attempt_id="attempt", incarnation="first")
+    assert not (inbox / "worker-inbox.json").exists()
+
+
+def test_mailbox_failed_start_releases_lock(tmp_path, monkeypatch):
+    attempt = tmp_path / "attempt"
+    attempt.mkdir(mode=0o700)
+    with monkeypatch.context() as patch:
+        def fail(*args, **kwargs):
+            raise RuntimeError("inbox load failed")
+        patch.setattr("coordinator.worker_channel.WorkerInbox", fail)
+        with pytest.raises(RuntimeError, match="inbox load failed"):
+            MailboxChannel(attempt, job_id="job", attempt_id="attempt", incarnation="first")
+    channel = MailboxChannel(attempt, job_id="job", attempt_id="attempt", incarnation="first")
+    channel.close()
+
+
 def test_mailbox_pending_survives_host_absence_and_partial_file(tmp_path):
     attempt = tmp_path / "attempt"
     attempt.mkdir(mode=0o700)
