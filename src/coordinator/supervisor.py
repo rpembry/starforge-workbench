@@ -646,8 +646,14 @@ class Supervisor:
                     uncertain.append(attempt_id)
                     continue
                 if plan["worker_type"] == "protocol_example":
-                    ready = self.runtime.protocol_ready(plan, saved["runtime_id"])
                     start_at = deadline - plan["deadline_seconds"]
+                    ready = False
+                    try:
+                        ready = self.runtime.protocol_ready(plan, saved["runtime_id"])
+                    except Exception:
+                        # Failed inbox observation cannot extend the worker's
+                        # readiness window after exact runtime verification.
+                        uncertain.append(attempt_id)
                     if not ready and now >= start_at + min(30, plan["deadline_seconds"]):
                         with self._tx() as db:
                             db.execute("UPDATE attempts SET cancel=1 WHERE id=?", (attempt_id,))

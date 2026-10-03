@@ -59,6 +59,9 @@ stopped by the independent watchdog. A worker that exits before readiness is
 recorded as stopped; collection cannot mark it successful without complete
 protocol evidence. A failed runtime inspection remains uncertain and does not
 authorize a stop of an unverified resource.
+If the host inbox cannot be read at the readiness deadline, a worker with a
+positively verified running identity is stopped at that deadline and the
+readiness observation remains uncertain.
 
 If an owner stop cannot commit to the journal, the owner endpoint reports an
 uncertain outcome. While holding the supervisor's cross-process lock, it may

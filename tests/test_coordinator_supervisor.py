@@ -16,6 +16,7 @@ class Runtime:
         self.stops = 0
         self.fail_after_create = False
         self.ready = False
+        self.fail_ready = False
 
     def validate(self, plan):
         if plan["profile_ref"] != "offline" or plan["workspace_ref"] != "scratch":
@@ -42,6 +43,8 @@ class Runtime:
 
     def protocol_ready(self, plan, runtime_id):
         assert runtime_id == self.items[plan["attempt_id"]]["runtime_id"]
+        if self.fail_ready:
+            raise OSError("inbox unavailable")
         return self.ready
 
 
@@ -137,6 +140,27 @@ def test_protocol_ready_survives_early_window(setup):
     clock[0] = 1030
     assert supervisor.tick() == []
     assert supervisor.inspect("attempt-1")["state"] == "running"
+
+
+def test_readiness_observation_failure_stops_at_cap_not_job_deadline(setup):
+    supervisor, runtime, clock = setup
+    lease = supervisor.acquire("a")
+    worker = plan(mode="trusted_local")
+    worker["worker_type"] = "protocol_example"
+    worker["deadline_seconds"] = 60
+    worker["orphan_policy"]["max_orphan_seconds"] = 60
+    supervisor.launch(worker, controller="a", generation=lease["generation"], operation_id="launch")
+    runtime.fail_ready = True
+    clock[0] = 1029
+    with pytest.raises(WatchdogUncertain) as early:
+        supervisor.tick()
+    assert early.value.uncertain == ["attempt-1"] and runtime.stops == 0
+    clock[0] = 1030
+    with pytest.raises(WatchdogUncertain) as capped:
+        supervisor.tick()
+    assert capped.value.stopped == ["attempt-1"]
+    assert capped.value.uncertain == ["attempt-1"]
+    assert runtime.stops == 1 and supervisor.inspect("attempt-1")["state"] == "stopped"
 
 
 def test_lost_launch_response_does_not_duplicate(setup):
