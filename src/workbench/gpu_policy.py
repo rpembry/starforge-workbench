@@ -7,6 +7,7 @@ supervision. This module never runs commands or discovers processes itself.
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+import re
 import secrets
 
 
@@ -57,6 +58,21 @@ class Lease:
     stale: bool = False
 
 
+@dataclass(frozen=True)
+class AcquireRecord:
+    owner: str
+    request_key: str
+    ttl: float
+    token: str
+    retain_until: float | None = None
+
+
+@dataclass(frozen=True)
+class PolicySnapshot:
+    leases: tuple[Lease, ...]
+    acquisitions: tuple[AcquireRecord, ...]
+
+
 class ReservationPolicy:
     """Single-owner-controller state machine; persist snapshots before acknowledging.
 
@@ -67,16 +83,47 @@ class ReservationPolicy:
     state retains a stale hold after expiry.
     """
 
-    def __init__(self, leases=()):
-        self._leases = {lease.token: Lease(**vars(lease)) for lease in leases}
+    REPLAY_SECONDS = 3600
 
-    def acquire(self, owner: str, now: float, ttl: float) -> Lease:
-        if not owner or not (0 < ttl <= 3600):
-            raise ValueError("An owner and bounded TTL are required")
+    def __init__(self, snapshot: PolicySnapshot | None = None):
+        snapshot = snapshot or PolicySnapshot((), ())
+        self._leases = {lease.token: Lease(**vars(lease)) for lease in snapshot.leases}
+        self._acquisitions = {(record.owner, record.request_key): record
+                              for record in snapshot.acquisitions}
+
+    def acquire(self, owner: str, request_key: str, now: float, ttl: float) -> Lease:
+        if (not owner or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', request_key) or
+                not (0 < ttl <= 3600)):
+            raise ValueError("An owner, request key and bounded TTL are required")
+        self._prune(now)
+        prior = self._acquisitions.get((owner, request_key))
+        if prior:
+            if prior.ttl != ttl:
+                raise ValueError("Request key reused with a different TTL")
+            lease = self._leases.get(prior.token)
+            if lease is None:
+                raise ValueError("Reservation for request key has ended")
+            if now >= lease.expires_at or lease.stale:
+                raise ValueError("Reservation for request key awaits expiry reconciliation")
+            return Lease(**vars(lease))
         token = secrets.token_urlsafe(32)
         lease = Lease(owner, token, now + ttl)
         self._leases[token] = lease
+        self._acquisitions[(owner, request_key)] = AcquireRecord(
+            owner, request_key, ttl, token)
         return Lease(**vars(lease))
+
+    def _prune(self, now: float) -> None:
+        for key, record in tuple(self._acquisitions.items()):
+            if record.retain_until is not None and now >= record.retain_until:
+                del self._acquisitions[key]
+
+    def _retire(self, token: str, now: float) -> None:
+        for key, record in tuple(self._acquisitions.items()):
+            if record.token == token:
+                self._acquisitions[key] = AcquireRecord(
+                    record.owner, record.request_key, record.ttl,
+                    record.token, now + self.REPLAY_SECONDS)
 
     def _get(self, owner: str, token: str) -> Lease:
         lease = self._leases.get(token)
@@ -96,9 +143,10 @@ class ReservationPolicy:
         """Return a detached status value for the authenticated owner."""
         return Lease(**vars(self._get(owner, token)))
 
-    def release(self, owner: str, token: str) -> None:
+    def release(self, owner: str, token: str, now: float) -> None:
         self._get(owner, token)
         del self._leases[token]
+        self._retire(token, now)
 
     def reconcile(self, *, now: float, owned_process: Observation,
                   owned_context: Observation, workload_ended, idle_allowed: bool) -> str:
@@ -111,8 +159,10 @@ class ReservationPolicy:
             if now >= lease.expires_at:
                 if workload_ended(lease.owner) is True:
                     del self._leases[token]
+                    self._retire(token, now)
                 else:
                     lease.stale = True
+        self._prune(now)
         if self._leases:
             if owned_process is Observation.PRESENT or owned_context is Observation.PRESENT:
                 for lease in self._leases.values():
@@ -132,5 +182,7 @@ class ReservationPolicy:
             return "HOLD" if idle_allowed else "STOP"
         return "START" if idle_allowed else "HOLD"
 
-    def snapshot(self) -> tuple[Lease, ...]:
-        return tuple(Lease(**vars(lease)) for lease in self._leases.values())
+    def snapshot(self) -> PolicySnapshot:
+        return PolicySnapshot(
+            tuple(Lease(**vars(lease)) for lease in self._leases.values()),
+            tuple(self._acquisitions.values()))
