@@ -133,7 +133,31 @@ def test_lost_create_response_reconciles_same_resource(runtime, tmp_path):
     assert supervisor.launch(plan(), controller="controller", generation=lease["generation"], operation_id="launch-op")["state"] == "unknown"
     assert supervisor.reconcile("a" * 32, controller="controller", generation=lease["generation"])["state"] == "stopped"  # created, never started
     assert fake.create_count == 1
+    receipt = json.loads((adapter.root / ("a" * 32) / "runtime.json").read_text())
+    assert receipt["container_id"] == "container-1"
+    receipt_path = adapter.root / ("a" * 32) / "runtime.json"
+    receipt["container_id"] = "different-container"
+    receipt_path.write_text(json.dumps(receipt))
+    with pytest.raises(WorkerError, match="runtime plan or incarnation mismatch"):
+        adapter.inspect(plan(), "container-1")
+    receipt["container_id"] = "container-1"
+    receipt_path.write_text(json.dumps(receipt))
     assert supervisor.owner_stop("a" * 32, operation_id="owner-op")["state"] == "stopped"
+    (adapter.root / ("a" * 32) / "worktree" / "result.txt").write_text("retained\n")
+    supervisor.collect("a" * 32, controller="controller",
+                       generation=lease["generation"])
+    reviewed = supervisor.review("a" * 32)
+    fake.lose_rm_response = True
+    with pytest.raises(TimeoutError, match="lost Docker remove reply"):
+        supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],
+                           operation_id="archive-after-adoption")
+    assert supervisor.reconcile("a" * 32, controller="controller",
+                                generation=lease["generation"])["state"] == "stopped"
+    supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],
+                       operation_id="archive-after-adoption")
+    restarted = Supervisor(journal, adapter)
+    assert restarted.reconcile("a" * 32, controller="controller",
+                               generation=lease["generation"])["state"] == "stopped"
 
 
 def test_unapproved_reference_rejected_before_docker(runtime):

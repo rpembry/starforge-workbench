@@ -78,7 +78,10 @@ is uncertain. Mutating control reconciliation requires the current controller
 and generation; a stale coordinator cannot change journal observations.
 If Docker starts a worker but its response is lost, cancellation and the
 watchdog inspect the exact receipt, token, labels, plan, and incarnation before
-adopting its runtime ID for a scoped stop. A mismatched resource stays unknown.
+adopting its runtime ID for a scoped stop. The adapter durably saves that
+positively verified ID in the private receipt before exposing it to the
+supervisor, so later review and archive absence checks retain the same identity.
+A mismatched resource stays unknown.
 
 The journal records one active controller lease and monotonically increasing
 generation, immutable attempt/operation IDs, a plan hash, runtime identity,

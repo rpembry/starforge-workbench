@@ -294,11 +294,23 @@ class DockerRuntime:
         receipt = self._read(plan["attempt_id"])
         if (receipt["plan_hash"] != hashlib.sha256(_json(plan).encode()).hexdigest() or
                 receipt["incarnation"] != plan["incarnation"] or
+                receipt["job_id"] != plan["job_id"] or
                 runtime_id and receipt["container_id"] and runtime_id != receipt["container_id"]):
             raise WorkerError("runtime plan or incarnation mismatch")
         item = self._inspect(receipt)
         if item is None:
             return None
+        if runtime_id is not None and item["Id"] != runtime_id:
+            raise WorkerError("runtime identity changed")
+        if receipt["container_id"] is None:
+            if receipt["phase"] != "create_pending":
+                raise WorkerError("unbound runtime receipt phase")
+            # The exact token, plan, incarnation, name and container shape were
+            # verified by _inspect. Save the adopted ID before reporting it to
+            # the supervisor, so later archive proof still binds to this ID.
+            receipt["container_id"] = item["Id"]
+            receipt["phase"] = "created"
+            self._write(receipt)
         status = item["State"]["Status"]
         return {"identity_ok": True, "running": bool(item["State"]["Running"]),
                 "stopped": status in {"exited", "dead", "created"},
