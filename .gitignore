@@ -47,6 +47,9 @@
 !/docs/*.md
 !/docs/images/
 !/docs/images/starforge-dashboard-simulated.png
+!/examples/
+!/examples/coordinator_worker.py
+!/examples/Dockerfile.coordinator-worker
 !/skills/
 !/skills/**/
 !/skills/**/SKILL.md
