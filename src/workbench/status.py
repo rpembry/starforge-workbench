@@ -15,7 +15,7 @@ class ManualAllowance(BaseModel):
     profile: str = Field(min_length=1, max_length=80)
     bucket: str = Field(min_length=1, max_length=80)
     window: str = Field(min_length=1, max_length=80)
-    remaining_percent: float | None = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+    remaining_percent: float | None = Field(default=None, allow_inf_nan=False)
     reset_at: datetime | None = None
     observed_at: datetime
 

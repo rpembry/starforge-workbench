@@ -45,10 +45,12 @@ def test_manual_allowances_preserve_windows_profiles_and_observation_time(tmp_pa
     assert api.post('/api/allowances/manual', json=first, headers=auth).status_code == 201
     assert api.post('/api/allowances/manual', json=observation(window='five-hour', remaining_percent=55), headers=auth).status_code == 201
     assert api.post('/api/allowances/manual', json=observation(profile='other', remaining_percent=None), headers=auth).status_code == 201
+    assert api.post('/api/allowances/manual', json=observation(profile='unusual', remaining_percent=101.25), headers=auth).status_code == 201
     older = observation(observed_at='2026-10-02T12:00:00Z', remaining_percent=80)
     assert api.post('/api/allowances/manual', json=older, headers=auth).status_code == 201
     result = api.get('/api/status/allowances', headers=auth).json()
-    assert len(result['items']) == 3
+    assert len(result['items']) == 4
+    assert next(item for item in result['items'] if item['profile'] == 'unusual')['remaining_percent'] == 101.25
     weekly = next(item for item in result['items'] if item['profile'] == 'personal' and item['window'] == 'weekly')
     assert weekly['remaining_percent'] == 0
     assert weekly['observed_at'] == first['observed_at']
@@ -63,7 +65,7 @@ def test_manual_import_rejects_ambiguous_or_invalid_values(tmp_path):
     auth = {'Authorization': 'Bearer ' + 'o' * 32}
     for data in (observation(observed_at='2026-10-03T12:00:00'),
                  observation(reset_at='2026-11-01T01:30:00'),
-                 observation(remaining_percent=101),
+                 observation(remaining_percent='not-a-number'),
                  observation(remaining_percent='NaN'),
                  observation(secret='do-not-echo')):
         response = api.post('/api/allowances/manual', json=data, headers=auth)
