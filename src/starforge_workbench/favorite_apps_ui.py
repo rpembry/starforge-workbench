@@ -119,6 +119,16 @@ def _run_gui(restorer, context):
         selected = [name for name in picked.stdout.splitlines() if name]
         context['selected_count'] = len(selected)
         if not selected:
+            context['recorded'] = True
+            restorer.record_attempt(phase='no_launch', selected_count=0,
+                                    preview_counts=_preview_counts(preview),
+                                    result_counts={key: 0 for key in RESULT_KEYS})
+            context['recorded'] = False
+            _dialog('--info', '--title=Favorite Apps', '--width=700',
+                    '--ok-label=Back to favorites',
+                    '--text=No apps are selected, so nothing was opened. '
+                    'Only apps verified closed start checked. Select an app and choose Preview. '
+                    'An app marked Running status unknown may already be open; opening it requires a separate confirmation.')
             continue
         selected_preview = restorer.preview(selected)
         context['preview'] = selected_preview

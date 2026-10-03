@@ -105,6 +105,33 @@ def test_only_verified_absent_apps_start_checked(monkeypatch):
     assert restorer.attempts[-1]['selected_count'] == 1
 
 
+def test_empty_selection_explains_unknown_status_and_never_applies(monkeypatch):
+    import starforge_workbench.favorite_apps_ui as ui
+    class Unknown(Restorer):
+        def preview(self, names):
+            return {'selection': names, 'token': 'synthetic-token', 'items': [
+                {'name': name, 'action': 'refuse', 'can_open_anyway': True,
+                 'evidence': 'Synthetic visibility unknown'} for name in names]}
+    monkeypatch.setattr(ui, 'load_config', lambda _: [{'name': 'Unknown App'}])
+    monkeypatch.setattr(ui.shutil, 'which', lambda _: '/usr/bin/zenity')
+    responses = iter([(0, ''), (0, ''), (1, '')])
+    shown = []
+    def dialog(*args):
+        shown.append(args)
+        code, output = next(responses)
+        return SimpleNamespace(returncode=code, stdout=output)
+    monkeypatch.setattr(ui, '_dialog', dialog)
+    restorer = Unknown()
+    assert run_gui(restorer) == 0
+    assert restorer.applied == []
+    assert shown[0].count('TRUE') == 0
+    assert any('No apps are selected' in value for value in shown[1])
+    assert any('separate confirmation' in value for value in shown[1])
+    assert restorer.attempts[0]['phase'] == 'no_launch'
+    assert restorer.attempts[0]['selected_count'] == 0
+    assert restorer.attempts[0]['preview_counts']['unknown'] == 1
+
+
 def test_preview_back_preserves_selected_rows(monkeypatch):
     import starforge_workbench.favorite_apps_ui as ui
     monkeypatch.setattr(ui, 'load_config', lambda _: [{'name': 'Editor'}])

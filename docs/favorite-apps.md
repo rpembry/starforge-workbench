@@ -13,6 +13,9 @@ and explicitly choose **I checked; retry** after a duplicate-window warning.
 Each deliberate retry is recorded in a private audit file before it is sent to
 the desktop launcher. The entry never starts apps at login. Back to the list
 refreshes status without requesting a launch or discarding a receipt.
+If no app can be verified absent, nothing starts checked. Choosing Preview
+without selecting anything explains this and returns to the list. Unknown apps
+can be selected deliberately and require a separate duplicate-risk confirmation.
 The result dialog says when all selected apps were already open, when no app
 could be opened, or how many desktop launch requests were made and verified
 ready. Launcher acceptance alone is never described as an opened app.
