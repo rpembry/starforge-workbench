@@ -69,6 +69,7 @@ class AcquireRecord:
 
 @dataclass(frozen=True)
 class PolicySnapshot:
+    clock_id: str
     leases: tuple[Lease, ...]
     acquisitions: tuple[AcquireRecord, ...]
 
@@ -85,11 +86,27 @@ class ReservationPolicy:
 
     REPLAY_SECONDS = 3600
 
-    def __init__(self, snapshot: PolicySnapshot | None = None):
-        snapshot = snapshot or PolicySnapshot((), ())
+    def __init__(self, snapshot: PolicySnapshot | None = None, *,
+                 clock_id: str = 'synthetic-boot', now: float = 0):
+        if not clock_id:
+            raise ValueError("A boot clock identity is required")
+        snapshot = snapshot or PolicySnapshot(clock_id, (), ())
+        self.clock_id = clock_id
         self._leases = {lease.token: Lease(**vars(lease)) for lease in snapshot.leases}
         self._acquisitions = {(record.owner, record.request_key): record
                               for record in snapshot.acquisitions}
+        if snapshot.clock_id != clock_id:
+            # A monotonic timestamp from another boot is incomparable. Keep
+            # active workloads fenced and give tombstones a fresh full window.
+            for lease in self._leases.values():
+                lease.granted = False
+                lease.stale = True
+                lease.expires_at = now
+            self._acquisitions = {
+                key: AcquireRecord(record.owner, record.request_key, record.ttl,
+                                   record.token, now + self.REPLAY_SECONDS
+                                   if record.retain_until is not None else None)
+                for key, record in self._acquisitions.items()}
 
     def acquire(self, owner: str, request_key: str, now: float, ttl: float) -> Lease:
         if (not owner or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', request_key) or
@@ -184,5 +201,6 @@ class ReservationPolicy:
 
     def snapshot(self) -> PolicySnapshot:
         return PolicySnapshot(
+            self.clock_id,
             tuple(Lease(**vars(lease)) for lease in self._leases.values()),
             tuple(self._acquisitions.values()))

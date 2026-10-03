@@ -137,6 +137,36 @@ def test_lost_acquire_response_replays_across_restart_without_second_lease():
     assert len(restarted.snapshot().acquisitions) == 2
 
 
+def test_wall_clock_jump_cannot_prune_tombstone_or_shorten_replay_window():
+    policy = ReservationPolicy(clock_id='boot-one')
+    lease = policy.acquire('owner', 'stable-request', 0, 60)
+    policy.release('owner', lease.token, 3)
+    wall_clock = 7200  # UTC time jumped forward by two hours.
+    steady_clock = 4   # Boot-scoped monotonic time barely advanced.
+    assert wall_clock > policy.snapshot().acquisitions[0].retain_until
+    with pytest.raises(ValueError, match='has ended'):
+        policy.acquire('owner', 'stable-request', steady_clock, 60)
+    restored = ReservationPolicy(policy.snapshot(), clock_id='boot-one', now=steady_clock)
+    with pytest.raises(ValueError, match='has ended'):
+        restored.acquire('owner', 'stable-request', steady_clock, 60)
+
+
+def test_reboot_rebases_retry_window_and_fences_active_lease():
+    original = ReservationPolicy(clock_id='first-boot')
+    live = original.acquire('live', 'live-request', 0, 60)
+    ended = original.acquire('ended', 'ended-request', 0, 60)
+    original.release('ended', ended.token, 2)
+    restarted = ReservationPolicy(original.snapshot(), clock_id='next-boot', now=1)
+    assert restarted.view('live', live.token).stale
+    assert not restarted.view('live', live.token).granted
+    assert step(restarted, now=2, ended=lambda _: None) == 'HOLD'
+    with pytest.raises(ValueError, match='has ended'):
+        restarted.acquire('ended', 'ended-request', 2, 60)
+    assert restarted.snapshot().acquisitions[1].retain_until == 3601
+    assert step(restarted, now=3601, ended=lambda _: True) == 'START'
+    assert [r.owner for r in restarted.snapshot().acquisitions] == ['live']
+
+
 def test_invalid_ttl_and_window_rejected():
     policy = ReservationPolicy()
     with pytest.raises(ValueError):
