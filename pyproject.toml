@@ -31,6 +31,8 @@ wb-api = "workbench.client:main"
 wb-collect = "workbench.collector:main"
 wb-notify = "workbench.notifications:main"
 wb-mcp = "workbench.mcp_server:main"
+coord = "coordinator.cli:main"
+coord-server = "coordinator.server:main"
 coord-supervisor = "coordinator.supervisor_service:main"
 
 [tool.pytest.ini_options]
