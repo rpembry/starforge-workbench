@@ -77,6 +77,104 @@ condition is insufficient: keep this path disabled and add a serialized
 watcher launch gate before any Ollama inference. The synthetic tests cannot
 substitute for this host-specific activation check.
 
+### Inert activation probe for the approved commissioning window
+
+These commands are a **future test plan**, not a performed test. They create
+only a temporary user unit in systemd's
+[runtime user-unit directory](https://github.com/systemd/systemd/blob/main/man/systemd.unit.xml).
+The unit runs shell markers and waits; it does not reference the miner,
+adapter, Ollama, or GPU. Run them only after approval to touch the user
+manager. Keep the same shell open so the variables remain available.
+
+```sh
+probe_root=$(mktemp -d "${XDG_RUNTIME_DIR:?}/gpu-gate-probe.XXXXXX")
+probe_name="$(basename "$probe_root").service"
+probe_unit="${XDG_RUNTIME_DIR}/systemd/user/${probe_name}"
+mkdir -p "${XDG_RUNTIME_DIR}/systemd/user"
+test ! -e "$probe_unit" || exit 1
+cat > "$probe_root/condition" <<'EOF'
+#!/bin/sh
+touch "$(dirname "$0")/condition_passed"
+EOF
+cat > "$probe_root/pre" <<'EOF'
+#!/bin/sh
+probe_dir=$(dirname "$0")
+touch "$probe_dir/pre_entered"
+while test ! -e "$probe_dir/release_pre"; do sleep 0.05; done
+EOF
+cat > "$probe_root/start" <<'EOF'
+#!/bin/sh
+probe_dir=$(dirname "$0")
+touch "$probe_dir/start_entered"
+while test ! -e "$probe_dir/release_start"; do sleep 0.05; done
+EOF
+chmod 700 "$probe_root/condition" "$probe_root/pre" "$probe_root/start"
+cat > "$probe_unit" <<EOF
+[Unit]
+Description=Inert GPU gate activation probe
+[Service]
+Type=exec
+TimeoutStartSec=60s
+RuntimeMaxSec=120s
+ExecCondition=$probe_root/condition
+ExecStartPre=$probe_root/pre
+ExecStart=$probe_root/start
+EOF
+systemctl --user daemon-reload
+systemctl --user --no-block start "$probe_name"
+```
+
+Wait for `pre_entered`, then observe the held interval *after*
+`condition_passed` and *before* `start_entered`:
+
+```sh
+for probe_try in $(seq 1 100); do
+  test -e "$probe_root/pre_entered" && break
+  sleep 0.05
+done
+test -e "$probe_root/condition_passed"
+test -e "$probe_root/pre_entered"
+test ! -e "$probe_root/start_entered"
+systemctl --user show "$probe_name" --no-pager \
+  -p ActiveState -p SubState -p Job -p MainPID -p ControlGroup
+(
+  for probe_try in $(seq 1 100); do
+    systemctl --user show "$probe_name" --no-pager -p ActiveState -p Job
+    test -e "$probe_root/start_entered" && break
+    sleep 0.02
+  done
+) > "$probe_root/state_trace" &
+probe_sampler=$!
+touch "$probe_root/release_pre"
+wait "$probe_sampler"
+for probe_try in $(seq 1 100); do
+  test -e "$probe_root/start_entered" && break
+  sleep 0.05
+done
+systemctl --user show "$probe_name" --no-pager \
+  -p ActiveState -p SubState -p Job -p MainPID -p ControlGroup
+cat "$probe_root/state_trace"
+```
+
+Expected evidence in the held interval: both earlier markers exist, the
+start marker does not, and `ActiveState=activating` or a recognizable
+nonzero `Job` is visible. After release, the start marker appears and the
+unit reports its new process/cgroup. An `inactive` state with `Job=0` during
+the held interval fails the commissioning gate. Even a passing sample does
+not prove every scheduling interleaving; repeat the observation around
+release and keep the path disabled if the transition cannot be established.
+
+Always clean up the exact temporary unit and scripts, including after a
+failed observation:
+
+```sh
+touch "$probe_root/release_pre" "$probe_root/release_start"
+systemctl --user stop "$probe_name"
+rm -f -- "$probe_unit"
+systemctl --user daemon-reload
+rm -r -- "$probe_root"
+```
+
 The first reviewed test would install the adapter and one **disabled** test
 unit, add the miner `ExecCondition`, observe gate behavior with fake lease
 state, then invoke only the test unit's fixed synthetic worker. Inspect lease,
