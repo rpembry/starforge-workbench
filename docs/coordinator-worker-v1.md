@@ -40,9 +40,11 @@ pull an image or add credentials. The worker assumes `/input/job.json` is a
 host-prepared bounded input, `/scratch` is its writable area, and `/channel`
 contains only its event socket. The host controller must set arbitrary numeric
 non-root UID/GID, read-only root, network none, dropped capabilities, no new
-privileges, PID/CPU/memory/time limits, and no container Git. This branch has
-source and socket tests only; the Docker mount/entrypoint path and supported
-pinned images still require opt-in runtime verification with #176's adapter.
+privileges, PID/CPU/memory/time limits, and no container Git. The current
+`DockerRuntime` adapter supports ordinary commands with scratch input. It does
+not yet mount the worker event channel, so this protocol-aware example is not
+yet a live Docker demonstration. The Docker mount/entrypoint path and supported
+pinned images still require opt-in runtime verification.
 
 Cancellation is supervisor-owned: it first sends typed cancel when a connected
 worker transport supports it or a termination signal, then performs bounded

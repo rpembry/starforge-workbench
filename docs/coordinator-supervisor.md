@@ -23,16 +23,20 @@ at the earlier original deadline or its persisted orphan budget. Neither
 budget is refreshed by a coordinator reconnection. A backward clock step
 blocks starts and causes the watchdog to stop owned attempts conservatively.
 
-The runtime adapter contract is in the class docstring. It must resolve
-`profile_ref` and `workspace_ref` from administrator configuration, verify
-digest-pinned image and restricted Docker settings, and verify exact container
-labels/token/ID, plan hash, and incarnation on *every* inspect and stop. A
-runtime mismatch is unknown and is never adopted or removed blindly. The
-existing `starforge_workbench.docker_worker` receipt and artifact path remains
-the baseline for the adapter; no legacy receipt is adopted automatically.
+The runtime adapter contract is in the class docstring. `DockerRuntime` now
+implements the approved **scratch plus ordinary command** path. It resolves
+symbolic profile/workspace references from administrator configuration, uses
+the existing runner's digest-pinned image/environment and restricted create
+verification, and checks exact labels/token/ID, plan hash, and incarnation on
+every inspect and stop. A runtime mismatch is unknown and is never adopted or
+removed blindly. `collect()` exports bounded logs, exit metadata, and declared
+regular files after positive stop; the workspace and container remain for
+review. No legacy receipt is adopted automatically. The existing Git-worktree
+runner remains a separate compatibility path, unchanged by this slice.
 
-This slice contains the journal and fake-runtime tests, **not** the Docker
-adapter, local service/owner authentication, or restart integration. It is
-therefore not ready to launch containers. Host death also suspends enforcement
-until a supervisor service restarts and reconciles. No service installation or
-live Docker claim is made by these tests.
+This slice contains the journal and fake-Docker adapter tests, **not** an
+independently running service/owner authentication, Git-worktree coordinator
+adapter, or protocol-aware worker mount. It is therefore not ready for a live
+coordinator release. Host death suspends enforcement until a supervisor
+service restarts and reconciles. No service installation or live Docker claim
+is made by these tests.
