@@ -1,6 +1,7 @@
 import os
 import signal
 import subprocess
+from dataclasses import replace
 
 import pytest
 
@@ -25,15 +26,21 @@ class FakeUnit:
         self.alive = {101, 102}
         self.stops = 0
         self.starts = 0
+        self.start_job = False
+        self.inode = 501
         self.replace_on_stop = False
 
     def snapshot(self):
         return UnitGeneration(self.unit, self.state, self.invocation, self.cgroup,
                               self.processes[0].pid if self.state == 'active' else 0,
-                              self.processes if self.state == 'active' else ())
+                              self.processes if self.state == 'active' else (),
+                              self.start_job, self.inode if self.state == 'active' else 0)
 
     def cgroup_processes(self, _cgroup):
         return self.remaining
+
+    def cgroup_inode(self, _cgroup):
+        return self.inode if self.remaining else 0
 
     def generation_alive(self, process):
         return process.pid in self.alive
@@ -215,6 +222,78 @@ def test_systemd_backend_uses_fixed_user_unit_argv(monkeypatch):
         SystemdUserUnit('fixture-idle.service;other')
 
 
+@pytest.mark.parametrize(('job', 'expected'), [
+    ('', False), ('0', False), ('17', True), ('17/start', True),
+    ('unavailable', None), (' ', None), ('00', None),
+])
+def test_systemd_snapshot_fences_unknown_or_pending_start_job(monkeypatch, job, expected):
+    unit = SystemdUserUnit('fixture-idle.service')
+    output = (f'ActiveState=inactive\nMainPID=0\nControlGroup=\n'
+              f'InvocationID=generation-one\nJob={job}\n')
+    monkeypatch.setattr(unit, '_run', lambda *_args: output)
+    assert unit.snapshot().start_job is expected
+
+
+def test_systemd_snapshot_missing_job_property_is_not_known_empty(monkeypatch):
+    unit = SystemdUserUnit('fixture-idle.service')
+    output = ('ActiveState=inactive\nMainPID=0\nControlGroup=\n'
+              'InvocationID=generation-one\n')
+    monkeypatch.setattr(unit, '_run', lambda *_args: output)
+    with pytest.raises(EvidenceUnavailable, match='Incomplete user unit'):
+        unit.snapshot()
+
+
+def test_systemd_snapshot_binds_active_cgroup_inode_and_clears_on_exit(tmp_path, monkeypatch):
+    unit = SystemdUserUnit('fixture-idle.service', cgroup_root=tmp_path)
+    group = '/user.slice/fixture-idle.service'
+    directory = tmp_path / group.lstrip('/')
+    directory.mkdir(parents=True)
+    (directory / 'cgroup.procs').write_text('101\n')
+    monkeypatch.setattr(unit, '_start_ticks', lambda pid: 1000 if pid == 101 else None)
+    active = (f'ActiveState=active\nMainPID=101\nControlGroup={group}\n'
+              'InvocationID=' + 'a' * 32 + '\nJob=\n')
+    monkeypatch.setattr(unit, '_run', lambda *_args: active)
+    snapshot = unit.snapshot()
+    assert snapshot.cgroup_inode == directory.stat().st_ino
+    assert snapshot.start_job is False
+    inactive = ('ActiveState=inactive\nMainPID=0\nControlGroup=\n'
+                'InvocationID=\nJob=\n')
+    monkeypatch.setattr(unit, '_run', lambda *_args: inactive)
+    assert unit.snapshot().cgroup_inode == 0
+
+
+def test_inactive_unit_with_cleared_invocation_keeps_grant_unknown():
+    """The observed host behavior needs a new completion proof, not a guess."""
+    unit, gpu = FakeUnit(), FakeGpu()
+    controller = ExactUnitController(unit, gpu, FakeScopes())
+    controller.apply('STOP')
+    unit.invocation = ''
+    unit.remaining = ()
+    unit.alive.clear()
+    gpu.visible = set()
+    assert controller.observe()[:2] == (O.UNKNOWN, O.UNKNOWN)
+
+
+def test_start_job_appearing_during_exit_observation_blocks_grant(monkeypatch):
+    unit, gpu = FakeUnit(), FakeGpu()
+    controller = ExactUnitController(unit, gpu, FakeScopes())
+    controller.apply('STOP')
+    unit.remaining = ()
+    unit.alive.clear()
+    gpu.visible = set()
+    original = unit.snapshot
+    calls = 0
+    def changing_snapshot():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            unit.state = 'activating'
+            unit.start_job = True
+        return original()
+    monkeypatch.setattr(unit, 'snapshot', changing_snapshot)
+    assert controller.observe()[:2] == (O.ABSENT, O.UNKNOWN)
+
+
 def test_systemd_stop_signals_only_captured_main_pidfd(monkeypatch):
     class FakePidfd:
         def __init__(self):
@@ -234,7 +313,8 @@ def test_systemd_stop_signals_only_captured_main_pidfd(monkeypatch):
     unit = SystemdUserUnit('fixture-idle.service', pidfd=ops)
     captured = UnitGeneration(unit.unit, 'active', 'generation-one',
                               '/user.slice/user-1000.slice/app.slice/fixture-idle.service',
-                              101, (ProcessGeneration(101, 1000), ProcessGeneration(102, 2000)))
+                              101, (ProcessGeneration(101, 1000), ProcessGeneration(102, 2000)),
+                              cgroup_inode=501)
     monkeypatch.setattr(unit, 'snapshot', lambda: captured)
     monkeypatch.setattr(unit, '_start_ticks', lambda _pid: 1000)
     unit.stop(captured)
@@ -245,6 +325,9 @@ def test_systemd_stop_signals_only_captured_main_pidfd(monkeypatch):
     with pytest.raises(EvidenceUnavailable, match='changed'):
         unit.stop(captured)
     assert ops.signals == [(ops.opened[0], signal.SIGTERM)]
+    monkeypatch.setattr(unit, 'snapshot', lambda: replace(captured, cgroup_inode=502))
+    with pytest.raises(EvidenceUnavailable, match='changed'):
+        unit.stop(captured)
     states = iter((captured, changed))
     monkeypatch.setattr(unit, 'snapshot', lambda: next(states))
     with pytest.raises(EvidenceUnavailable, match='after process binding'):

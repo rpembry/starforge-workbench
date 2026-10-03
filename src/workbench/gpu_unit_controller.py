@@ -34,6 +34,8 @@ class UnitGeneration:
     cgroup: str
     main_pid: int
     processes: tuple[ProcessGeneration, ...]
+    start_job: bool | None = None  # None means job visibility is unavailable.
+    cgroup_inode: int = 0
 
 
 class UserUnit(Protocol):
@@ -41,6 +43,7 @@ class UserUnit(Protocol):
 
     def snapshot(self) -> UnitGeneration: ...
     def cgroup_processes(self, cgroup: str) -> tuple[ProcessGeneration, ...] | None: ...
+    def cgroup_inode(self, cgroup: str) -> int | None: ...
     def generation_alive(self, process: ProcessGeneration) -> bool | None: ...
     def stop(self, expected: UnitGeneration) -> None: ...
     def start(self) -> None: ...
@@ -53,6 +56,13 @@ class GpuProcessProbe(Protocol):
 class WorkloadScopeProbe(Protocol):
     def ended(self, owner: str) -> bool | None: ...
     def permitted_gpu_pids(self, active_leases) -> set[int] | None: ...
+
+
+class UnitReceiptSource(Protocol):
+    def latest_capture(self, unit: str) -> UnitGeneration | None: ...
+    def record_capture(self, captured: UnitGeneration) -> None: ...
+    def completed(self, unit: str, invocation: str, *,
+                  captured: UnitGeneration | None = None) -> bool: ...
 
 
 class LibcPidfd:
@@ -85,18 +95,22 @@ class LibcPidfd:
 class ExactUnitController:
     """Control only one configured unit; grant from positive exit evidence.
 
-    A process restart loses the in-memory captured generation. If the unit is
-    already inactive, that is unknown rather than a reason to grant or start.
-    A production integration needs reviewed recovery of this capture before
-    unattended restart after an adapter crash.
+    A production integration supplies a durable receipt source. It captures
+    the process/cgroup generation before stop and requires a matching systemd
+    completion receipt, even when inactive systemd clears InvocationID.
     """
 
     def __init__(self, unit: UserUnit, gpu: GpuProcessProbe,
-                 scopes: WorkloadScopeProbe):
+                 scopes: WorkloadScopeProbe, receipts: UnitReceiptSource | None = None):
         self.unit = unit
         self.gpu = gpu
         self.scopes = scopes
-        self._stopped_generation: UnitGeneration | None = None
+        self.receipts = receipts
+        try:
+            self._stopped_generation = (receipts.latest_capture(unit.unit)
+                                        if receipts is not None else None)
+        except Exception:
+            self._stopped_generation = None
 
     def observe(self, active_leases=()) -> tuple[Observation, Observation, bool]:
         try:
@@ -107,10 +121,28 @@ class ExactUnitController:
             return Observation.UNKNOWN, Observation.UNKNOWN, True
         if current.state == 'active':
             return Observation.PRESENT, Observation.UNKNOWN, True
-        if current.state != 'inactive' or self._stopped_generation is None:
+        if (current.state != 'inactive' or current.start_job is not False or
+                self._stopped_generation is None):
             return Observation.UNKNOWN, Observation.UNKNOWN, True
         captured = self._stopped_generation
-        if current.invocation != captured.invocation:
+        if current.invocation not in ('', captured.invocation):
+            return Observation.UNKNOWN, Observation.UNKNOWN, True
+        if self.receipts is None:
+            if current.invocation != captured.invocation:
+                return Observation.UNKNOWN, Observation.UNKNOWN, True
+        else:
+            try:
+                if not self.receipts.completed(captured.unit, captured.invocation,
+                                               captured=captured):
+                    return Observation.UNKNOWN, Observation.UNKNOWN, True
+            except Exception:
+                return Observation.UNKNOWN, Observation.UNKNOWN, True
+        try:
+            inode = self.unit.cgroup_inode(captured.cgroup)
+        except Exception:
+            return Observation.UNKNOWN, Observation.UNKNOWN, True
+        if inode is None or (captured.cgroup_inode > 0 and
+                             inode not in (0, captured.cgroup_inode)):
             return Observation.UNKNOWN, Observation.UNKNOWN, True
         remaining = self.unit.cgroup_processes(captured.cgroup)
         if remaining is None:
@@ -135,6 +167,24 @@ class ExactUnitController:
             return Observation.ABSENT, Observation.UNKNOWN, True
         if self.gpu.pids() != gpu_pids or self.scopes.permitted_gpu_pids(active_leases) != permitted:
             return Observation.ABSENT, Observation.UNKNOWN, True
+        try:
+            final = self.unit.snapshot()
+        except EvidenceUnavailable:
+            return Observation.ABSENT, Observation.UNKNOWN, True
+        if (final.unit != current.unit or final.state != 'inactive' or
+                final.start_job is not False or
+                final.invocation not in ('', captured.invocation)):
+            return Observation.ABSENT, Observation.UNKNOWN, True
+        if self.receipts is None:
+            if final.invocation != captured.invocation:
+                return Observation.ABSENT, Observation.UNKNOWN, True
+        else:
+            try:
+                if not self.receipts.completed(captured.unit, captured.invocation,
+                                               captured=captured):
+                    return Observation.ABSENT, Observation.UNKNOWN, True
+            except Exception:
+                return Observation.ABSENT, Observation.UNKNOWN, True
         # The unit's existing watcher remains the idle authority after START.
         return Observation.ABSENT, Observation.ABSENT, True
 
@@ -153,6 +203,11 @@ class ExactUnitController:
                     not current.processes or
                     current.main_pid not in {p.pid for p in current.processes}):
                 raise EvidenceUnavailable("Cannot identify exact active unit generation")
+            if self.receipts is not None:
+                try:
+                    self.receipts.record_capture(current)
+                except Exception:
+                    raise EvidenceUnavailable('Cannot persist exact stop capture') from None
             self._stopped_generation = current
             self.unit.stop(current)
         elif action == 'START':
@@ -225,6 +280,17 @@ class SystemdUserUnit:
         except (ValueError, EvidenceUnavailable):
             return None
 
+    def cgroup_inode(self, cgroup: str) -> int | None:
+        if (not cgroup.startswith('/user.slice/') or '..' in cgroup.split('/') or
+                not cgroup.endswith('/' + self.unit)):
+            return None
+        try:
+            return (self.cgroup_root / cgroup.lstrip('/')).stat().st_ino
+        except FileNotFoundError:
+            return 0
+        except OSError:
+            return None
+
     def generation_alive(self, process: ProcessGeneration) -> bool | None:
         try:
             start = self._start_ticks(process.pid)
@@ -234,22 +300,35 @@ class SystemdUserUnit:
 
     def snapshot(self) -> UnitGeneration:
         output = self._run('show', self.unit, '--no-pager', '-p', 'ActiveState',
-                           '-p', 'MainPID', '-p', 'ControlGroup', '-p', 'InvocationID')
+                           '-p', 'MainPID', '-p', 'ControlGroup', '-p', 'InvocationID',
+                           '-p', 'Job')
         fields = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
-        if set(fields) != {'ActiveState', 'MainPID', 'ControlGroup', 'InvocationID'}:
+        if set(fields) != {'ActiveState', 'MainPID', 'ControlGroup', 'InvocationID', 'Job'}:
             raise EvidenceUnavailable("Incomplete user unit properties")
         try:
             main_pid = int(fields['MainPID'])
         except ValueError:
             raise EvidenceUnavailable("Invalid main PID") from None
         state = fields['ActiveState']
+        job = fields['Job']
+        # systemctl show prints Job= (empty) when no job exists on this host.
+        # An omitted property is rejected above; a malformed value remains
+        # unknown rather than being mistaken for the observed empty form.
+        if job in ('', '0'):
+            start_job = False
+        elif re.fullmatch(r'[1-9][0-9]*(?:/.*)?', job):
+            start_job = True
+        else:
+            start_job = None
         cgroup = fields['ControlGroup']
         processes = self.cgroup_processes(cgroup) if state == 'active' else ()
+        inode = self.cgroup_inode(cgroup) if state == 'active' else 0
         if state == 'active' and (processes is None or main_pid <= 0 or
-                                  main_pid not in {p.pid for p in processes}):
+                                  main_pid not in {p.pid for p in processes} or
+                                  inode is None or inode <= 0):
             raise EvidenceUnavailable("Active unit generation is incomplete")
         return UnitGeneration(self.unit, state, fields['InvocationID'], cgroup,
-                              main_pid, processes)
+                              main_pid, processes, start_job, inode)
 
     def stop(self, expected: UnitGeneration) -> None:
         """Signal the captured main process, never a replacement unit name.
@@ -260,7 +339,8 @@ class SystemdUserUnit:
         """
         current = self.snapshot()
         if (current.unit != expected.unit or current.invocation != expected.invocation or
-                current.main_pid != expected.main_pid):
+                current.main_pid != expected.main_pid or
+                current.cgroup_inode != expected.cgroup_inode):
             raise EvidenceUnavailable("Unit invocation changed before exact stop")
         main = next((p for p in expected.processes if p.pid == expected.main_pid), None)
         if main is None:
@@ -275,7 +355,8 @@ class SystemdUserUnit:
                 raise EvidenceUnavailable("Main process generation changed")
             bound = self.snapshot()
             if (bound.unit != expected.unit or bound.invocation != expected.invocation or
-                    bound.main_pid != expected.main_pid):
+                    bound.main_pid != expected.main_pid or
+                    bound.cgroup_inode != expected.cgroup_inode):
                 raise EvidenceUnavailable("Unit invocation changed after process binding")
             ops.send(fd, signal.SIGTERM)
         except OSError:
