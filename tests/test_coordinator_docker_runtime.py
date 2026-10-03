@@ -5,6 +5,7 @@ import os
 import errno
 import base64
 import subprocess
+import sqlite3
 
 import pytest
 
@@ -340,7 +341,21 @@ def test_owner_review_archive_retains_exact_scratch_bytes(runtime, tmp_path):
                            operation_id="archive")
     assert fake.item is None
     assert json.loads((attempt / "disposition.json").read_text())["phase"] == "archiving"
-    result = supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],
+    (attempt / "scratch" / "note.txt").write_text("changed after removal\n")
+    with pytest.raises(OwnershipUnknown, match="runtime observation unavailable"):
+        supervisor.reconcile("a" * 32, controller="controller",
+                             generation=lease["generation"])
+    assert supervisor.inspect("a" * 32)["state"] == "unknown"
+    (attempt / "scratch" / "note.txt").write_text("reviewed\n")
+    assert supervisor.reconcile("a" * 32, controller="controller",
+                                generation=lease["generation"])["state"] == "stopped"
+    # Recover journals left unknown by the older lost-reply/reconcile sequence.
+    with sqlite3.connect(journal / "supervisor.sqlite3") as db:
+        db.execute("UPDATE attempts SET state='unknown' WHERE id=?", ("a" * 32,))
+    recovering = Supervisor(journal, adapter)
+    assert recovering.recover_startup() == ["a" * 32]
+    assert recovering.inspect("a" * 32)["state"] == "stopped"
+    result = recovering.archive("a" * 32, review_sha256=reviewed["review_sha256"],
                                 operation_id="archive")
     assert result["phase"] == "complete"
     assert supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],

@@ -510,6 +510,44 @@ class Supervisor:
             raise OwnershipUnknown("committed artifact and exit evidence required")
         return attempt
 
+    def _archive_absence_proven(self, item):
+        """Require original collection and matching durable archive intent."""
+        if not item["runtime_id"]:
+            return False
+        probe = getattr(self.runtime, "inspect_archive_absent", None)
+        if probe is None:
+            return False
+        with self._db() as db:
+            saved = db.execute("SELECT response FROM evidence WHERE attempt_id=?", (
+                item["id"],)).fetchone()
+            operations = db.execute("SELECT * FROM operations WHERE attempt_id=? AND kind='archive'", (
+                item["id"],)).fetchall()
+        if not saved:
+            return False
+        evidence = json.loads(saved["response"])
+        if (evidence.get("runtime_id") != item["runtime_id"] or
+                evidence.get("attempt_id") != item["id"] or
+                evidence.get("incarnation") != item["incarnation"] or
+                not evidence.get("stopped") or evidence.get("no_start")):
+            return False
+        for operation in operations:
+            try:
+                digest = json.loads(operation["response"])["review_sha256"]
+                if probe(item["plan"], item["runtime_id"], digest, operation["id"]):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _restore_archiving_stop(self, item):
+        if item["state"] != "unknown" or not self._archive_absence_proven(item):
+            return item
+        with self._tx() as db:
+            db.execute("UPDATE attempts SET state='stopped',observation_seq=observation_seq+1 "
+                       "WHERE id=? AND state='unknown' AND runtime_id=?", (
+                           item["id"], item["runtime_id"]))
+        return self.inspect(item["id"])
+
     @_serialized
     def review(self, attempt_id: str):
         """Owner-only immutable review snapshot before any archive mutation."""
@@ -522,6 +560,7 @@ class Supervisor:
         if (not operation_id or not isinstance(review_sha256, str) or
                 len(review_sha256) != 64 or any(c not in "0123456789abcdef" for c in review_sha256)):
             raise ValueError("review digest and operation identity required")
+        self._restore_archiving_stop(self.inspect(attempt_id))
         attempt = self._collected_stopped(attempt_id)
         confirmed_response = None
         with self._tx() as db:
@@ -590,6 +629,7 @@ class Supervisor:
     def _reconcile_owned(self, attempt_id: str):
         """Exact host inspection; only caller holding serialized authority uses it."""
         item = self.inspect(attempt_id)
+        item = self._restore_archiving_stop(item)
         if item["state"] == "stopped" and item["no_start_reason"] and not item["runtime_id"]:
             return item  # durable prelaunch tombstone; no runtime to reattach
         if not item["runtime_id"]:
@@ -601,6 +641,8 @@ class Supervisor:
             if proved_absent:
                 return self._record_no_start(attempt_id, "workspace_setup_failed")
         if item["state"] == "stopped" and item["runtime_id"]:
+            if self._archive_absence_proven(item):
+                return item  # durable archive intent and exact absence; replay owns completion
             archived = getattr(self.runtime, "inspect_archived", None)
             if archived is not None and archived(item["plan"], item["runtime_id"]):
                 return item  # exact committed archive, not a missing live runtime
