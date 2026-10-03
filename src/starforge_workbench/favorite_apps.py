@@ -278,6 +278,24 @@ class FavoriteRestore:
         self.generation = generation
         self.state_path = self.config.with_name('favorite-app-restore-state.json')
         self.lock_path = self.config.with_name('favorite-app-restore.lock')
+        self.retry_audit_path = self.config.with_name('favorite-app-retries.jsonl')
+
+    def _record_explicit_retry(self, desktop_id: str, digest: str, boot_id: str):
+        """Persist user-confirmed same-boot retries before requesting the launch."""
+        if self.retry_audit_path.is_symlink():
+            raise ValueError('Private retry audit must not be a symlink')
+        fd = os.open(self.retry_audit_path, os.O_CREAT | os.O_APPEND | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        try:
+            if os.fstat(fd).st_uid != os.getuid() or os.fstat(fd).st_mode & 0o077:
+                raise ValueError('Unsafe private retry audit')
+            event = {'version': 1, 'desktop_id': desktop_id, 'digest': digest,
+                     'boot_id': boot_id, 'confirmed_at': time.time()}
+            data = (json.dumps(event, sort_keys=True) + '\n').encode()
+            while data:
+                data = data[os.write(fd, data):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def _state(self) -> dict:
         if self.state_path.is_symlink():
@@ -374,7 +392,8 @@ class FavoriteRestore:
                           'can_open_anyway': can_open_anyway, 'evidence': evidence})
         return {'selection': names, 'token': token, 'items': items}
 
-    def apply(self, names: list[str], token: str, *, open_unknown: bool = False) -> dict:
+    def apply(self, names: list[str], token: str, *, open_unknown: bool = False,
+              retry_unverified: bool = False) -> dict:
         parent = self.config.parent
         if parent.is_symlink() or not parent.is_dir() or parent.stat().st_uid != os.getuid() or parent.stat().st_mode & 0o077:
             raise ValueError('Favorites directory must be owned by you with mode 0700')
@@ -407,13 +426,18 @@ class FavoriteRestore:
                         result = 'already_present'
                     elif pending_key in pending and pending[pending_key]['digest'] != entry['digest']:
                         result, evidence = 'refused', 'Prior launch identity changed; resolve it before retry'
-                    elif pending_key in pending and pending[pending_key]['boot_id'] == boot_id:
+                    elif (pending_key in pending and pending[pending_key]['boot_id'] == boot_id
+                          and not retry_unverified):
                         result, evidence = 'uncertain', 'Prior launch remains unresolved; ' + evidence
                     elif status != 'absent' and not open_unknown:
                         result = 'refused'
                     else:
-                        pending[pending_key] = {'digest': entry['digest'], 'boot_id': boot_id}
-                        self._save_state(pending)
+                        is_retry = pending_key in pending and pending[pending_key]['boot_id'] == boot_id
+                        if is_retry:
+                            self._record_explicit_retry(pending_key, entry['digest'], boot_id)
+                        else:
+                            pending[pending_key] = {'digest': entry['digest'], 'boot_id': boot_id}
+                            self._save_state(pending)
                         launch_requested = True
                         requested = self.desktop.launch(entry['desktop_id'])
                         launcher_accepted = requested
@@ -421,6 +445,8 @@ class FavoriteRestore:
                         evidence = 'Desktop launcher accepted request; readiness not yet verified' if requested else 'Desktop launcher result is uncertain'
                         if status != 'absent':
                             evidence = 'You chose to open an app whose running status could not be verified; ' + evidence
+                        if is_retry:
+                            evidence = 'Explicit same-boot retry recorded; ' + evidence
                         for _ in range(3):
                             observed, detail = self.desktop.observe(favorite, entry)
                             if observed == 'present':

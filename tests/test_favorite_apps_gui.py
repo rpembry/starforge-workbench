@@ -19,8 +19,8 @@ class Restorer:
              'can_open_anyway': name == 'PWA',
              'evidence': 'synthetic evidence'} for name in names]}
 
-    def apply(self, names, token, *, open_unknown=False):
-        self.applied.append((names, token, open_unknown))
+    def apply(self, names, token, *, open_unknown=False, retry_unverified=False):
+        self.applied.append((names, token, open_unknown, retry_unverified))
         return {'items': [{'name': name, 'result': 'refused' if name != 'Editor' else 'uncertain',
                            'launch_requested': name == 'Editor',
                            'evidence': 'synthetic result'} for name in names]}
@@ -38,7 +38,7 @@ def test_gui_requires_review_then_uses_exact_preview_token(monkeypatch):
     monkeypatch.setattr(ui, '_dialog', dialog)
     restorer = Restorer()
     assert run_gui(restorer) == 0
-    assert restorer.applied == [(['Editor', 'PWA'], 'synthetic-token', True)]
+    assert restorer.applied == [(['Editor', 'PWA'], 'synthetic-token', True, False)]
     assert calls[0].count('TRUE') == 2
     assert 'PWA: refuse' in next(arg for arg in calls[1] if arg.startswith('--text='))
 
@@ -81,7 +81,7 @@ def test_preview_back_preserves_selected_rows(monkeypatch):
     monkeypatch.setattr(ui, '_dialog', dialog)
     restorer = Restorer()
     assert run_gui(restorer) == 0
-    assert restorer.applied == [(['Editor'], 'synthetic-token', False)]
+    assert restorer.applied == [(['Editor'], 'synthetic-token', False, False)]
     assert '--cancel-label=Back' in calls[1]
     assert 'TRUE' in calls[2]
 
@@ -97,7 +97,7 @@ def test_zenity_display_failure_is_not_cancel(monkeypatch):
         run_gui(Restorer())
 
 
-def test_unresolved_receipt_is_explicit_and_refreshes_without_retry(monkeypatch):
+def test_unresolved_receipt_requires_separate_confirm_and_back_does_not_retry(monkeypatch):
     import starforge_workbench.favorite_apps_ui as ui
     class Pending(Restorer):
         def preview(self, names):
@@ -107,7 +107,7 @@ def test_unresolved_receipt_is_explicit_and_refreshes_without_retry(monkeypatch)
     monkeypatch.setattr(ui, 'load_config', lambda _: [{'name': 'Editor'}])
     monkeypatch.setattr(ui.shutil, 'which', lambda _: '/usr/bin/zenity')
     calls = []
-    responses = iter([(0, 'Editor\n'), (0, ''), (1, '')])
+    responses = iter([(0, 'Editor\n'), (1, ''), (1, '')])
     def dialog(*args):
         calls.append(args)
         code, output = next(responses)
@@ -116,9 +116,26 @@ def test_unresolved_receipt_is_explicit_and_refreshes_without_retry(monkeypatch)
     restorer = Pending()
     assert run_gui(restorer) == 0
     assert restorer.applied == []
-    assert any('will not reopen' in value for value in calls[0])
-    assert '--ok-label=Refresh status' in calls[1]
-    assert any('cannot safely retry' in value for value in calls[1])
+    assert any('retry needs confirmation' in value for value in calls[0])
+    assert '--ok-label=I checked; retry' in calls[1]
+    assert any('duplicate windows' in value for value in calls[1])
+
+
+def test_unresolved_receipt_explicit_retry_passes_separate_flag(monkeypatch):
+    import starforge_workbench.favorite_apps_ui as ui
+    class Pending(Restorer):
+        def preview(self, names):
+            return {'selection': names, 'token': 'synthetic-token', 'items': [
+                {'name': name, 'action': 'skip', 'can_open_anyway': False,
+                 'evidence': 'Prior launch is unresolved'} for name in names]}
+    monkeypatch.setattr(ui, 'load_config', lambda _: [{'name': 'Editor'}])
+    monkeypatch.setattr(ui.shutil, 'which', lambda _: '/usr/bin/zenity')
+    responses = iter([(0, 'Editor\n'), (0, ''), (0, '')])
+    monkeypatch.setattr(ui, '_dialog', lambda *args: SimpleNamespace(
+        returncode=(answer := next(responses))[0], stdout=answer[1]))
+    restorer = Pending()
+    assert run_gui(restorer) == 0
+    assert restorer.applied == [(['Editor'], 'synthetic-token', True, True)]
 
 
 def test_gnome_adapter_rejects_unknown_and_unverified_process(monkeypatch, tmp_path):

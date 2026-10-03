@@ -6,18 +6,16 @@ unknown running status. All favorites are checked by default, but nothing is
 opened until the user previews and confirms. The user can go Back
 to change the selection, and confirms
 before opening them. Unknown status requires an explicit **Open anyway** choice
-because another window may already exist. An unresolved same-boot launch
-remains blocked after that choice. The entry never starts apps at login.
-An unresolved prior launch is labeled per app and the dialog offers **Refresh
-status** after the user checks existing windows. Refresh only rechecks presence;
-it does not retry or discard the receipt. If no window is found after a reboot,
-a new preview can consider a launch again. The launcher cannot prove that a
-same-boot startup has finished, so it offers no same-boot retry control.
+because another window may already exist. An unresolved same-boot launch is
+labeled separately. Retrying it requires the user to check existing windows
+and explicitly choose **I checked; retry** after a duplicate-window warning.
+Each deliberate retry is recorded in a private audit file before it is sent to
+the desktop launcher. The entry never starts apps at login. Back to the list
+refreshes status without requesting a launch or discarding a receipt.
 
-`uv run wb-apps` is a local, manual desktop-entry restorer. It never starts a
-Workbench provider session, changes Chrome tabs, or creates login autostart.
-The later coding-agent restore slice is separate work; a `workbench` favorite
-here means only its configured desktop application.
+`uv run wb-apps` is a local, manual desktop-entry restorer. It invokes only the
+selected installed desktop entry. A `workbench` favorite can therefore open a
+configured Workbench terminal context. It does not create login autostart.
 
 Put an explicit selection in a private file (default
 `~/.config/starforge-ai-workbench/favorite-apps.yaml`). Its directory must be
@@ -79,16 +77,17 @@ verified readiness. Already-running targets are preserved;
 this slice does not focus their windows.
 
 An unresolved launch is recorded in private local state before invoking
-`gtk-launch`. Repeated or overlapping applies will not launch it again merely
-because its window has not appeared. The receipt includes the verified kernel
-boot ID. A same-boot unresolved launch remains blocked, including after a
-failed launcher result; a verified ready window clears its receipt. After a
+`gtk-launch`. Repeated or overlapping ordinary applies will not launch it again
+merely because its window has not appeared. The receipt includes the verified
+kernel boot ID. A same-boot unresolved launch is blocked unless the graphical
+user explicitly confirms a duplicate-risk retry after checking existing windows.
+The retry is audited locally before launch, and the original receipt remains
+until a verified ready window clears it. After a
 reboot, a fresh preview and complete absent inventory permit an explicit new
 apply, because the old process cannot survive that boot change. A changed
 desktop-entry identity still refuses. Legacy receipts without a boot ID fail
-closed for operator review. If an app remains uncertain, inspect it manually
-before deciding on any separate recovery action; this CLI has no force-retry
-or pending-state reset command. Missing, ambiguous, changed, or
+closed for operator review. The CLI has no force-retry or pending-state reset
+command. Missing, ambiguous, changed, or
 unverifiable identities fail closed. A target that cannot be verified does not
 block a separate exact target in the same selection.
 

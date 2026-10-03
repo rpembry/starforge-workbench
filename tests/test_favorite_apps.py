@@ -175,6 +175,78 @@ def test_explicit_unknown_open_is_receipted_and_never_repeated(setup):
     assert desktop.launches == ['notes.desktop']
 
 
+def test_same_boot_retry_requires_explicit_flag_and_keeps_audit(setup):
+    restore, desktop, _, _, _ = setup
+    desktop.states['Notes'] = 'uncertain'
+    first = restore.preview(['Notes'])
+    restore.apply(['Notes'], first['token'], open_unknown=True)
+    assert desktop.launches == ['notes.desktop']
+    pending = restore._state().copy()
+    blocked = restore.preview(['Notes'])
+    assert blocked['items'][0]['action'] == 'skip'
+    restore.apply(['Notes'], blocked['token'], open_unknown=True)
+    assert desktop.launches == ['notes.desktop']
+    assert not restore.retry_audit_path.exists()
+    retried = restore.apply(['Notes'], blocked['token'], open_unknown=True,
+                            retry_unverified=True)
+    assert retried['items'][0]['launch_requested'] is True
+    assert desktop.launches == ['notes.desktop', 'notes.desktop']
+    assert restore._state() == pending
+    event = json.loads(restore.retry_audit_path.read_text().splitlines()[0])
+    assert event['desktop_id'] == 'notes.desktop'
+    assert event['digest'] == pending['notes.desktop']['digest']
+    assert event['boot_id'] == pending['notes.desktop']['boot_id']
+    assert restore.retry_audit_path.stat().st_mode & 0o077 == 0
+
+
+def test_all_selected_combines_explicit_retry_and_unknown_open(setup):
+    restore, desktop, _, _, _ = setup
+    restore.apply(['Editor'], restore.preview(['Editor'])['token'])
+    desktop.states['Notes'] = 'uncertain'
+    before = restore.preview(['Editor', 'Notes'])
+    assert [item['action'] for item in before['items']] == ['skip', 'refuse']
+    result = restore.apply(before['selection'], before['token'],
+                           open_unknown=True, retry_unverified=True)
+    assert [item['launch_requested'] for item in result['items']] == [True, True]
+    assert desktop.launches == ['editor.desktop', 'editor.desktop', 'notes.desktop']
+    assert len(restore.retry_audit_path.read_text().splitlines()) == 1
+
+
+def test_explicit_retry_refuses_unsafe_audit_file_without_launch(setup):
+    restore, desktop, _, _, _ = setup
+    restore.apply(['Editor'], restore.preview(['Editor'])['token'])
+    restore.retry_audit_path.write_text('unsafe')
+    restore.retry_audit_path.chmod(0o644)
+    preview = restore.preview(['Editor'])
+    result = restore.apply(['Editor'], preview['token'], open_unknown=True,
+                           retry_unverified=True)
+    assert result['items'][0]['result'] == 'refused'
+    assert desktop.launches == ['editor.desktop']
+
+
+def test_explicit_retry_still_preserves_present_app_and_rejects_changed_identity(setup):
+    restore, desktop, _, applications, _ = setup
+    first = restore.preview(['Editor'])
+    restore.apply(['Editor'], first['token'])
+    desktop.states['Editor'] = 'present'
+    fresh = restore.preview(['Editor'])
+    result = restore.apply(['Editor'], fresh['token'], open_unknown=True,
+                           retry_unverified=True)
+    assert result['items'][0]['result'] == 'already_present'
+    assert desktop.launches == ['editor.desktop']
+    assert not restore.retry_audit_path.exists()
+    desktop.states['Editor'] = 'absent'
+    first = restore.preview(['Editor'])
+    restore.apply(['Editor'], first['token'])
+    (applications / 'editor.desktop').write_text(
+        (applications / 'editor.desktop').read_text() + 'Comment=changed\n')
+    changed = restore.preview(['Editor'])
+    result = restore.apply(['Editor'], changed['token'], open_unknown=True,
+                           retry_unverified=True)
+    assert result['items'][0]['result'] == 'refused'
+    assert desktop.launches == ['editor.desktop', 'editor.desktop']
+
+
 def test_concurrent_apply_has_one_launch_request(setup):
     restore, desktop, _, _, _ = setup
     preview = restore.preview(['Editor'])
