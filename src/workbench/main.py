@@ -25,6 +25,7 @@ from .models import (ActionIn, ActionPatch, ArtifactIn, EventIn, ObjectiveIn,
 from .repository import Problem, SQLiteRepository
 from .response_preview import ResponsePreviewHub
 from .settings import load_settings
+from .status import ManualAllowance
 
 
 class BrowserWorkspaceEntryIn(BaseModel):
@@ -165,6 +166,16 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     @app.get('/api/attention', dependencies=[Depends(operator)])
     def attention():
         return repository.dashboard()['attention']
+
+    @app.get('/api/status/{widget}', dependencies=[Depends(operator)])
+    def status_widget(widget: Literal['allowances', 'attention', 'jobs', 'hosts']):
+        from .status import read_widget
+        return read_widget(repository, widget)
+
+    @app.post('/api/allowances/manual', status_code=201, dependencies=[Depends(operator)])
+    def manual_allowance(body: 'ManualAllowance'):
+        from .status import record_manual
+        return record_manual(repository, body)
 
     @app.get('/api/browser/workspaces', dependencies=[Depends(operator)])
     def browser_workspaces():
@@ -489,6 +500,10 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     def everyday_guide(request: Request):
         return templates.TemplateResponse(request=request, name='guide.html', context={})
 
+    @app.get('/status', response_class=HTMLResponse, dependencies=[Depends(operator)])
+    def status_view(request: Request):
+        return templates.TemplateResponse(request=request, name='status.html', context={'timezone': settings.reporting_timezone})
+
     @app.get('/flow', response_class=HTMLResponse, dependencies=[Depends(operator)])
     def flow_view(request: Request, offset: int = Query(0, ge=0)):
         from urllib.parse import urlsplit
@@ -508,6 +523,10 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     @app.get('/assets/task-form.js')
     def task_form_script():
         return FileResponse(Path(__file__).with_name('static')/'task-form.js', media_type='application/javascript')
+
+    @app.get('/assets/status.js')
+    def status_script():
+        return FileResponse(Path(__file__).with_name('static')/'status.js', media_type='application/javascript')
 
     @app.get('/assets/session-form.js')
     def session_form_script():
