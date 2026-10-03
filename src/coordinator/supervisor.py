@@ -542,6 +542,8 @@ class Supervisor:
                     attempt_id,))
                 db.execute("UPDATE operations SET status='confirmed',response=? WHERE attempt_id=? AND kind IN ('cancel','owner_stop')", (
                     _json({"state": "stopped", "no_start": True}), attempt_id))
+                db.execute("UPDATE operations SET status='confirmed',response=? WHERE attempt_id=? AND kind='launch'", (
+                    _json({"state": "stopped", "no_start": True}), attempt_id))
             return self.inspect(attempt_id)
         if item["state"] == "launch_calling":
             return item  # unknown create outcome; reconciliation will honor sticky cancel

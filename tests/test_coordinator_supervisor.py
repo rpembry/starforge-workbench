@@ -282,3 +282,7 @@ def test_owner_stop_confirms_no_start_from_committed_launch_pending(setup):
     stopped = supervisor.owner_stop("attempt-1", operation_id="owner-op")
     assert stopped["state"] == "stopped" and stopped["runtime_id"] is None
     assert runtime.starts == 0
+    with supervisor._db() as db:
+        launch = db.execute("SELECT status,response FROM operations WHERE id='launch-op'").fetchone()
+    assert launch["status"] == "confirmed"
+    assert json.loads(launch["response"]) == {"state": "stopped", "no_start": True}
