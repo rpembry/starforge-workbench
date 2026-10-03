@@ -19,7 +19,7 @@ from .gpu_registry import Registry, RegistryError, private_parent
 class OwnedController(Protocol):
     """Implementation must control only its configured background process."""
 
-    def observe(self) -> tuple[Observation, Observation, bool]: ...
+    def observe(self, active_leases) -> tuple[Observation, Observation, bool]: ...
     def workload_ended(self, owner: str) -> bool | None: ...
     def apply(self, action: str) -> None: ...
 
@@ -89,7 +89,8 @@ class LocalAdapter:
         """
         with self.lock:
             self._available()
-            process, context, idle_allowed = self.controller.observe()
+            active_leases = self.policy.snapshot().leases
+            process, context, idle_allowed = self.controller.observe(active_leases)
             decision = self.policy.reconcile(
                 now=self.clock(), owned_process=process, owned_context=context,
                 workload_ended=self.controller.workload_ended,

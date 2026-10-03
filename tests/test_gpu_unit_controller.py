@@ -71,7 +71,7 @@ class FakeScopes:
     def ended(self, _owner):
         return None
 
-    def permitted_gpu_pids(self):
+    def permitted_gpu_pids(self, _active_leases):
         return self.permitted
 
 
