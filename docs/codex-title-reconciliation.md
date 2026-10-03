@@ -10,6 +10,11 @@ adapter cannot reliably observe a terminal tab label, so `observed_label: null`
 means unknown, not agreement. If a trustworthy exact-context tab observer is
 added, disagreement must block the row.
 
+The catalog and supported app-server rename are pinned to the same resolved
+Codex home (`CODEX_HOME` when set, otherwise the user's `~/.codex`). Changing
+that store between preview and apply invalidates the row. The store path is
+retained only in private plan state, not returned in CLI/MCP row output.
+
 Review the private output locally. `ai-workbench titles apply PLAN_ID
 --context CONTEXT` selects exact preview rows, including a custom existing
 title marked `needs_choice`. `--all-eligible` selects only rows without a
@@ -19,7 +24,9 @@ title invalidate the previewed row. An outcome of `unknown` leaves a protected
 per-thread unresolved intent; later plans, retries, and undo remain blocked
 until provider operation termination can be established through a future
 supported recovery path. A fresh title read alone cannot prove that a delayed
-request will not still apply. Preview, startup, attach, and status never
+request will not still apply. The intent is persisted before sending; verified
+write evidence and outcome are persisted before removing it. A failed audit
+write leaves the intent in place. Preview, startup, attach, and status never
 trigger a Codex title write. These commands never infer a thread from a title,
 directory alone, or recency.
 

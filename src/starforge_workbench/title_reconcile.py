@@ -43,6 +43,11 @@ def _write(path: Path, value):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -72,13 +77,14 @@ class CodexCatalog:
 
     def __init__(self, home: Path | None = None, executable: str | None = None):
         self.home = home or Path.home()
+        self.codex_root = Path(os.environ.get('CODEX_HOME') or self.home / '.codex').expanduser().resolve()
         self.executable = executable or shutil.which('codex')
 
     def read(self, thread_id: str):
         if not THREAD_ID.fullmatch(thread_id):
             return None
         rows = []
-        for path in (self.home / '.codex').glob('state*.sqlite'):
+        for path in self.codex_root.glob('state*.sqlite'):
             uri = path.resolve().as_uri() + '?mode=ro'
             with sqlite3.connect(uri, uri=True, timeout=2) as db:
                 row = db.execute('SELECT id, cwd, title, archived, source FROM threads WHERE id=?', (thread_id,)).fetchone()
@@ -99,7 +105,8 @@ class CodexCatalog:
         try:
             process = subprocess.Popen([self.executable, 'app-server', '--stdio'],
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                       stderr=subprocess.DEVNULL, bufsize=0)
+                                       stderr=subprocess.DEVNULL, bufsize=0,
+                                       env={**os.environ, 'CODEX_HOME': str(self.codex_root)})
         except OSError:
             return 'blocked'
         pending = b''
@@ -134,7 +141,7 @@ class CodexCatalog:
             process.stdin.flush()
             response = request(2, 'thread/name/set', {'threadId': thread_id, 'name': desired})
             if 'error' in response or 'result' not in response:
-                return 'blocked'
+                raise ConnectionError('Codex rename outcome is not confirmed')
             return 'applied'
         finally:
             process.terminate()
@@ -192,6 +199,7 @@ class Reconciler:
             rows.append({'context': context_id, 'label': desired, 'observed_label': observed,
                          'thread_id': thread_id, 'current_title': record.get('title') if record else None,
                          'desired_title': desired, 'binding': binding,
+                         'provider_root': str(self.catalog.codex_root) if hasattr(self.catalog, 'codex_root') else None,
                          'mapping_freshness': 'unverified' if reason else 'fresh',
                          'status': 'conflict' if reason else
                          'already_matched' if record['title'] == desired else
@@ -215,6 +223,7 @@ class Reconciler:
         copy = deepcopy(plan)
         for row in copy['rows']:
             row.pop('binding', None)
+            row.pop('provider_root', None)
         return copy
 
     def preview(self, ids):
@@ -238,7 +247,13 @@ class Reconciler:
                 'reason': 'write_intent_or_unresolved_provider_outcome'})
 
     def _clear_intent(self, thread_id):
-        (self.state / 'uncertain' / (thread_id + '.json')).unlink(missing_ok=True)
+        path = self.state / 'uncertain' / (thread_id + '.json')
+        path.unlink(missing_ok=True)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
     def status(self, plan_id):
         return self._public(self._load_plan(plan_id))
@@ -255,6 +270,7 @@ class Reconciler:
             if not ids or len(ids) != len(set(ids)) or any(identity not in originals for identity in ids):
                 raise ValueError('Select unique contexts from this plan')
             for identity in ids:
+                sent = False
                 old = originals[identity]
                 try:
                     current = self._snapshot([identity])[0]
@@ -265,7 +281,7 @@ class Reconciler:
                     result = {'status': 'conflict', 'reason': old['reason'] or 'not_eligible'}
                 elif current is None:
                     result = {'status': 'conflict', 'reason': 'context_or_mapping_unavailable'}
-                elif any(current[key] != old[key] for key in ('thread_id', 'desired_title', 'label', 'observed_label', 'binding')) or current['status'] == 'conflict':
+                elif any(current[key] != old[key] for key in ('thread_id', 'desired_title', 'label', 'observed_label', 'binding', 'provider_root')) or current['status'] == 'conflict':
                     result = {'status': 'conflict', 'reason': current['reason'] or 'plan_changed'}
                 elif current['current_title'] == old['desired_title']:
                     result = {'status': 'already_matched', 'reason': 'verified_prior_write' if evidence else 'current_title_matches'}
@@ -278,6 +294,7 @@ class Reconciler:
                 else:
                     # Durable intent comes before any request that might outlive its acknowledgement.
                     self._mark_unknown(old['thread_id'], plan_id)
+                    sent = True
                     try:
                         outcome = (self.catalog.rename_if_title(old['thread_id'], old['current_title'], old['desired_title'])
                                    if mode == 'strict' else self.catalog.rename_practical(old['thread_id'], old['desired_title']))
@@ -307,12 +324,12 @@ class Reconciler:
                         result = {'status': 'unknown', 'reason': 'write_not_verified'}
                     else:
                         result = {'status': outcome if outcome in ('blocked', 'failed') else 'failed', 'reason': 'provider_write_unavailable'}
-                    if result['status'] != 'unknown':
-                        self._clear_intent(old['thread_id'])
                 plan['results'][identity] = {'context': identity, 'thread_id': old['thread_id'],
                                              'previous_title': old['current_title'], 'desired_title': old['desired_title'],
                                              'checked_at': _now(), 'mode': mode, **result}
                 _write(self.state / (plan_id + '.json'), plan)
+                if sent and result['status'] != 'unknown':
+                    self._clear_intent(old['thread_id'])
             return self._public(plan)
 
     def undo(self, plan_id, context_id, mode='strict', confirm_non_atomic=False):
@@ -320,6 +337,7 @@ class Reconciler:
         if mode not in ('strict', 'practical') or (mode == 'practical' and not confirm_non_atomic):
             raise ValueError('Practical mode requires explicit non-atomic confirmation')
         with _lock(self.state):
+            sent = False
             plan = self._load_plan(plan_id)
             original = next((row for row in plan['rows'] if row['context'] == context_id), None)
             evidence = plan.get('verified_writes', {}).get(context_id)
@@ -331,7 +349,7 @@ class Reconciler:
                 fresh = None
             if not evidence:
                 outcome = {'status': 'conflict', 'reason': 'no_verified_write'}
-            elif fresh is None or fresh['status'] == 'conflict' or any(fresh[key] != original[key] for key in ('thread_id', 'desired_title', 'binding')) or fresh['current_title'] != evidence['written_title']:
+            elif fresh is None or fresh['status'] == 'conflict' or any(fresh[key] != original[key] for key in ('thread_id', 'desired_title', 'binding', 'provider_root')) or fresh['current_title'] != evidence['written_title']:
                 outcome = {'status': 'conflict', 'reason': 'title_or_mapping_changed'}
             elif not evidence['previous_title']:
                 outcome = {'status': 'blocked', 'reason': 'blank_prior_title_requires_manual_reconciliation'}
@@ -341,6 +359,7 @@ class Reconciler:
                 outcome = {'status': 'blocked', 'reason': 'supported_provider_rename_unavailable'}
             else:
                 self._mark_unknown(evidence['thread_id'], plan_id)
+                sent = True
                 try:
                     response = (self.catalog.rename_if_title(evidence['thread_id'], evidence['written_title'], evidence['previous_title'])
                                 if mode == 'strict' else self.catalog.rename_practical(evidence['thread_id'], evidence['previous_title']))
@@ -366,8 +385,8 @@ class Reconciler:
                 else:
                     outcome = {'status': response if response in ('blocked', 'failed') else 'unknown',
                                'reason': 'undo_not_verified'}
-                if outcome['status'] != 'unknown':
-                    self._clear_intent(evidence['thread_id'])
             plan.setdefault('undo_results', {})[context_id] = {'checked_at': _now(), **outcome}
             _write(self.state / (plan_id + '.json'), plan)
+            if sent and outcome['status'] != 'unknown':
+                self._clear_intent(evidence['thread_id'])
             return self._public(plan)

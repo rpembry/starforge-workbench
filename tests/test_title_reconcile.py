@@ -6,6 +6,7 @@ import uuid
 import pytest
 
 from starforge_workbench.title_reconcile import CodexCatalog, Reconciler
+import starforge_workbench.title_reconcile as title_module
 
 A = str(uuid.UUID('11111111-1111-4111-8111-111111111111'))
 B = str(uuid.UUID('22222222-2222-4222-8222-222222222222'))
@@ -244,6 +245,75 @@ print(json.dumps({'id':second['id'],'result':{}}), flush=True)
 ''')
     fake.chmod(0o700)
     assert CodexCatalog(tmp_path, str(fake)).rename_practical(A, 'Alpha') == 'applied'
+
+
+def test_codex_home_is_shared_by_catalog_and_supported_rename(tmp_path, monkeypatch):
+    first, second = tmp_path / 'first', tmp_path / 'second'
+    for root, title in ((first, 'Wrong store'), (second, 'Reviewed store')):
+        root.mkdir()
+        with __import__('sqlite3').connect(root / 'state_test.sqlite') as db:
+            db.execute('CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, archived INTEGER, source TEXT)')
+            db.execute('INSERT INTO threads VALUES (?,?,?,?,?)', (A, '/synthetic/a', title, 0, 'cli'))
+    fake = tmp_path / 'fake-codex'
+    fake.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, sys
+first=json.loads(sys.stdin.readline())
+print(json.dumps({'id':first['id'],'result':{}}), flush=True)
+json.loads(sys.stdin.readline())
+second=json.loads(sys.stdin.readline())
+pathlib.Path(os.environ['CODEX_HOME']).joinpath('renamed.txt').write_text(second['params']['name'])
+print(json.dumps({'id':second['id'],'result':{}}), flush=True)
+''')
+    fake.chmod(0o700)
+    monkeypatch.setenv('CODEX_HOME', str(second))
+    catalog = CodexCatalog(tmp_path / 'irrelevant-home', str(fake))
+    assert catalog.read(A)['title'] == 'Reviewed store'
+    assert catalog.rename_practical(A, 'Alpha') == 'applied'
+    assert (second / 'renamed.txt').read_text() == 'Alpha'
+    assert not (first / 'renamed.txt').exists()
+
+
+def test_provider_root_change_invalidates_preview(fixture, tmp_path):
+    service, cat, contexts, bindings, observed = fixture
+    cat.codex_root = tmp_path / 'provider-one'
+    plan = service.preview(['alpha'])
+    cat.codex_root = tmp_path / 'provider-two'
+    result = service.apply(plan['plan_id'], selected=['alpha'])
+    assert result['results']['alpha']['status'] == 'conflict'
+    assert cat.writes == []
+    assert 'provider_root' not in plan['rows'][0]
+
+
+def test_audit_write_failure_leaves_fence_after_actual_rename(fixture, monkeypatch):
+    service, cat, *_ = fixture
+    plan = service.preview(['alpha'])
+    original_write = title_module._write
+    def fail_plan(path, value):
+        if path.name == plan['plan_id'] + '.json':
+            raise OSError('synthetic audit failure')
+        return original_write(path, value)
+    monkeypatch.setattr(title_module, '_write', fail_plan)
+    with pytest.raises(OSError):
+        service.apply(plan['plan_id'], selected=['alpha'])
+    assert cat.rows[A]['title'] == 'Alpha ✨'
+    assert (service.state / 'uncertain' / (A + '.json')).exists()
+    monkeypatch.setattr(title_module, '_write', original_write)
+    assert service.preview(['alpha'])['rows'][0]['reason'] == 'unresolved_provider_outcome'
+
+
+def test_malformed_matching_ack_after_send_is_unknown(tmp_path):
+    fake = tmp_path / 'fake-codex'
+    fake.write_text('''#!/usr/bin/env python3
+import json, sys
+first=json.loads(sys.stdin.readline())
+print(json.dumps({'id':first['id'],'result':{}}), flush=True)
+json.loads(sys.stdin.readline())
+second=json.loads(sys.stdin.readline())
+print(json.dumps({'id':second['id'],'unexpected':'not an acknowledgement'}), flush=True)
+''')
+    fake.chmod(0o700)
+    with pytest.raises(ConnectionError):
+        CodexCatalog(tmp_path, str(fake)).rename_practical(A, 'Alpha')
 
 
 def test_undo_requires_verified_write_and_unchanged_current_title(fixture):
