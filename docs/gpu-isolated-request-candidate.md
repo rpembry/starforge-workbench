@@ -45,6 +45,40 @@ lease was acquired. The existing watcher keeps its lock, display, input-idle,
 and any-hour policy after the hold clears. A scoped peer's old `release`
 operation is deliberately treated as `finish`; it cannot skip scope exit.
 
+### Durable completion evidence
+
+An approved inert host probe found that this user-systemd manager clears
+`InvocationID` and its sampled lifecycle timestamps when a unit becomes
+inactive. A second inert probe confirmed that reviewed `ExecStartPre` and
+`ExecStopPost` hooks receive the same `INVOCATION_ID` for one activation, a
+different ID for a replacement activation, and that the captured cgroup is
+absent after stop. A temporary unit using the candidate Python hooks then
+produced a durable matching start/end receipt, which the source verified
+after the unit went inactive and systemd cleared its invocation field. All
+temporary units were stopped and removed; none touched the miner or Ollama.
+
+`gpu_unit_receipts.py` is a source-only, private SQLite ledger for those
+hooks. A later reviewed unit configuration would add **both** commands,
+without replacing its existing start/stop behavior:
+
+```ini
+ExecStartPre=/path/to/python -m workbench.gpu_unit_receipts --ledger /private/receipts.sqlite --unit example-idle.service --event start
+ExecStopPost=/path/to/python -m workbench.gpu_unit_receipts --ledger /private/receipts.sqlite --unit example-idle.service --event end
+```
+
+Use the exact configured unit name for each miner and isolated request unit.
+The adapter records the miner invocation, root/process generations, cgroup
+path, and cgroup inode in that ledger *before* its pidfd stop. After restart
+it can recover the same capture. It grants only after a matching start,
+capture, and end receipt, no later start receipt, two inactive/no-job unit
+observations, empty original cgroup, dead captured process generations, and
+the existing GPU/scope resamples. The request scope similarly requires
+matching start/end receipts before claiming whole-scope completion. A
+replacement start, missing/duplicate/corrupt receipt, changed cgroup inode,
+unavailable hook, or boot change leaves the hold unknown. These hooks and
+their ledger have **not** been installed on the real units; exact unit
+configuration and hook failure behavior remain commissioning gates.
+
 The `ExecCondition=` result is a **one-time** check, so the candidate depends
 on the user-systemd activation state being observable throughout the gap
 between that check and `ExecStart`. The controller now refuses to grant while
@@ -59,14 +93,14 @@ the exact `ActiveState`/`Job` observations still need a controlled host check.
 ## Commissioning gate and rollback
 
 Before any live test, review the exact private unit and drop-in, registry
-path, socket permissions, user-systemd cgroup topology, KFD visibility,
+and receipt paths, hook installation and permissions, socket permissions,
+user-systemd cgroup topology, KFD visibility,
 installed-model cache path, and a free loopback port. Verify on this host that
-systemd retains enough invocation evidence after the test service exits for
-`ended=True`; if it does not, the lease intentionally remains and this
-candidate must be revised before inference. Verify the miner's captured
-generation can be recovered or plan an explicit operator recovery after an
-adapter restart. No arbitrary PID signaling or registry deletion is a
-recovery method.
+the reviewed hooks execute for the exact miner and request units and their
+receipts survive an adapter restart. An uninstrumented replacement could
+evade the ledger, so configuration drift must be treated as unknown and the
+path must stay disabled until the hooks are verified. No arbitrary PID
+signaling or registry deletion is a recovery method.
 
 Before enabling a grant-capable adapter, verify with an inert test unit that
 `ActiveState` stays `activating` or a pending `Job` stays visible after a
@@ -176,8 +210,9 @@ rm -r -- "$probe_root"
 ```
 
 The first reviewed test would install the adapter and one **disabled** test
-unit, add the miner `ExecCondition`, observe gate behavior with fake lease
-state, then invoke only the test unit's fixed synthetic worker. Inspect lease,
+unit, add the miner `ExecCondition` and both units' reviewed receipt hooks,
+observe gate behavior with fake lease state, then invoke only the test unit's
+fixed synthetic worker. Inspect lease,
 unit/cgroup, and KFD state before and after one request. The ordinary Ollama
 port and Workbench tunnel stay unchanged. Rollback stops the test unit,
 requires positive proof that its cgroup and GPU children ended, clears the
@@ -186,8 +221,9 @@ the test unit and drop-in. If proof is missing, leave the miner gated and
 perform reviewed operator recovery.
 
 Live approval is needed for installing/enabling the adapter, adding the
-`ExecCondition` and disabled test unit, the controlled miner stop/restart, and
-one bounded synthetic Ollama inference. No live step is authorized by this
+`ExecCondition`, both receipt-hook pairs and disabled test unit, the
+controlled miner stop/restart, and one bounded synthetic Ollama inference.
+No live step is authorized by this
 source candidate.
 
 ## Cost and limits

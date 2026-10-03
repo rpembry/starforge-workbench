@@ -311,7 +311,7 @@ class FakeRequestUnit:
         return UnitGeneration(self.unit, self.state, self.invocation,
                               self.cgroup if self.state == 'active' else '',
                               self.main_pid if self.state == 'active' else 0,
-                              self.members if self.state == 'active' else ())
+                              self.members if self.state == 'active' else (), False)
 
     def cgroup_processes(self, _cgroup):
         return self.members

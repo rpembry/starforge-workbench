@@ -16,12 +16,14 @@ from .gpu_unit_controller import EvidenceUnavailable, UserUnit
 
 class SystemdRequestScopeSource:
     def __init__(self, unit: UserUnit, *, cgroup_root: Path = Path('/sys/fs/cgroup'),
-                 boot_reader=None, start_ticks=None, clock=time.monotonic):
+                 boot_reader=None, start_ticks=None, clock=time.monotonic,
+                 receipts=None):
         self.unit = unit
         self.cgroup_root = Path(cgroup_root)
         self._boot_reader = boot_reader or (lambda: Path('/proc/sys/kernel/random/boot_id').read_text())
         self._start_ticks = start_ticks or unit._start_ticks
         self.clock = clock
+        self.receipts = receipts
 
     def boot_id(self) -> str:
         value = self._boot_reader().strip()
@@ -70,7 +72,7 @@ class SystemdRequestScopeSource:
             if rebound != binding or self.process_start_ticks(pid) != peer_start:
                 raise PermissionError('Request scope changed during peer binding')
             return binding.owner_key()
-        except (OSError, EvidenceUnavailable) as exc:
+        except (OSError, EvidenceUnavailable, RuntimeError) as exc:
             raise PermissionError('Request scope evidence unavailable') from exc
 
     def observe(self, binding: ScopeBinding) -> ScopeObservation | None:
@@ -79,13 +81,17 @@ class SystemdRequestScopeSource:
                 return None
             directory = self._directory(binding.scope_id)
             current = self.unit.snapshot()
-            if current.unit != self.unit.unit or current.invocation != binding.generation:
+            if current.unit != self.unit.unit or current.invocation not in ('', binding.generation):
                 return None
             if current.state == 'active':
                 if (current.cgroup != binding.scope_id or
+                        current.invocation != binding.generation or
                         directory.stat().st_ino != binding.cgroup_inode or
                         current.main_pid != binding.root.pid or
                         self.process_start_ticks(binding.root.pid) != binding.root.start_ticks):
+                    return None
+                if self.receipts is not None and not self.receipts.started(
+                        self.unit.unit, binding.generation):
                     return None
                 first = self.unit.cgroup_processes(binding.scope_id)
                 second = self.unit.cgroup_processes(binding.scope_id)
@@ -100,7 +106,13 @@ class SystemdRequestScopeSource:
                     return None
                 members = tuple(ProcessGeneration(p.pid, p.start_ticks) for p in first)
                 return ScopeObservation(binding, self.clock(), members, False)
-            if current.state != 'inactive' or current.cgroup not in ('', binding.scope_id):
+            if (current.state != 'inactive' or current.start_job is not False or
+                    current.cgroup not in ('', binding.scope_id)):
+                return None
+            if self.receipts is None:
+                if current.invocation != binding.generation:
+                    return None
+            elif not self.receipts.completed(self.unit.unit, binding.generation):
                 return None
             try:
                 if directory.stat().st_ino != binding.cgroup_inode:
@@ -113,8 +125,14 @@ class SystemdRequestScopeSource:
                 return None
             second = self.unit.snapshot()
             if (second.unit != current.unit or second.state != 'inactive' or
-                    second.invocation != binding.generation):
+                    second.start_job is not False or
+                    second.invocation not in ('', binding.generation)):
+                return None
+            if self.receipts is None:
+                if second.invocation != binding.generation:
+                    return None
+            elif not self.receipts.completed(self.unit.unit, binding.generation):
                 return None
             return ScopeObservation(binding, self.clock(), (), True)
-        except (OSError, EvidenceUnavailable, ValueError):
+        except (OSError, EvidenceUnavailable, ValueError, RuntimeError):
             return None
