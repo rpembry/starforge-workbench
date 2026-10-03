@@ -7,6 +7,12 @@ import subprocess
 from .favorite_apps import load_config
 
 
+UNRESOLVED_HELP = ('A prior launch may still be opening. Check the app’s existing windows. '
+                   'Refresh status after checking; a verified open window is preserved. '
+                   'This launcher cannot safely retry an unverified launch in the same boot. '
+                   'If it is still missing after a reboot, open Favorite Apps for a fresh check.')
+
+
 def _dialog(*args):
     try:
         result = subprocess.run(['zenity', *args], capture_output=True, text=True,
@@ -33,7 +39,8 @@ def run_gui(restorer):
         rows = []
         for item in preview['items']:
             label = {'launch': 'Ready to open', 'preserve': 'Already open',
-                     'skip': 'Opening is still unverified', 'refuse': 'Cannot safely open'}[item['action']]
+                     'skip': 'Prior launch unverified — will not reopen',
+                     'refuse': 'Cannot safely open'}[item['action']]
             if item.get('can_open_anyway'):
                 label = 'Running status unknown'
             rows.extend(['TRUE' if item['name'] in selected else 'FALSE',
@@ -49,12 +56,17 @@ def run_gui(restorer):
         if not selected:
             continue
         selected_preview = restorer.preview(selected)
-        details = '\n'.join(f"{item['name']}: {item['action']} — {item['evidence']}"
-                            for item in selected_preview['items'])
+        details = '\n'.join(
+            f"{item['name']}: {'Will not reopen this boot' if item['action'] == 'skip' else item['action']}"
+            f" — {item['evidence']}" for item in selected_preview['items'])
+        blocked = any(item['action'] == 'skip' for item in selected_preview['items'])
+        if blocked:
+            details += '\n\n' + UNRESOLVED_HELP
         can_open = any(item['action'] == 'launch' for item in selected_preview['items'])
         unknown = [item for item in selected_preview['items'] if item.get('can_open_anyway')]
         if not can_open and not unknown:
-            _dialog('--info', '--title=Favorite Apps', '--text=' + details)
+            _dialog('--info', '--title=Favorite Apps', '--text=' + details,
+                    '--ok-label=Refresh status', '--width=700')
             continue
         open_unknown = bool(unknown)
         if open_unknown:
@@ -75,7 +87,11 @@ def run_gui(restorer):
         _dialog('--warning', '--title=Favorite Apps',
                 '--text=An app changed after preview. Open Favorite Apps again to check it.')
         return 1
-    summary = '\n'.join(f"{item['name']}: {item['result']} — {item['evidence']}"
-                        for item in result['items'])
+    summary = '\n'.join(
+        f"{item['name']}: {'Not reopened; prior launch remains unverified' if item['result'] == 'uncertain' and not item['launch_requested'] else item['result']}"
+        f" — {item['evidence']}" for item in result['items'])
+    if any(item['result'] == 'uncertain' and not item['launch_requested']
+           for item in result['items']):
+        summary += '\n\n' + UNRESOLVED_HELP
     _dialog('--info', '--title=Favorite Apps', '--text=' + summary, '--width=700')
     return 0

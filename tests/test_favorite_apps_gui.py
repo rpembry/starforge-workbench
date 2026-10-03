@@ -22,6 +22,7 @@ class Restorer:
     def apply(self, names, token, *, open_unknown=False):
         self.applied.append((names, token, open_unknown))
         return {'items': [{'name': name, 'result': 'refused' if name != 'Editor' else 'uncertain',
+                           'launch_requested': name == 'Editor',
                            'evidence': 'synthetic result'} for name in names]}
 
 
@@ -94,6 +95,30 @@ def test_zenity_display_failure_is_not_cancel(monkeypatch):
                         SimpleNamespace(returncode=1, stdout='', stderr='Failed to open display'))
     with pytest.raises(ValueError, match='could not open a graphical dialog'):
         run_gui(Restorer())
+
+
+def test_unresolved_receipt_is_explicit_and_refreshes_without_retry(monkeypatch):
+    import starforge_workbench.favorite_apps_ui as ui
+    class Pending(Restorer):
+        def preview(self, names):
+            return {'selection': names, 'token': 'synthetic-token', 'items': [
+                {'name': name, 'action': 'skip', 'can_open_anyway': False,
+                 'evidence': 'Prior launch is unresolved; visibility unknown'} for name in names]}
+    monkeypatch.setattr(ui, 'load_config', lambda _: [{'name': 'Editor'}])
+    monkeypatch.setattr(ui.shutil, 'which', lambda _: '/usr/bin/zenity')
+    calls = []
+    responses = iter([(0, 'Editor\n'), (0, ''), (1, '')])
+    def dialog(*args):
+        calls.append(args)
+        code, output = next(responses)
+        return SimpleNamespace(returncode=code, stdout=output)
+    monkeypatch.setattr(ui, '_dialog', dialog)
+    restorer = Pending()
+    assert run_gui(restorer) == 0
+    assert restorer.applied == []
+    assert any('will not reopen' in value for value in calls[0])
+    assert '--ok-label=Refresh status' in calls[1]
+    assert any('cannot safely retry' in value for value in calls[1])
 
 
 def test_gnome_adapter_rejects_unknown_and_unverified_process(monkeypatch, tmp_path):

@@ -8,6 +8,11 @@ to change the selection, and confirms
 before opening them. Unknown status requires an explicit **Open anyway** choice
 because another window may already exist. An unresolved same-boot launch
 remains blocked after that choice. The entry never starts apps at login.
+An unresolved prior launch is labeled per app and the dialog offers **Refresh
+status** after the user checks existing windows. Refresh only rechecks presence;
+it does not retry or discard the receipt. If no window is found after a reboot,
+a new preview can consider a launch again. The launcher cannot prove that a
+same-boot startup has finished, so it offers no same-boot retry control.
 
 `uv run wb-apps` is a local, manual desktop-entry restorer. It never starts a
 Workbench provider session, changes Chrome tabs, or creates login autostart.
