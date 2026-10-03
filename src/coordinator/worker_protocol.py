@@ -105,11 +105,20 @@ class WorkerInbox:
             self.state = json.loads(self.path.read_text())
             if self.state["identity"] != self.identity:
                 raise ProtocolError("persisted worker incarnation mismatch")
-            self.state.setdefault("artifacts", [])
+            if "artifacts" not in self.state:
+                events = self.state["events"]
+                complete = (self.state["floor"] == 1 and not self.state["gaps"] and
+                            [event["seq"] for event in events] == list(range(1, self.state["last_seq"] + 1)))
+                self.state["artifacts"] = [event["frame"]["data"]["path"] for event in events
+                                           if event["frame"]["kind"] == "artifact"] if complete else []
+                self.state["artifacts_complete"] = complete
+                self._save()
+            else:
+                self.state.setdefault("artifacts_complete", not self.state["gaps"])
         else:
             self.state = {"identity": self.identity, "last_seq": 0, "hello": False,
                           "ready": False, "result": None, "events": [], "floor": 1,
-                          "gaps": [], "artifacts": []}
+                          "gaps": [], "artifacts": [], "artifacts_complete": True}
 
     def _save(self):
         fd, path = tempfile.mkstemp(prefix=".inbox-", dir=self.directory)
@@ -157,6 +166,7 @@ class WorkerInbox:
             if gap:
                 self.state["gaps"].append(gap)
                 self.state["gaps"] = self.state["gaps"][-MAX_EVENTS:]
+                self.state["artifacts_complete"] = False
             if frame.kind == "hello":
                 self.state["hello"] = True
             elif frame.kind == "ready":
@@ -187,7 +197,8 @@ class WorkerInbox:
         return {"events": [entry["frame"] for entry in self.state["events"] if entry["seq"] > after_seq],
                 "floor": self.state["floor"], "gap": after_seq < self.state["floor"] - 1,
                 "latest": self.state["last_seq"], "sequence_gaps": self.state["gaps"],
-                "result": self.state["result"], "artifacts": self.state["artifacts"]}
+                "result": self.state["result"], "artifacts": self.state["artifacts"],
+                "artifacts_complete": self.state["artifacts_complete"]}
 
 
 async def serve_worker_socket(path: str | Path, inbox: WorkerInbox):

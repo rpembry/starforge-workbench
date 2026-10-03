@@ -52,25 +52,25 @@ class WorkerChannel:
         self.inbox = WorkerInbox(self.inbox_dir, job_id=job_id,
                                  attempt_id=attempt_id, incarnation=incarnation)
         self.socket_path = self.mount_dir / "events.sock"
-        if self.socket_path.exists() or self.socket_path.is_symlink():
-            if not self.socket_path.is_socket():
-                raise ValueError("worker channel path changed")
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
-                try:
-                    probe.settimeout(0.2)
-                    probe.connect(str(self.socket_path))
-                except OSError as exc:
-                    if exc.errno != errno.ECONNREFUSED:
-                        raise
-                else:
-                    raise ValueError("worker channel already served")
-            self.socket_path.unlink()  # stale socket in exact private attempt
         # Linux AF_UNIX sun_path is short (usually 108 bytes). Bind through a
         # directory fd so deeply nested private state roots still work. The
         # worker sees the ordinary short /channel/events.sock mount path.
         self.directory_fd = os.open(self.mount_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         self.connect_path = f"/proc/self/fd/{self.directory_fd}/events.sock"
         try:
+            if self.socket_path.exists() or self.socket_path.is_symlink():
+                if not self.socket_path.is_socket():
+                    raise ValueError("worker channel path changed")
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                    try:
+                        probe.settimeout(0.2)
+                        probe.connect(self.connect_path)
+                    except OSError as exc:
+                        if exc.errno != errno.ECONNREFUSED:
+                            raise
+                    else:
+                        raise ValueError("worker channel already served")
+                self.socket_path.unlink()  # stale socket in exact private attempt
             self.server = _Server(self.connect_path, _Handler)
         except BaseException:
             os.close(self.directory_fd)

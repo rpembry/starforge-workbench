@@ -284,6 +284,27 @@ class CoordinatorStore:
                 "job_id": job_id, "attempt_id": attempt_id})
             return self._view(db, job_id)
 
+    def reattach(self, job_id, *, expected_version: int, principal: str, key: str):
+        """Durable request to observe the SAME attempt after controller loss.
+
+        Reattachment is neither a launch nor a retry. A lost response replays
+        the same command ID; only a new key must satisfy current job version.
+        """
+        body = {"job_id": job_id, "expected_version": expected_version}
+        with self._tx() as db:
+            old, digest = self._operation(db, principal, key, "reattach", body)
+            if old:
+                return self._view(db, old["job_id"])
+            job = self._view(db, job_id)
+            if job["version"] != expected_version:
+                raise Conflict("job version changed")
+            if job["phase"] not in {"active", "finalizing"} or not job["attempt_id"]:
+                raise Conflict("only an existing live or uncertain attempt can reattach")
+            self._event(db, job_id, "reattach_requested", {"attempt_id": job["attempt_id"]})
+            self._record_op(db, principal, key, "reattach", digest, job_id, "pending", {
+                "job_id": job_id, "attempt_id": job["attempt_id"]})
+            return self._view(db, job_id)
+
     def admit_next(self, *, principal: str, key: str):
         """Durably allocate one attempt and launch intent; caller sends it to supervisor once.
 

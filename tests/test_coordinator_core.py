@@ -182,3 +182,20 @@ def test_schema_one_migration_preserves_jobs(store, spec):
     assert reopened.get(original["id"])["id"] == original["id"]
     with sqlite3.connect(store.path) as db:
         assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+
+
+def test_reattach_replays_same_attempt_and_command(store, spec):
+    submitted = store.submit(spec, principal="client", key="submit")
+    active = store.admit_next(principal="scheduler", key="admit")
+    attached = store.reattach(submitted["id"], expected_version=active["version"],
+                              principal="client", key="reattach")
+    assert attached["attempt_id"] == active["attempt_id"]
+    commands = [item for item in store.pending_commands() if item["kind"] == "reattach"]
+    assert len(commands) == 1
+    with pytest.raises(Conflict, match="version"):
+        store.reattach(submitted["id"], expected_version=active["version"],
+                       principal="client", key="new-key")
+    replay = CoordinatorStore(store.root, store.policy).reattach(
+        submitted["id"], expected_version=active["version"], principal="client", key="reattach")
+    assert replay["attempt_id"] == active["attempt_id"]
+    assert [item["id"] for item in store.pending_commands() if item["kind"] == "reattach"] == [commands[0]["id"]]

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import socket
 import tempfile
+import time
 import uuid
 
 MAX_FRAME = 16_384  # independently versioned wire constant; SDK uses stdlib only
@@ -47,28 +48,38 @@ class WorkerClient:
             if os.path.exists(path):
                 os.unlink(path)
 
-    def send(self, kind: str, data: dict):
+    def send(self, kind: str, data: dict, *, max_wait_seconds=30):
         if self.state["pending"] is not None:
             raise RuntimeError("resolve pending message before sending another")
         self.state["pending"] = {"protocol": "worker.v1", **self.identity,
                                  "seq": self.state["seq"] + 1,
                                  "event_id": uuid.uuid4().hex, "kind": kind, "data": data}
         self._save()  # preserve exact event identity before network write
-        return self.retry_pending()
+        return self.retry_pending(max_wait_seconds=max_wait_seconds)
 
-    def retry_pending(self):
+    def retry_pending(self, *, max_wait_seconds=30):
         pending = self.state["pending"]
         if pending is None:
             return None
+        if not 0 <= max_wait_seconds <= 300:
+            raise ValueError("invalid reconnect budget")
         wire = (json.dumps(pending, separators=(",", ":")) + "\n").encode()
         if len(wire) > MAX_FRAME:
             raise ValueError("worker message exceeds frame limit")
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.settimeout(5)
-            connection.connect(self.socket_path)
-            connection.sendall(wire)
-            with connection.makefile("rb") as stream:
-                response = json.loads(stream.readline(MAX_FRAME))
+        deadline = time.monotonic() + max_wait_seconds
+        while True:
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                    connection.settimeout(5)
+                    connection.connect(self.socket_path)
+                    connection.sendall(wire)
+                    with connection.makefile("rb") as stream:
+                        response = json.loads(stream.readline(MAX_FRAME))
+                break
+            except (OSError, ValueError):
+                if time.monotonic() >= deadline:
+                    raise ConnectionError("worker channel unavailable; pending frame retained") from None
+                time.sleep(min(0.25, deadline - time.monotonic()))
         if response.get("status") not in {"accepted", "duplicate"} or response.get("ack_seq") < pending["seq"]:
             raise RuntimeError("worker message not acknowledged")
         self.state["seq"] = pending["seq"]

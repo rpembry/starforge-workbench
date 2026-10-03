@@ -20,6 +20,9 @@ Python service boundary. A local transport and CLI are the dependent #175 task.
 for the service loop. `set_command_status()` records delivery uncertainty; it
 does not set a job result. The API layer must use the operation ID when calling
 the supervisor and reconcile the same attempt after a lost response.
+`reattach(job_id, expected_version, principal, key)` records a distinct
+same-attempt reconciliation command. It never allocates an attempt, and a
+replayed key returns the original logical command after a lost response.
 
 The store requires an existing private, caller-owned state directory, creates a
 private SQLite database, checks schema version and integrity on open, and uses

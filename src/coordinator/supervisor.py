@@ -222,16 +222,19 @@ class Supervisor:
             raise ValueError("invalid symbolic launch reference")
         if not isinstance(plan["payload"], dict) or len(_json(plan["payload"]).encode()) > 65_536:
             raise ValueError("invalid or oversized payload")
-        if not 1 <= plan["deadline_seconds"] <= 86_400:
+        if type(plan["deadline_seconds"]) is not int or not 1 <= plan["deadline_seconds"] <= 86_400:
             raise ValueError("invalid deadline")
         policy = plan["orphan_policy"]
         if set(policy) != {"mode", "grace_seconds", "max_orphan_seconds"} or policy["mode"] not in {"strict", "trusted_local"}:
             raise ValueError("invalid orphan policy")
+        if type(policy["grace_seconds"]) is not int or not 0 <= policy["grace_seconds"] <= 300:
+            raise ValueError("invalid orphan grace")
+        if type(policy["max_orphan_seconds"]) is not int:
+            raise ValueError("invalid orphan budget")
         if policy["mode"] == "trusted_local" and not 1 <= policy["max_orphan_seconds"] <= 86_400:
             raise ValueError("invalid orphan budget")
         if policy["mode"] == "strict" and policy["max_orphan_seconds"]:
             raise ValueError("strict orphan policy cannot continue")
-        self.runtime.validate(plan)
         return hashlib.sha256(_json(plan).encode()).hexdigest()
 
     @_serialized
@@ -250,6 +253,7 @@ class Supervisor:
                     raise Conflict("attempt or operation identity conflict")
                 # A lost launch response must be reconciled, never repeated.
                 return self._attempt(old)
+            self.runtime.validate(plan)  # current policy gates only NEW runtime allocations
             deadline = now + plan["deadline_seconds"]
             orphan_deadline = (min(deadline, now + policy["max_orphan_seconds"])
                                if policy["mode"] == "trusted_local"
@@ -530,15 +534,32 @@ class Supervisor:
         item = self.inspect(attempt_id)
         if item["state"] == "stopped":
             return item
-        if item["state"] in {"launch_pending", "launch_calling"}:
-            return item  # launch completion or reconciliation will honor sticky cancel
+        if item["state"] == "launch_pending" and item["cancel"]:
+            # Runtime launch is entered only after a durable transition to
+            # launch_calling under this same cross-process control lock.
+            with self._tx() as db:
+                db.execute("UPDATE attempts SET state='stopped',observation_seq=observation_seq+1 WHERE id=? AND state='launch_pending'", (
+                    attempt_id,))
+                db.execute("UPDATE operations SET status='confirmed',response=? WHERE attempt_id=? AND kind IN ('cancel','owner_stop')", (
+                    _json({"state": "stopped", "no_start": True}), attempt_id))
+            return self.inspect(attempt_id)
+        if item["state"] == "launch_calling":
+            return item  # unknown create outcome; reconciliation will honor sticky cancel
         try:
             observed = self.runtime.inspect(item["plan"], item["runtime_id"])
-            if not observed["identity_ok"] or observed["runtime_id"] != item["runtime_id"]:
+            if (not observed["identity_ok"] or not observed["runtime_id"] or
+                    item["runtime_id"] and observed["runtime_id"] != item["runtime_id"]):
                 raise OwnershipUnknown("runtime ownership mismatch")
+            if item["runtime_id"] is None:
+                # Lost create/start response: adopt only a resource that the
+                # host adapter verified against the journal's exact plan,
+                # token, labels, incarnation and receipt. Never guess an ID.
+                with self._tx() as db:
+                    db.execute("UPDATE attempts SET runtime_id=? WHERE id=? AND runtime_id IS NULL", (
+                        observed["runtime_id"], attempt_id))
             if not observed["stopped"]:
-                self.runtime.stop(item["plan"], item["runtime_id"])
-                observed = self.runtime.inspect(item["plan"], item["runtime_id"])
+                self.runtime.stop(item["plan"], observed["runtime_id"])
+                observed = self.runtime.inspect(item["plan"], observed["runtime_id"])
             if not observed["identity_ok"] or not observed["stopped"]:
                 raise OwnershipUnknown("stop confirmation unavailable")
         except Exception:

@@ -2,6 +2,8 @@
 
 import pytest
 import sqlite3
+import hashlib
+import json
 
 from coordinator.supervisor import Conflict, Fenced, OwnershipUnknown, RecoveryUncertain, Supervisor, WatchdogUncertain
 
@@ -262,3 +264,21 @@ def test_supervisor_schema_two_migrates_without_losing_identity(setup):
     assert reopened.acquire("controller")["supervisor_id"] == identity
     with sqlite3.connect(supervisor.path) as db:
         assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_owner_stop_confirms_no_start_from_committed_launch_pending(setup):
+    supervisor, runtime, clock = setup
+    lease = supervisor.acquire("controller")
+    pending_plan = plan()
+    digest = hashlib.sha256(json.dumps(pending_plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    with supervisor._tx() as db:
+        db.execute("INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+            "attempt-1", "job-1", "inc-1", digest,
+            json.dumps(pending_plan, sort_keys=True, separators=(",", ":")),
+            lease["generation"], "launch-op", None, "launch_pending", 0,
+            1030, 1018, "strict", 3, 0))
+        db.execute("INSERT INTO operations VALUES(?,?,?,?,?)", (
+            "launch-op", "attempt-1", "launch", "pending", None))
+    stopped = supervisor.owner_stop("attempt-1", operation_id="owner-op")
+    assert stopped["state"] == "stopped" and stopped["runtime_id"] is None
+    assert runtime.starts == 0

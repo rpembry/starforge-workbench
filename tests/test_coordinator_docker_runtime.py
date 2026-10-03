@@ -35,6 +35,7 @@ class FakeDocker:
         self.item = None
         self.create_count = 0
         self.lose_create_response = False
+        self.lose_start_response = False
 
     def __call__(self, argv, **kwargs):
         self.calls.append(argv)
@@ -65,6 +66,8 @@ class FakeDocker:
             return json.dumps([self.item]).encode()
         if "start" in argv:
             self.item["State"].update(Status="running", Running=True)
+            if self.lose_start_response:
+                raise TimeoutError("lost Docker start reply")
             return b""
         if "stop" in argv:
             self.item["State"].update(Status="exited", Running=False, ExitCode=143)
@@ -196,3 +199,48 @@ def test_supervisor_collect_commits_exit_and_artifact_evidence(runtime, tmp_path
     exported.write_text("tampered\n")
     with pytest.raises(Exception, match="hash changed"):
         supervisor.read_artifact("a" * 32, "file-0")
+
+
+@pytest.mark.parametrize("stop_mode", ["abandon", "owner", "deadline"])
+def test_lost_start_response_still_stops_exact_runtime(runtime, tmp_path, stop_mode):
+    adapter, fake = runtime
+    fake.lose_start_response = True
+    journal = tmp_path / "journal"
+    journal.mkdir(mode=0o700)
+    clock = [1000.0]
+    supervisor = Supervisor(journal, adapter, clock=lambda: clock[0])
+    lease = supervisor.acquire("controller", lease_seconds=5)
+    with pytest.raises(OwnershipUnknown):
+        supervisor.launch(plan(), controller="controller", generation=lease["generation"], operation_id="launch-op")
+    assert fake.item["State"]["Running"] and supervisor.inspect("a" * 32)["runtime_id"] is None
+    if stop_mode == "abandon":
+        result = supervisor.abandon(plan(), controller="controller",
+                                    generation=lease["generation"], operation_id="launch-op")
+    elif stop_mode == "owner":
+        result = supervisor.owner_stop("a" * 32, operation_id="owner-op")
+    else:
+        clock[0] = 1008
+        assert supervisor.tick() == ["a" * 32]
+        result = supervisor.inspect("a" * 32)
+    assert result["state"] == "stopped" and result["runtime_id"] == "container-1"
+    assert fake.item["State"]["Running"] is False and fake.create_count == 1
+
+
+def test_policy_revocation_cannot_prevent_prelaunch_tombstone(runtime, tmp_path):
+    adapter, fake = runtime
+    journal = tmp_path / "journal"
+    journal.mkdir(mode=0o700)
+    supervisor = Supervisor(journal, adapter)
+    lease = supervisor.acquire("controller")
+    original_profile = adapter.profiles.pop("offline")
+    cancelled = supervisor.abandon(plan(), controller="controller",
+                                   generation=lease["generation"], operation_id="launch-op")
+    assert cancelled["state"] == "stopped" and fake.create_count == 0
+    adapter.profiles["offline"] = original_profile
+    assert supervisor.launch(plan(), controller="controller",
+                             generation=lease["generation"], operation_id="launch-op")["state"] == "stopped"
+    assert fake.create_count == 0
+    with pytest.raises(ValueError, match="unapproved"):
+        adapter.profiles.pop("offline")
+        supervisor.launch({**plan(), "attempt_id": "b" * 32}, controller="controller",
+                          generation=lease["generation"], operation_id="new-op")

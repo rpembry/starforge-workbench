@@ -25,6 +25,20 @@ from .worker_protocol import WorkerInbox
 LABEL = "io.starforge.coordinator"
 
 
+def protocol_execution_result(exit_code, inbox_state):
+    """No success from a lost result, readiness, or artifact declaration gap."""
+    if exit_code is None:
+        return None
+    if exit_code != 0:
+        return False
+    result = inbox_state["result"]
+    if result is not None and result["data"]["ok"] is False:
+        return False
+    if not inbox_state["ready"] or result is None or not inbox_state["artifacts_complete"]:
+        return None
+    return True
+
+
 class DockerRuntime:
     """One local Docker host, with approved immutable refs supplied by operator.
 
@@ -290,11 +304,7 @@ class DockerRuntime:
         save("exit.json", _json({"exit_code": observed["exit_code"],
                                  "runtime_id": runtime_id}).encode())
         if inbox:
-            result = inbox.state["result"]
-            execution_ok = (observed["exit_code"] == 0 and inbox.state["ready"] and
-                            result is not None and result["data"]["ok"] is True)
-            if result is None or not inbox.state["ready"] or observed["exit_code"] is None:
-                execution_ok = None
+            execution_ok = protocol_execution_result(observed["exit_code"], inbox.state)
         else:
             execution_ok = observed["exit_code"] == 0 if observed["exit_code"] is not None else None
         atomic(output / "manifest.json", {"attempt_id": plan["attempt_id"],

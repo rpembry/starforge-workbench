@@ -17,6 +17,11 @@ are `ready`, `heartbeat`, `progress` (`completed`/`total`), structured `log`
 Frame size is 16 KiB; data is 8 KiB. The host acknowledges only after fsyncing
 the inbox record. The SDK persists a pending frame before sending and retries
 the same event ID after a lost acknowledgement.
+The sender retries a pending frame for a bounded 30 seconds by default; if the
+channel remains unavailable, its exact pending frame stays on disk for an
+explicit later retry. Older inboxes reconstruct artifact declarations only
+when their complete sequence is retained. A rotated or gapped legacy inbox
+keeps success uncertain rather than silently omitting a required artifact.
 
 The inbox retains at most 128 frames and 1 MiB for replay, plus the latest
 result record and explicit sequence gaps. A cursor below its floor returns

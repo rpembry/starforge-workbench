@@ -5,6 +5,7 @@ import json
 import pytest
 
 from coordinator.worker_protocol import Frame, ProtocolError, WorkerInbox, decode_frame
+from coordinator.docker_runtime import protocol_execution_result
 
 
 def frame(seq, kind, data=None, **identity):
@@ -84,3 +85,36 @@ def test_failed_inbox_commit_cannot_ack_or_advance(inbox, monkeypatch):
     assert inbox.state["last_seq"] == 0 and inbox.state["hello"] is False
     monkeypatch.setattr(inbox, "_save", original)
     assert inbox.accept(frame(1, "hello", {"capabilities": []}))["status"] == "accepted"
+
+
+def test_old_inbox_reconstructs_artifacts_only_with_complete_history(inbox):
+    inbox.accept(frame(1, "hello", {"capabilities": []}))
+    inbox.accept(frame(2, "ready"))
+    inbox.accept(frame(3, "artifact", {"path": "required.txt"}))
+    inbox.accept(frame(4, "result", {"ok": True, "summary": "fixture"}))
+    old = dict(inbox.state)
+    old.pop("artifacts")
+    old.pop("artifacts_complete")
+    inbox.path.write_text(json.dumps(old))
+    reopened = WorkerInbox(inbox.directory, job_id="job", attempt_id="attempt", incarnation="first")
+    assert reopened.state["artifacts"] == ["required.txt"]
+    assert reopened.state["artifacts_complete"] is True
+
+
+def test_old_rotated_inbox_cannot_claim_complete_artifacts(inbox):
+    inbox.accept(frame(1, "hello", {"capabilities": []}))
+    inbox.accept(frame(2, "ready"))
+    inbox.accept(frame(3, "artifact", {"path": "required.txt"}))
+    for seq in range(4, 136):
+        inbox.accept(frame(seq, "heartbeat"))
+    inbox.accept(frame(136, "result", {"ok": True, "summary": "fixture"}))
+    assert inbox.state["floor"] > 3
+    old = dict(inbox.state)
+    old.pop("artifacts")
+    old.pop("artifacts_complete")
+    inbox.path.write_text(json.dumps(old))
+    reopened = WorkerInbox(inbox.directory, job_id="job", attempt_id="attempt", incarnation="first")
+    assert reopened.state["result"]["data"]["ok"] is True
+    assert reopened.state["artifacts_complete"] is False
+    assert reopened.state["artifacts"] == []
+    assert protocol_execution_result(0, reopened.state) is None
