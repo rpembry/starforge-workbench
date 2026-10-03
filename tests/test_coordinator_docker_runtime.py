@@ -38,6 +38,7 @@ class FakeDocker:
         self.create_count = 0
         self.lose_create_response = False
         self.lose_start_response = False
+        self.lose_rm_response = False
 
     def __call__(self, argv, **kwargs):
         self.calls.append(argv)
@@ -76,6 +77,9 @@ class FakeDocker:
             return b""
         if "rm" in argv:
             self.item = None
+            if self.lose_rm_response:
+                self.lose_rm_response = False
+                raise TimeoutError("lost Docker remove reply")
             return b""
         if "logs" in argv:
             return b"fixture output\n"
@@ -317,6 +321,12 @@ def test_owner_review_archive_retains_exact_scratch_bytes(runtime, tmp_path):
                            operation_id="changed-archive")
     assert fake.item is not None
     (attempt / "scratch" / "note.txt").write_text("reviewed\n")
+    fake.lose_rm_response = True
+    with pytest.raises(TimeoutError, match="lost Docker remove reply"):
+        supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],
+                           operation_id="archive")
+    assert fake.item is None
+    assert json.loads((attempt / "disposition.json").read_text())["phase"] == "archiving"
     result = supervisor.archive("a" * 32, review_sha256=reviewed["review_sha256"],
                                 operation_id="archive")
     assert result["phase"] == "complete"
