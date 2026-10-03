@@ -273,6 +273,16 @@ print(json.dumps({'id':second['id'],'result':{}}), flush=True)
     assert not (first / 'renamed.txt').exists()
 
 
+def test_catalog_uses_saved_name_over_generated_title(tmp_path, monkeypatch):
+    root = tmp_path / 'codex-home'
+    root.mkdir()
+    with __import__('sqlite3').connect(root / 'state_test.sqlite') as db:
+        db.execute('CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, name TEXT, archived INTEGER, source TEXT)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?)', (A, '/synthetic/a', 'Generated title', 'Chosen name', 0, 'cli'))
+    monkeypatch.setenv('CODEX_HOME', str(root))
+    assert CodexCatalog().read(A)['title'] == 'Chosen name'
+
+
 def test_provider_root_change_invalidates_preview(fixture, tmp_path):
     service, cat, contexts, bindings, observed = fixture
     cat.codex_root = tmp_path / 'provider-one'

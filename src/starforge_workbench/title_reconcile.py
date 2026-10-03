@@ -102,7 +102,12 @@ class CodexCatalog:
         for path in self.codex_root.glob('state*.sqlite'):
             uri = path.resolve().as_uri() + '?mode=ro'
             with sqlite3.connect(uri, uri=True, timeout=2) as db:
-                row = db.execute('SELECT id, cwd, title, archived, source FROM threads WHERE id=?', (thread_id,)).fetchone()
+                # Codex app-server thread/name/set persists the chosen display
+                # name separately from the generated title in 0.155.1.
+                columns = {item[1] for item in db.execute('PRAGMA table_info(threads)')}
+                effective_title = "COALESCE(NULLIF(name, ''), title)" if 'name' in columns else 'title'
+                row = db.execute(f'SELECT id, cwd, {effective_title}, archived, source FROM threads WHERE id=?',
+                                 (thread_id,)).fetchone()
                 if row:
                     rows.append(row)
         if len(rows) != 1:
