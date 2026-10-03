@@ -3,7 +3,7 @@ from copy import deepcopy
 import base64
 import hashlib
 
-from coordinator import CoordinatorStore, JobSpec, Limits, Policy
+from coordinator import CoordinatorStore, JobSpec, Limits, Policy, Unavailable
 from coordinator.dispatch import ControlError, Dispatcher, SupervisorEvidence
 
 
@@ -49,7 +49,8 @@ class FakeControl:
             if item is None:
                 item = {"id": attempt_id, "job_id": plan["job_id"],
                     "incarnation": plan["incarnation"], "plan": deepcopy(plan),
-                    "state": "stopped", "runtime_id": None, "observation_seq": 1}
+                    "state": "stopped", "runtime_id": None, "observation_seq": 1,
+                    "no_start_reason": "prelaunch_abandon"}
                 self.items[attempt_id] = item
             else:
                 item["state"] = "stopped"
@@ -64,6 +65,13 @@ class FakeControl:
         if method == "collect":
             item = self.items[attempt_id]
             item["observation_seq"] += 1
+            if item.get("no_start_reason"):
+                return {"supervisor_id": "supervisor-one", "job_id": item["job_id"],
+                        "attempt_id": attempt_id, "incarnation": item["incarnation"],
+                        "runtime_id": None, "observation_seq": item["observation_seq"],
+                        "phase": "stopped", "stopped": True, "exit_code": None,
+                        "result_ok": False, "no_start": True,
+                        "no_start_reason": item["no_start_reason"]}
             return {"supervisor_id": "supervisor-one", "job_id": item["job_id"],
                     "attempt_id": attempt_id, "incarnation": item["incarnation"],
                     "runtime_id": item["runtime_id"], "observation_seq": item["observation_seq"],
@@ -206,6 +214,7 @@ def test_lost_launch_response_reconciles_same_attempt(tmp_path):
     dispatcher.tick()
     assert control.starts == 1
     assert store.get(job["id"])["visibility"] == "fresh"
+    assert not store.pending_commands()
 
 
 def test_verified_result_finalizes_without_human_acceptance(tmp_path):
@@ -287,6 +296,24 @@ class RuntimeForService:
         return b"hello\n"
 
 
+class NoStartRuntime(RuntimeForService):
+    """Fail before create; the supervisor alone decides whether absence is proved."""
+
+    def __init__(self, root, *, proved=True):
+        super().__init__(root)
+        self.proved = proved
+
+    def launch(self, plan):
+        self.starts += 1
+        raise RuntimeError("workspace setup failed")
+
+    def inspect_no_start(self, plan):
+        return self.proved
+
+    def inspect(self, plan, runtime_id):
+        raise RuntimeError("runtime not confirmed")
+
+
 class ServiceBridge:
     def __init__(self, service):
         self.service = service
@@ -343,6 +370,128 @@ def test_real_supervisor_contract_prelaunch_abandon(tmp_path):
     assert runtime.starts == 0
     result = store.get(job["id"])
     assert result["phase"] == "terminal" and result["outcome"] == "cancelled"
+
+
+def test_real_supervisor_no_start_failure_replay_retry_and_artifacts(tmp_path):
+    import pytest
+    from coordinator import Conflict
+    from coordinator.supervisor import Supervisor
+    from coordinator.supervisor_service import SupervisorService
+
+    store, spec = setup(tmp_path)
+    supervisor_root = tmp_path / "supervisor"
+    supervisor_root.mkdir(mode=0o700)
+    runtime = NoStartRuntime(supervisor_root)
+    dispatcher = Dispatcher(store, ServiceBridge(SupervisorService(
+        Supervisor(supervisor_root, runtime))))
+    job = store.submit(spec, principal="owner", key="submit")
+    dispatcher.tick()
+    with pytest.raises(ControlError, match="OwnershipUnknown"):
+        dispatcher.tick()
+    uncertain = store.get(job["id"])
+    assert uncertain["phase"] == "active" and uncertain["visibility"] == "unknown"
+    assert runtime.starts == 1
+    dispatcher.tick()
+    result = store.get(job["id"])
+    attempt = result["attempts"][-1]
+    assert (result["phase"], result["outcome"], result["reason"]) == (
+        "terminal", "failed", "workspace_setup_failed")
+    assert attempt["runtime_id"] is None and attempt["exit_code"] is None
+    assert attempt["no_start_reason"] == "workspace_setup_failed"
+    assert not store.pending_commands()
+    events = store.replay(job["id"])["events"]
+    assert sum(event["kind"] == "no_start_observed" for event in events) == 1
+    dispatcher.tick()
+    assert store.replay(job["id"])["events"] == events and runtime.starts == 1
+    assert SupervisorEvidence(dispatcher).artifacts(result, attempt["id"])["items"] == []
+    with pytest.raises(Unavailable, match="log export"):
+        SupervisorEvidence(dispatcher).logs(result, attempt["id"], 0, 20)
+    retry = store.retry(job["id"], expected_version=result["version"],
+                        principal="owner", key="retry")
+    assert retry["attempt_id"] != attempt["id"]
+    with pytest.raises(Conflict, match="identity mismatch"):
+        dispatcher._observe(retry, dispatcher.control.call("inspect", attempt_id=attempt["id"]))
+
+
+def test_real_supervisor_no_start_sticky_cancel(tmp_path):
+    import pytest
+    from coordinator.supervisor import Supervisor
+    from coordinator.supervisor_service import SupervisorService
+
+    store, spec = setup(tmp_path)
+    supervisor_root = tmp_path / "supervisor"
+    supervisor_root.mkdir(mode=0o700)
+    runtime = NoStartRuntime(supervisor_root)
+    dispatcher = Dispatcher(store, ServiceBridge(SupervisorService(
+        Supervisor(supervisor_root, runtime))))
+    job = store.submit(spec, principal="owner", key="submit")
+    dispatcher.tick()
+    with pytest.raises(ControlError, match="OwnershipUnknown"):
+        dispatcher.tick()
+    current = store.get(job["id"])
+    store.cancel(job["id"], expected_version=current["version"],
+                 principal="owner", key="cancel")
+    dispatcher.tick()
+    result = store.get(job["id"])
+    assert result["phase"] == "terminal" and result["outcome"] == "cancelled"
+    assert result["reason"] == "workspace_setup_failed"
+    assert result["attempts"][-1]["no_start_reason"] == "workspace_setup_failed"
+    assert runtime.starts == 1
+    assert not store.pending_commands()
+
+
+def test_real_supervisor_ambiguous_create_remains_unknown(tmp_path):
+    import pytest
+    from coordinator.supervisor import Supervisor
+    from coordinator.supervisor_service import SupervisorService
+
+    store, spec = setup(tmp_path)
+    supervisor_root = tmp_path / "supervisor"
+    supervisor_root.mkdir(mode=0o700)
+    runtime = NoStartRuntime(supervisor_root, proved=False)
+    dispatcher = Dispatcher(store, ServiceBridge(SupervisorService(
+        Supervisor(supervisor_root, runtime))))
+    job = store.submit(spec, principal="owner", key="submit")
+    dispatcher.tick()
+    with pytest.raises(ControlError, match="OwnershipUnknown"):
+        dispatcher.tick()
+    with pytest.raises(ControlError, match="OwnershipUnknown"):
+        dispatcher.tick()
+    result = store.get(job["id"])
+    assert result["phase"] == "active" and result["visibility"] == "unknown"
+    assert result["outcome"] is None and runtime.starts == 1
+    assert not any(event["kind"] == "no_start_observed" for event in store.replay(job["id"])["events"])
+
+
+def test_dispatcher_rejects_mismatched_no_start_evidence(tmp_path):
+    import pytest
+    from coordinator import Conflict
+    from coordinator.supervisor import Supervisor
+    from coordinator.supervisor_service import SupervisorService
+
+    store, spec = setup(tmp_path)
+    supervisor_root = tmp_path / "supervisor"
+    supervisor_root.mkdir(mode=0o700)
+    runtime = NoStartRuntime(supervisor_root)
+
+    class CorruptBridge(ServiceBridge):
+        def call(self, method, **args):
+            result = super().call(method, **args)
+            if method == "collect":
+                return {**result, "runtime_id": "wrong-runtime"}
+            return result
+
+    dispatcher = Dispatcher(store, CorruptBridge(SupervisorService(
+        Supervisor(supervisor_root, runtime))))
+    job = store.submit(spec, principal="owner", key="submit")
+    dispatcher.tick()
+    with pytest.raises(ControlError, match="OwnershipUnknown"):
+        dispatcher.tick()
+    with pytest.raises(Conflict, match="no-start evidence mismatch"):
+        dispatcher.tick()
+    result = store.get(job["id"])
+    assert result["phase"] == "active" and result["outcome"] is None
+    assert result["attempts"][-1]["no_start_reason"] is None
 
 
 def test_same_evidence_via_api_and_cli(tmp_path, capsys):

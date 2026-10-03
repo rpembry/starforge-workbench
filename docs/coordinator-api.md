@@ -78,10 +78,17 @@ its lease; the supervisor independently enforces deadlines and owner stop.
 
 A cancellation committed before supervisor launch now uses the canonical launch
 operation ID to create a durable no-start tombstone. Delayed launch replay
-cannot start a worker after that tombstone. A stopped noncancelled attempt is
+cannot start a worker after that tombstone. A failed Git workspace setup can
+also finish as a no-start failure when the supervisor confirms a matching
+private `workspace_pending` receipt and an exact empty container lookup.
+The coordinator records that evidence with a null runtime ID and exit code;
+retry then creates a new attempt. A missing receipt, `create_pending` receipt,
+or uncertain lookup keeps the same attempt unknown. A stopped attempt with a
+runtime is
 `finalizing` until `collect` returns verified process and worker evidence;
 `result_ok=None` remains unconfirmed. Artifact reads use hash-verified bounded
 chunks from the supervisor. `logs` reads the exported `output.txt` after stop;
 its source is a bounded last-1000-lines window, so the response advertises a
-possible earlier gap. Live log streaming is not yet supported. Neither API nor
+possible earlier gap. Proven no-start attempts have an empty artifact list and
+no log export. Live log streaming is not yet supported. Neither API nor
 CLI reads Docker or the supervisor journal directly.

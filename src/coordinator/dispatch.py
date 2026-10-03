@@ -134,7 +134,28 @@ class Dispatcher:
                 job["phase"] == "terminal"):
             return job
         evidence = None
-        if state == "stopped" and item["runtime_id"] and job["intent"] != "cancel":
+        no_start_reason = item.get("no_start_reason")
+        if no_start_reason is not None and state != "stopped":
+            raise Conflict("supervisor no-start state mismatch")
+        if state == "stopped" and item["runtime_id"] is None and not no_start_reason:
+            raise Conflict("stopped attempt lacks runtime or no-start evidence")
+        if state == "stopped" and no_start_reason:
+            if item["runtime_id"] is not None or no_start_reason not in {
+                    "workspace_setup_failed", "prelaunch_abandon"}:
+                raise Conflict("supervisor no-start identity mismatch")
+            evidence = self.control.call("collect", attempt_id=item["id"],
+                                         controller=self.controller,
+                                         generation=self.lease["generation"])
+            if (not isinstance(evidence, dict) or evidence.get("no_start") is not True or
+                    evidence.get("no_start_reason") != no_start_reason or
+                    evidence.get("runtime_id") is not None or
+                    evidence.get("exit_code") is not None or
+                    evidence.get("result_ok") is not False or
+                    "artifact_manifest" in evidence or
+                    type(evidence.get("observation_seq")) is not int or
+                    evidence["observation_seq"] < item["observation_seq"]):
+                raise Conflict("supervisor no-start evidence mismatch")
+        elif state == "stopped" and item["runtime_id"] and job["intent"] != "cancel":
             try:
                 evidence = self.control.call("collect", attempt_id=item["id"],
                                              controller=self.controller,
@@ -151,6 +172,11 @@ class Dispatcher:
                     evidence.get("supervisor_id") != self.lease["supervisor_id"] or
                     evidence.get("phase") != "stopped" or evidence.get("stopped") is not True):
                 raise Conflict("supervisor evidence identity mismatch")
+        if no_start_reason:
+            return self.store.record_no_start(
+                job["id"], attempt_id=item["id"], incarnation=item["incarnation"],
+                observation_seq=evidence["observation_seq"],
+                supervisor_id=evidence["supervisor_id"], reason=no_start_reason)
         if (job["visibility"] == "fresh" and attempt["phase"] == state and
                 (state == "running" or evidence is None and job["phase"] == "finalizing")):
             return job
@@ -177,7 +203,9 @@ class Dispatcher:
                                          controller=self.controller,
                                          generation=self.lease["generation"],
                                          operation_id=op["id"])
-                self._observe(job, item)
+                observed = self._observe(job, item)
+                if item["state"] == "stopped" and observed["visibility"] == "fresh":
+                    self.store.set_command_status(op["id"], "confirmed")
                 return
             try:
                 item = self.control.call("inspect", attempt_id=attempt_id)
@@ -193,7 +221,9 @@ class Dispatcher:
             item = self.control.call("reconcile", attempt_id=attempt_id,
                                      controller=self.controller,
                                      generation=self.lease["generation"])
-            self._observe(job, item)
+            observed = self._observe(job, item)
+            if item["state"] in {"running", "stopped"} and observed["visibility"] == "fresh":
+                self.store.set_command_status(op["id"], "confirmed")
         elif op["kind"] == "reattach":
             original = json.loads(op["response"])["attempt_id"]
             if original != attempt_id:
@@ -213,8 +243,9 @@ class Dispatcher:
             item = self.control.call("reconcile", attempt_id=attempt_id,
                                      controller=self.controller,
                                      generation=self.lease["generation"])
-            self._observe(job, item)
-            self.store.set_command_status(op["id"], "confirmed")
+            observed = self._observe(job, item)
+            if item["state"] in {"running", "stopped"} and observed["visibility"] == "fresh":
+                self.store.set_command_status(op["id"], "confirmed")
         elif op["kind"] == "cancel":
             try:
                 item = self.control.call("inspect", attempt_id=attempt_id)
@@ -226,7 +257,9 @@ class Dispatcher:
             if not self._owned(job, item):
                 raise Conflict("supervisor attempt identity mismatch")
             if item["state"] == "stopped":
-                self._observe(job, item)
+                observed = self._observe(job, item)
+                if observed["visibility"] == "fresh":
+                    self.store.set_command_status(op["id"], "confirmed")
                 return
             item = self.control.call("cancel", attempt_id=attempt_id,
                                      controller=self.controller,
@@ -238,7 +271,9 @@ class Dispatcher:
             item = self.control.call("reconcile", attempt_id=attempt_id,
                                      controller=self.controller,
                                      generation=self.lease["generation"])
-            self._observe(job, item)
+            observed = self._observe(job, item)
+            if item["state"] == "stopped" and observed["visibility"] == "fresh":
+                self.store.set_command_status(op["id"], "confirmed")
         else:
             raise Conflict("unsupported pending coordinator command")
 
@@ -329,10 +364,8 @@ class SupervisorEvidence:
             raise KeyError(attempt_id)
         if not attempt["stopped"]:
             raise Unavailable("post-stop evidence unavailable while attempt is active")
-        if not attempt["runtime_id"]:
-            return {"artifact_manifest": {"files": [], "execution_ok": None},
-                    "attempt_id": attempt_id, "job_id": job["id"],
-                    "incarnation": attempt["incarnation"], "runtime_id": None}
+        if not attempt["runtime_id"] and not attempt.get("no_start_reason"):
+            raise Unavailable("no-start evidence unavailable")
         data = self._call("collect", attempt_id=attempt_id,
                                             controller=self.dispatcher.controller,
                                             generation=self.dispatcher.lease["generation"])
@@ -341,6 +374,14 @@ class SupervisorEvidence:
                 data.get("runtime_id") != attempt["runtime_id"] or
                 data.get("supervisor_id") != attempt["supervisor_id"]):
             raise Conflict("supervisor artifact evidence identity mismatch")
+        if attempt.get("no_start_reason"):
+            if (data.get("no_start") is not True or
+                    data.get("no_start_reason") != attempt["no_start_reason"] or
+                    data.get("phase") != "stopped" or data.get("stopped") is not True or
+                    data.get("runtime_id") is not None or data.get("exit_code") is not None or
+                    data.get("result_ok") is not False or "artifact_manifest" in data):
+                raise Conflict("supervisor no-start evidence mismatch")
+            return {**data, "artifact_manifest": {"files": [], "execution_ok": None}}
         return data
 
     def artifacts(self, job: dict, attempt_id: str) -> dict:
