@@ -1,10 +1,10 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Status · Starforge Workbench</title>
+<title>Status · Starforge Workbench</title><link rel="manifest" href="/status/manifest.webmanifest">
 <style>
 :root{font:16px system-ui;color:#e5ebf3;background:#101722}body{max-width:850px;margin:auto;padding:16px}a{color:#91b9ee}header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}h1{font-size:1.6rem}h2{font-size:1.1rem}p{line-height:1.45}.muted,small{color:#b4c2d2}fieldset,section{border:1px solid #465870;border-radius:12px;background:#192331;padding:16px;margin:14px 0}fieldset{display:flex;flex-wrap:wrap;gap:10px 20px}legend{padding:0 6px}label{white-space:nowrap}button{font:inherit;border:0;border-radius:6px;background:#91b9ee;color:#101722;padding:9px 14px;cursor:pointer}button:focus-visible,input:focus-visible,a:focus-visible{outline:3px solid #f5b971;outline-offset:2px}.card{border-top:1px solid #465870;padding:12px 0;overflow-wrap:anywhere}.card:first-of-type{border-top:0}.badge{display:inline-block;background:#34475c;border-radius:5px;padding:2px 7px;margin-left:5px}#cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:14px}@media(max-width:600px){ #cards{display:block}}
 </style><script src="/assets/status.js" defer></script></head>
-<body data-timezone="{{ timezone }}"><header><h1>Quick status</h1><a href="/">Full Workbench</a></header>
+<body><header><h1>Quick status</h1><a href="/">Full Workbench</a></header>
 <p class="muted">Read-only foreground snapshot. Refresh to check again. Values retain their original observation time.</p>
 <fieldset><legend>Show widgets</legend>
 <label><input type="checkbox" data-widget="attention"> Attention</label>
@@ -12,7 +12,7 @@
 <label><input type="checkbox" data-widget="hosts"> Collectors</label>
 <label><input type="checkbox" data-widget="allowances"> Allowances</label>
 </fieldset>
-<p><button id="refresh" type="button">Refresh selected</button> <button id="defaults" type="button">Reset choices</button></p>
+<p><button id="refresh" type="button">Refresh selected</button> <button id="defaults" type="button">Reset choices</button> <button id="app-update" type="button" hidden>Check for app update</button></p>
 <p id="connection" role="status" aria-live="polite"></p><main id="cards" aria-live="polite"></main>
 <p class="muted">Allowance entries are manual observations only. No provider account was queried. Missing collectors or jobs mean visibility is unknown.</p>
 </body></html>

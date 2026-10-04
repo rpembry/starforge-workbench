@@ -8,7 +8,9 @@
   const pending = new Map();
   const dynamic = [];
   let generation = 0;
-  const zone = document.body.dataset.timezone;
+  const deviceZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  let zone = deviceZone;
+  let profile = null;
   const time = value => {
     if (!value) return 'unknown';
     const date = new Date(value);
@@ -101,7 +103,9 @@
     section.replaceChildren(el('h2', names[widget]), el('p', 'Checking…', 'muted'));
     try {
       const response = await fetch(`/api/status/${widget}`, {signal: controller.signal, cache: 'no-store', credentials: 'same-origin'});
-      if (!response.ok) throw new Error(response.status === 401 ? 'Sign in again through Workbench' : `Source unavailable (${response.status})`);
+      if (token !== generation || controller.signal.aborted) return;
+      if (response.status === 401 || response.status === 403) { authenticationExpired(); return; }
+      if (!response.ok) throw new Error(`Source unavailable (${response.status})`);
       const data = await response.json();
       if (token !== generation || !selected().includes(widget)) return;
       section.replaceChildren(el('h2', names[widget]));
@@ -113,26 +117,67 @@
       if (data.truncated) section.append(el('p', 'More items exist; open full Workbench.'));
     } catch (error) {
       if (controller.signal.aborted || token !== generation) return;
-      section.replaceChildren(el('h2', names[widget]), el('p', navigator.onLine ? error.message : 'Offline; no fresh status available.'));
+      const message = !navigator.onLine ? 'Offline; no fresh status available.' :
+        error instanceof TypeError ? 'Source unreachable; no fresh status available.' : error.message;
+      section.replaceChildren(el('h2', names[widget]), el('p', message));
     } finally {
       if (pending.get(widget) === controller) pending.delete(widget);
     }
   }
-  function refresh() {
+  function cancelRequests() {
     generation++;
     for (const request of pending.values()) request.abort();
     pending.clear();
     dynamic.length = 0;
+  }
+  function authenticationExpired() {
+    cancelRequests();
+    profile = null;
+    zone = deviceZone;
+    cards.replaceChildren(el('p', 'Sign-in required. Open Workbench to sign in, then refresh.'));
+    connection.textContent = 'Session expired; private status removed.';
+  }
+  async function refresh() {
+    cancelRequests();
+    const token = generation;
     const choice = selected();
     cards.replaceChildren();
     connection.textContent = navigator.onLine ? 'Foreground check requested.' : 'Offline; check again when connected.';
     if (!choice.length) { cards.append(el('p', 'No widgets selected. Choose a widget above.')); return; }
+    if (!navigator.onLine) {
+      for (const widget of choice) {
+        const section = el('section', '');
+        section.dataset.card = widget;
+        section.replaceChildren(el('h2', names[widget]), el('p', 'Offline; no fresh status available.'));
+        cards.append(section);
+      }
+      return;
+    }
+    const configController = new AbortController();
+    pending.set('config', configController);
+    try {
+      const response = await fetch('/api/status/config', {signal: configController.signal, cache: 'no-store', credentials: 'same-origin'});
+      if (token !== generation || configController.signal.aborted) return;
+      if (response.status === 401 || response.status === 403) { authenticationExpired(); return; }
+      if (!response.ok) throw new Error('Configuration unavailable');
+      const config = await response.json();
+      if (token !== generation) return;
+      if (profile !== null && profile !== config.profile) connection.textContent = 'Profile changed; previous status cleared.';
+      profile = config.profile;
+      zone = config.timezone;
+    } catch (error) {
+      if (configController.signal.aborted || token !== generation) return;
+      zone = deviceZone;
+      connection.textContent = 'Time zone unavailable; showing device time. Status may be unavailable.';
+    } finally {
+      if (pending.get('config') === configController) pending.delete('config');
+    }
+    if (token !== generation) return;
     for (const widget of choice) {
       const section = el('section', '');
       section.dataset.card = widget;
       cards.append(section);
-      if (navigator.onLine) load(widget, generation);
-      else section.replaceChildren(el('h2', names[widget]), el('p', 'Offline; no fresh status available.'));
+      load(widget, token);
     }
   }
   const initial = readChoices();
@@ -146,9 +191,50 @@
   window.addEventListener('online', () => { updateDynamic(); connection.textContent = 'Online. Refresh to check current status.'; });
   window.addEventListener('offline', refresh);
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) { updateDynamic(); connection.textContent = 'View resumed. Refresh to check current status.'; }
+    if (document.hidden) {
+      cancelRequests();
+      cards.replaceChildren(el('p', 'View hidden; status cleared until resume.'));
+    } else refresh();
   });
-  window.addEventListener('pageshow', () => { updateDynamic(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) refresh(); });
   window.setInterval(() => { if (!document.hidden) updateDynamic(); }, 30000);
+  const updateButton = document.getElementById('app-update');
+  if ('serviceWorker' in navigator && window.isSecureContext) {
+    navigator.serviceWorker.register('/status/sw.js', {scope: '/status/'}).then(registration => {
+      updateButton.hidden = false;
+      updateButton.textContent = registration.waiting ? 'Apply app update' : 'Check for app update';
+      registration.addEventListener('updatefound', () => {
+        registration.installing?.addEventListener('statechange', () => {
+          if (registration.waiting) {
+            updateButton.textContent = 'Apply app update';
+            connection.textContent = 'App update ready. Apply it when convenient.';
+          }
+        });
+      });
+      let applying = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => { if (applying) window.location.reload(); });
+      updateButton.addEventListener('click', async () => {
+        if (registration.waiting) {
+          applying = true;
+          registration.waiting.postMessage('ACTIVATE_UPDATE');
+        } else {
+          try {
+            await registration.update();
+            if (registration.installing) {
+              await new Promise(resolve => {
+                const worker = registration.installing;
+                if (['installed', 'activated', 'redundant'].includes(worker.state)) return resolve();
+                worker.addEventListener('statechange', () => {
+                  if (['installed', 'activated', 'redundant'].includes(worker.state)) resolve();
+                });
+              });
+            }
+            updateButton.textContent = registration.waiting ? 'Apply app update' : 'Check for app update';
+            connection.textContent = registration.waiting ? 'App update ready. Apply it when convenient.' : 'App is up to date.';
+          } catch (_) { connection.textContent = 'App update check unavailable.'; }
+        }
+      });
+    }).catch(() => { connection.textContent = 'Offline shell unavailable in this browser.'; });
+  }
   refresh();
 })();
