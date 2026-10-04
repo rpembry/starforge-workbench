@@ -6,6 +6,10 @@ executable; `fixture` means no real provider ran; `unsupported` means Workbench
 deliberately does not claim the capability; `unknown` means there is no evidence.
 Version discovery below was repeated on 2026-09-12 and did not start a session.
 
+## Allowance observations (2026-10-03)
+
+Workbench currently stores only explicitly submitted manual quota observations through the [quick status](quick-status.md) contract. Synthetic API fixtures prove separate profile/bucket/window preservation and freshness labeling. They are not live provider evidence. Codex App Server `account/rateLimits/read` and Claude Code's status-line export are documented candidate interfaces in issue #186; neither is packaged as a Workbench adapter, bound to a verified local profile, or exercised against an account here. Gemini CLI/Apps machine-readable quota/reset support remains unknown. No provider is marked automatic/live-supported, and no current balance should be inferred from this matrix.
+
 | Capability | Codex 0.154.0 | Claude Code 2.1.269 | OpenCode 1.18.30 | Antigravity 1.2.2 | Ollama 0.34.0 |
 | --- | --- | --- | --- | --- | --- |
 | Executable discovery/version | [Live](../src/starforge_workbench/cli.py): `codex --version` | [Live](../src/starforge_workbench/cli.py): `claude --version` | [Live](../src/starforge_workbench/cli.py): explicit installed path plus `--version` | [Live](../src/starforge_workbench/cli.py): `agy --version` | [Live](../src/starforge_workbench/cli.py): `ollama --version` |
