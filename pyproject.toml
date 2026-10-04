@@ -35,6 +35,7 @@ coord = "coordinator.cli:main"
 coord-server = "coordinator.server:main"
 coord-supervisor = "coordinator.supervisor_service:main"
 coord-ui = "workbench.coordinator_local:main"
+wb-script-observe = "workbench.script_observation_cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
