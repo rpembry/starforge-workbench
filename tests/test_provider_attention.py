@@ -134,7 +134,7 @@ def test_auth_boundaries_validation_and_schema_upgrade(api, repo):
     assert api.post('/api/provider-attention/observations', json=body).status_code == 422
     assert unsupported.status_code == 422
     with repo.connection() as db:
-        assert [row[0] for row in db.execute('SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 13))
+        assert [row[0] for row in db.execute('SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 14))
         db.execute('DROP TABLE allowance_observations')
         db.execute('DROP TABLE flow_evidence_commits')
         db.execute('DROP TABLE flow_publication_ops')
@@ -146,7 +146,7 @@ def test_auth_boundaries_validation_and_schema_upgrade(api, repo):
         db.execute('DROP TABLE report_suggestions')
         db.execute('DROP TABLE provider_attention_incidents')
         db.execute('DROP TABLE provider_attention')
-        db.execute('DELETE FROM schema_migrations WHERE version IN (4,5,6,7,8,9,10,11,12)')
+        db.execute('DELETE FROM schema_migrations WHERE version IN (4,5,6,7,8,9,10,11,12,13)')
         db.commit()
     upgraded = SQLiteRepository(repo.path)
     with upgraded.connection() as db:
@@ -155,4 +155,4 @@ def test_auth_boundaries_validation_and_schema_upgrade(api, repo):
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='registered_sessions'").fetchone()
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='instructions'").fetchone()
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='instruction_audit'").fetchone()
-        assert [row[0] for row in db.execute('SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 13))
+        assert [row[0] for row in db.execute('SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 14))
