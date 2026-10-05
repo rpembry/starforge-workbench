@@ -99,6 +99,14 @@ def _origin(value):
     return port
 
 
+def _sync_directory(path):
+    directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def _save(path, receipt, exclusive=False):
     data = (json.dumps(receipt, sort_keys=True) + '\n').encode()
     fd, temporary = tempfile.mkstemp(prefix='.delivery-', dir=path.parent)
@@ -115,11 +123,7 @@ def _save(path, receipt, exclusive=False):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    _sync_directory(path.parent)
 
 
 def _load(path):
@@ -322,7 +326,15 @@ class OpenCodeDelivery:
                     self.degraded_receipts += 1
                     continue
                 try:
+                    # The marker must survive a power loss before the
+                    # canonical one-attempt name is removed.
+                    _sync_directory(self.root)
+                except OSError:
+                    self.degraded_receipts += 1
+                    continue
+                try:
                     os.unlink(path)
+                    _sync_directory(self.root)
                 except OSError:
                     pass
                 self.degraded_receipts += 1

@@ -208,6 +208,24 @@ def test_quarantined_receipt_never_grants_second_provider_send(tmp_path):
     assert len([call for call in fake.calls if call[0] == 'POST']) == 1
 
 
+def test_quarantine_sync_failure_keeps_canonical_attempt_marker(tmp_path, monkeypatch):
+    from starforge_workbench import opencode_delivery
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    delivery.deliver(INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    receipt = next((tmp_path / 'private-state').glob('*.json'))
+    receipt.write_text('{invalid')
+    def fail_sync(_):
+        raise OSError('synthetic directory sync failure')
+    monkeypatch.setattr(opencode_delivery, '_sync_directory', fail_sync)
+    assert delivery.pending_responses() == []
+    assert delivery.degraded_receipts == 1
+    assert receipt.exists()  # no unlink until marker durability is confirmed
+    with pytest.raises(DeliveryError):
+        delivery.deliver(INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    assert len([call for call in fake.calls if call[0] == 'POST']) == 1
+
+
 @pytest.mark.parametrize('invalid', [float('nan'), float('inf'), -float('inf'), True,
                                      -1, 1e100])
 def test_invalid_receipt_clock_cannot_extend_response_polling(tmp_path, invalid):
