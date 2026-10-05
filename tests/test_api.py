@@ -201,3 +201,53 @@ def test_browser_workspace_api_owns_crud(api, monkeypatch, tmp_path):
     assert updated.status_code == 200
     assert api.delete('/api/browser/workspaces/default/entries/Home').status_code == 200
     assert api.get('/api/browser/workspaces').json()['workspaces']['default'] == []
+
+
+def test_browser_workspace_api_requires_explicit_shared_path(api, monkeypatch):
+    monkeypatch.delenv('WB_BROWSER_WORKSPACES_FILE', raising=False)
+    root = '/api/browser/workspaces'
+    requests = [
+        api.get(root),
+        api.post(root + '/default/entries', json={'name': 'Mail', 'url': 'https://example.com/'}),
+        api.patch(root + '/default/entries/Mail', json={'name': 'Docs'}),
+        api.delete(root + '/default/entries/Mail'),
+        api.delete(root + '/default/entries', params={'name': 'Mail'}),
+    ]
+    for response in requests:
+        assert response.status_code == 503
+        assert response.json()['error']['code'] == 'browser_workspace_not_configured'
+
+
+def test_browser_workspace_api_reports_routine_errors(api, monkeypatch, tmp_path):
+    config = tmp_path / 'browser-workspaces.yaml'
+    monkeypatch.setenv('WB_BROWSER_WORKSPACES_FILE', str(config))
+    path = '/api/browser/workspaces/default/entries'
+    entry = {'name': 'Mail', 'url': 'https://mail.example.com/'}
+    assert api.post(path, json=entry).status_code == 201
+    cases = [
+        (api.post(path, json=entry), 409, 'browser_entry_exists'),
+        (api.delete(path + '/missing'), 404, 'browser_entry_not_found'),
+        (api.post('/api/browser/workspaces/BAD/entries', json=entry), 422, 'invalid_browser_workspace'),
+        (api.post(path, json={'name': 'Bad', 'url': 'javascript:alert(1)'}), 422,
+         'invalid_browser_workspace'),
+    ]
+    for response, status, code in cases:
+        assert response.status_code == status
+        assert response.json()['error']['code'] == code
+    config.chmod(0o644)
+    unavailable = api.get('/api/browser/workspaces')
+    assert unavailable.status_code == 503
+    assert unavailable.json()['error']['code'] == 'browser_workspace_unavailable'
+
+
+def test_browser_workspace_api_accepts_encoded_entry_name_segments(api, monkeypatch, tmp_path):
+    from urllib.parse import quote
+    monkeypatch.setenv('WB_BROWSER_WORKSPACES_FILE', str(tmp_path / 'browser-workspaces.yaml'))
+    name = 'Docs / help?'
+    path = '/api/browser/workspaces/default/entries'
+    assert api.post(path, json={'name': name, 'url': 'https://example.com/'}).status_code == 201
+    removed = api.delete(path + '/' + quote(name, safe=''))
+    assert removed.status_code == 200, removed.text
+    assert removed.json()['name'] == name
+    assert api.post(path, json={'name': '..', 'url': 'https://example.com/'}).status_code == 201
+    assert api.delete(path, params={'name': '..'}).json()['name'] == '..'

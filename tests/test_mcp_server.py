@@ -52,6 +52,19 @@ def test_read_and_append_tools_use_bounded_api_contracts():
     assert invoke(server, 'standup_report')['path'] == '/api/reports/standup'
 
 
+def test_browser_mcp_escapes_workspace_and_entry_path_segments():
+    api = API()
+    server = build_server(api_factory=lambda **kwargs: api)
+    added = invoke(server, 'browser_workspace_add', {
+        'workspace': 'default', 'name': 'Docs / help?', 'url': 'https://example.com/'})
+    removed = invoke(server, 'browser_workspace_remove', {
+        'workspace': 'default', 'name': 'Docs / help?'})
+    assert added['path'] == '/api/browser/workspaces/default/entries'
+    assert removed['path'] == '/api/browser/workspaces/default/entries?name=Docs%20%2F%20help%3F'
+    dots = invoke(server, 'browser_workspace_remove', {'name': '..'})
+    assert dots['path'] == '/api/browser/workspaces/default/entries?name=..'
+
+
 def test_context_tools_default_to_preview_and_reject_live_restore():
     restored = []
     server = build_server(api_factory=lambda **kwargs: API(), manifest_path=lambda: None, context_loader=lambda path: [{'id': 'daily', 'provider': 'codex', 'enabled': True}], restore=lambda context, dry_run: restored.append((context, dry_run)))

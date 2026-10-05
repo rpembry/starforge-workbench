@@ -184,22 +184,53 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     @app.get('/api/browser/workspaces', dependencies=[Depends(operator)])
     def browser_workspaces():
         from starforge_workbench.browser import load_config
-        return load_config()
+        browser_workspace_configured()
+        return browser_workspace_result(load_config)
+
+    def browser_workspace_configured():
+        # The API process's default home is not necessarily the desktop's.
+        # Require an explicit path instead of reporting a misleading success.
+        if not os.environ.get('WB_BROWSER_WORKSPACES_FILE'):
+            raise Problem(503, 'browser_workspace_not_configured',
+                          'Browser workspace API requires an explicitly shared config path')
+
+    def browser_workspace_result(operation, *args):
+        from starforge_workbench.browser import (BrowserConfigError, BrowserConflict,
+                                                 BrowserInputError, BrowserNotFound)
+        try:
+            return operation(*args)
+        except BrowserConflict as exc:
+            raise Problem(409, 'browser_entry_exists', str(exc)) from None
+        except BrowserNotFound as exc:
+            raise Problem(404, 'browser_entry_not_found', str(exc)) from None
+        except BrowserInputError as exc:
+            raise Problem(422, 'invalid_browser_workspace', str(exc)) from None
+        except BrowserConfigError:
+            raise Problem(503, 'browser_workspace_unavailable', 'Browser workspace storage is unavailable') from None
 
     @app.post('/api/browser/workspaces/{workspace}/entries', status_code=201)
     def browser_workspace_add(workspace: str, body: BrowserWorkspaceEntryIn, who=Depends(operator)):
         from starforge_workbench.browser import add_entry
-        return add_entry(body.name, body.url, workspace, body.match)
+        browser_workspace_configured()
+        return browser_workspace_result(add_entry, body.name, body.url, workspace, body.match)
 
-    @app.patch('/api/browser/workspaces/{workspace}/entries/{name}')
+    @app.patch('/api/browser/workspaces/{workspace}/entries/{name:path}')
     def browser_workspace_update(workspace: str, name: str, body: BrowserWorkspacePatch, who=Depends(operator)):
         from starforge_workbench.browser import update_entry
-        return update_entry(name, body.url, body.name, workspace, body.match)
+        browser_workspace_configured()
+        return browser_workspace_result(update_entry, name, body.url, body.name, workspace, body.match)
 
-    @app.delete('/api/browser/workspaces/{workspace}/entries/{name}')
+    @app.delete('/api/browser/workspaces/{workspace}/entries')
+    def browser_workspace_remove_named(workspace: str, name: str = Query(...), who=Depends(operator)):
+        from starforge_workbench.browser import remove_entry
+        browser_workspace_configured()
+        return browser_workspace_result(remove_entry, name, workspace)
+
+    @app.delete('/api/browser/workspaces/{workspace}/entries/{name:path}')
     def browser_workspace_remove(workspace: str, name: str, who=Depends(operator)):
         from starforge_workbench.browser import remove_entry
-        return remove_entry(name, workspace)
+        browser_workspace_configured()
+        return browser_workspace_result(remove_entry, name, workspace)
 
     # Named request/response resources keep OpenAPI useful to an LLM client.
     def list_endpoint(table):
