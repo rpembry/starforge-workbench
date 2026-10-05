@@ -240,6 +240,31 @@ def test_browser_workspace_api_reports_routine_errors(api, monkeypatch, tmp_path
     assert unavailable.json()['error']['code'] == 'browser_workspace_unavailable'
 
 
+def test_browser_workspace_api_rejects_unsafe_stored_config(api, monkeypatch, tmp_path):
+    import os
+    config = tmp_path / 'browser-workspaces.yaml'
+    monkeypatch.setenv('WB_BROWSER_WORKSPACES_FILE', str(config))
+    route = '/api/browser/workspaces'
+    assert api.post(route + '/default/entries', json={
+        'name': 'Mail', 'url': 'https://mail.example.com/'}).status_code == 201
+    tmp_path.chmod(0o755)
+    try:
+        assert api.get(route).json()['error']['code'] == 'browser_workspace_unavailable'
+        assert api.post(route + '/default/entries', json={
+            'name': 'Docs', 'url': 'https://example.com/'}).status_code == 503
+    finally:
+        tmp_path.chmod(0o700)
+    config.write_text('version: 1\nworkspaces:\n  BAD: []\n')
+    assert api.get(route).json()['error']['code'] == 'browser_workspace_unavailable'
+    config.write_text('version: 1\nworkspaces:\n  default: []\n')
+    desktop_link = tmp_path / 'desktop-workspaces.yaml'
+    os.link(config, desktop_link)
+    before = desktop_link.read_text()
+    assert api.post(route + '/default/entries', json={
+        'name': 'Docs', 'url': 'https://example.com/'}).status_code == 503
+    assert desktop_link.read_text() == config.read_text() == before
+
+
 def test_browser_workspace_api_accepts_encoded_entry_name_segments(api, monkeypatch, tmp_path):
     from urllib.parse import quote
     monkeypatch.setenv('WB_BROWSER_WORKSPACES_FILE', str(tmp_path / 'browser-workspaces.yaml'))

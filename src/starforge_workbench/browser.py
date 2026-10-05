@@ -110,25 +110,39 @@ def validate_document(document: object) -> dict[str, object]:
     return {'version': 1, 'workspaces': workspaces}
 
 
+def _private_parent(target: Path, create=False):
+    if create:
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if target.parent.is_symlink() or (target.parent.exists() and
+        (target.parent.stat().st_uid != os.getuid() or target.parent.stat().st_mode & 0o077)):
+        raise BrowserConfigError('Browser workspace config directory must be caller-owned and private')
+
+
 def load_config(path: Path | str | None = None) -> dict[str, object]:
     target = _config_path(path)
+    _private_parent(target)
     if not target.exists():
         return validate_document(None)
-    if target.is_symlink() or target.stat().st_uid != os.getuid() or target.stat().st_mode & 0o077:
+    if (target.is_symlink() or target.stat().st_uid != os.getuid() or
+        target.stat().st_mode & 0o077 or target.stat().st_nlink != 1):
         raise BrowserConfigError('Browser workspace config must be owned by you with mode 0600')
     try:
         document = yaml.safe_load(target.read_text())
     except (OSError, UnicodeError, yaml.YAMLError):
         raise BrowserConfigError('Unable to read browser workspace config') from None
-    return validate_document(document)
+    try:
+        return validate_document(document)
+    except BrowserInputError as exc:
+        raise BrowserConfigError('Invalid stored browser workspace config') from exc
 
 
 def save_config(document: dict[str, object], path: Path | str | None = None) -> dict[str, object]:
     target = _config_path(path)
     document = validate_document(document)
-    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if target.parent.stat().st_uid != os.getuid() or target.parent.stat().st_mode & 0o077:
-        raise BrowserConfigError('Browser workspace config directory must be caller-owned and private')
+    _private_parent(target, create=True)
+    if target.exists() and (target.stat().st_uid != os.getuid() or
+                            target.stat().st_mode & 0o077 or target.stat().st_nlink != 1):
+        raise BrowserConfigError('Browser workspace config must be owned by you with mode 0600')
     fd, temporary = tempfile.mkstemp(prefix='.' + target.name + '-', dir=target.parent)
     try:
         os.fchmod(fd, 0o600)
@@ -151,9 +165,7 @@ def save_config(document: dict[str, object], path: Path | str | None = None) -> 
 @contextmanager
 def _edit_lock(path):
     target = _config_path(path)
-    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if target.parent.stat().st_uid != os.getuid() or target.parent.stat().st_mode & 0o077:
-        raise BrowserConfigError('Browser workspace config directory must be caller-owned and private')
+    _private_parent(target, create=True)
     lock = target.with_name('.' + target.name + '.lock')
     fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:

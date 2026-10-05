@@ -41,6 +41,18 @@ def test_concurrent_browser_entry_adds_preserve_every_entry(tmp_path):
     assert not list(tmp_path.glob('.browser-workspaces.yaml-*'))
 
 
+def test_hardlinked_config_cannot_silently_detach_desktop_state(tmp_path):
+    import os
+    config = tmp_path / 'browser-workspaces.yaml'
+    browser.add_entry('Mail', 'https://mail.example.com/', path=config)
+    desktop = tmp_path / 'desktop-workspaces.yaml'
+    os.link(config, desktop)
+    with pytest.raises(browser.BrowserConfigError):
+        browser.add_entry('Docs', 'https://example.com/', path=config)
+    assert config.samefile(desktop)
+    assert 'Docs' not in desktop.read_text()
+
+
 class FakeChrome:
     def __init__(self, monkeypatch, tmp_path, tabs):
         self.connection = browser.BrowserConnection(9222, 'ws://127.0.0.1:9222/devtools/browser/test', tmp_path)
