@@ -38,7 +38,7 @@ def test_existing_events_are_rewritten_without_losing_immutable_guards(repo):
                            '2026-10-05T12:01:00Z','fixture')""")
         db.execute("""CREATE TRIGGER events_immutable_update BEFORE UPDATE ON events
                     BEGIN SELECT RAISE(ABORT, 'Events are immutable'); END""")
-        db.execute('DELETE FROM schema_migrations WHERE version=13')
+        db.execute('DELETE FROM schema_migrations WHERE version IN (13,14)')
         db.commit()
     upgraded = SQLiteRepository(repo.path)
     event = upgraded.get('events', 'old')

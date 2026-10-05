@@ -165,7 +165,7 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
 
     @app.get('/api/attention', dependencies=[Depends(operator)])
     def attention():
-        return repository.dashboard()['attention']
+        return repository.attention()
 
     @app.get('/api/status/config')
     def status_config(who=Depends(operator)):
@@ -415,8 +415,7 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     def session_page(identity, notice=None, error=None, retry_key=None):
         from .session_views import display_instruction, display_session
         item = display_session(repository.get_registered_session(identity), repository)
-        history = [display_instruction(repository.get_instruction(row['id']))
-                   for row in repository.list_instructions(20, 0, identity)]
+        history = [display_instruction(row) for row in repository.list_instructions_with_history(identity)]
         key = retry_key if retry_key and re.fullmatch(r'[A-Za-z0-9._~-]{16,128}', retry_key) else secrets.token_urlsafe(24)
         errors = {
             'target_unavailable': 'The session became stale or offline. Refresh its collector evidence before retrying.',

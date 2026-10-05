@@ -85,6 +85,34 @@ def test_collector_priority_dashboard_parity_and_read_only_access(api, repo):
     assert api.get('/api/attention').status_code == 401
 
 
+def test_attention_projection_skips_large_terminal_history(api, repo):
+    from workbench.attention_projection import read
+    live = action(api, execution_mode='agent', status='accepted')
+    historical_run = run(api, status='running', source_id='history-template')
+    with repo.connection() as db:
+        action_template = dict(db.execute('SELECT * FROM actions WHERE id=?', (live['id'],)).fetchone())
+        run_template = dict(db.execute('SELECT * FROM runs WHERE id=?', (historical_run['id'],)).fetchone())
+        action_columns = ','.join(action_template)
+        action_values = ','.join(':'+key for key in action_template)
+        run_columns = ','.join(run_template)
+        run_values = ','.join(':'+key for key in run_template)
+        db.executemany(f'INSERT INTO actions ({action_columns}) VALUES ({action_values})',
+            (dict(action_template, id=f'terminal-action-{n}', status='done') for n in range(10000)))
+        db.executemany(f'INSERT INTO runs ({run_columns}) VALUES ({run_values})',
+            (dict(run_template, id=f'terminal-run-{n}', source_id=f'terminal-run-{n}',
+                  action_id=f'terminal-action-{n}', status='stopped') for n in range(10000)))
+        db.commit()
+        # SQLite aborts if the projection walks the terminal rows. This avoids
+        # a wall-clock benchmark that depends on the test machine's load.
+        db.set_progress_handler(lambda: 1, 10000)
+        try:
+            result = read(db)
+        finally:
+            db.set_progress_handler(None, 0)
+    assert [item['id'] for item in result['items']] == ['actions:' + live['id']]
+    assert api.get('/api/attention').json()['items'] == api.get('/api/status/attention').json()['items']
+
+
 @pytest.mark.parametrize('provider', ['codex', 'claude', 'opencode', 'antigravity', 'ollama'])
 def test_explicit_attention_reason_is_provider_agnostic(api, provider):
     r = run(api, status='approval_needed', provider=provider)
