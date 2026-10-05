@@ -41,7 +41,7 @@ def client(url=None, credentials_file=None, role='operator'):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('method', choices=['GET', 'POST', 'PATCH'])
+    p.add_argument('method', choices=['GET', 'POST', 'PATCH', 'DELETE'])
     p.add_argument('path', help='Relative /api/... path or /openapi.json')
     p.add_argument('--json-file', type=Path, help='JSON request file; omit to read stdin for writes')
     p.add_argument('--url', default=os.environ.get('WB_API_URL'))
@@ -50,10 +50,13 @@ def main():
     if not args.path.startswith(('/api/', '/openapi.json')) or args.path.startswith('//'):
         p.error('Only relative Workbench API paths are allowed')
     data = None
-    if args.method != 'GET':
+    if args.method not in {'GET', 'DELETE'}:
         data = json.loads(args.json_file.read_text() if args.json_file else sys.stdin.read())
     with client(args.url, args.credentials_file) as api:
         response = api.request(args.method, args.path, json=data)
-    print(json.dumps(response.json(), indent=2))
+    try:
+        print(json.dumps(response.json(), indent=2))
+    except ValueError:
+        print(f'HTTP {response.status_code}: non-JSON response', file=sys.stderr)
     if response.is_error:
         raise SystemExit(1)

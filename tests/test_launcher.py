@@ -113,6 +113,28 @@ class LauncherTests(unittest.TestCase):
         self.c['risk'] = 'cloud-infrastructure'
         self.assertIn('read-only', cli.provider_argv(self.c, 'new'))
 
+    def test_codex_add_dir_expands_environment(self):
+        shared = self.path / 'shared'
+        shared.mkdir()
+        self.c['additional_cwds'] = ['$EXAMPLE_ROOT/shared']
+        with patch.dict(os.environ, {'EXAMPLE_ROOT': str(self.path)}):
+            args = cli.provider_argv(self.c, 'new')
+        self.assertEqual(args[args.index('--add-dir') + 1], str(shared))
+
+    def test_missing_terminal_birth_does_not_reuse_dead_owner(self):
+        def unavailable(pid, action=None, **kwargs):
+            if action == 'prepare':
+                return {'profile': 'example'}
+            raise ValueError('unavailable')
+        with patch.object(cli, 'STATE', self.path), patch.object(cli, 'birth', return_value=None), patch.object(cli, 'bridge', side_effect=unavailable) as bridge, patch.dict(os.environ, {'DISPLAY': ':1'}), patch.object(cli.subprocess, 'Popen') as popen:
+            cli.atomic(self.path / 'terminal.json', {'pid': 123, 'birth': None})
+            popen.return_value.pid = 456
+            popen.return_value.poll.return_value = 1
+            with self.assertRaisesRegex(ValueError, 'Ptyxis exited'):
+                cli.open_tab(self.c, ROOT / 'config/workbench.example.yaml')
+        self.assertNotIn('tab', [call.args[1] for call in bridge.call_args_list if len(call.args) > 1])
+        self.assertFalse((self.path / 'terminal.json').exists())
+
     def test_session_provider_cwd_mismatch(self):
         with patch.object(cli,'STATE',self.path):
             cli.atomic(self.path/'sessions'/f'{self.c["id"]}.json', {'provider':'claude','cwd':str(self.path),'id':'synthetic'})
@@ -252,7 +274,7 @@ class LauncherTests(unittest.TestCase):
     def test_lock_collision(self):
         with patch.object(cli,'STATE',self.path):
             with cli.lock('checkout',blocking=False):
-                with self.assertRaises(BlockingIOError):
+                with self.assertRaisesRegex(ValueError, 'lock is busy: checkout'):
                     with cli.lock('checkout',blocking=False): pass
 
     def test_codex_early_retry_resumes_the_conversation_created_by_first_attempt(self):

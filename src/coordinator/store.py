@@ -146,7 +146,8 @@ class CoordinatorStore:
                     yield db
                     db.execute("COMMIT")
                 except BaseException:
-                    db.execute("ROLLBACK")
+                    if db.in_transaction:
+                        db.execute("ROLLBACK")
                     raise
         except sqlite3.Error as exc:
             raise Unavailable("coordinator store unavailable; operation outcome may be unknown") from exc

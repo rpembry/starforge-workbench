@@ -37,6 +37,26 @@ def test_status_is_selective_and_authenticated(tmp_path):
     assert api.get('/assets/status.js').status_code == 200
 
 
+def test_rejected_origin_has_security_headers_and_auth_scheme_is_case_insensitive(tmp_path):
+    api, _ = client(tmp_path)
+    response = api.post('/api/collectors/heartbeat', headers={
+        'Origin': 'https://example.invalid', 'Authorization': 'Bearer ' + 'c' * 32}, json={})
+    assert response.status_code == 403
+    assert response.json()['error']['code'] == 'origin_rejected'
+    for header in ('cache-control', 'x-content-type-options', 'referrer-policy',
+                   'content-security-policy'):
+        assert header in response.headers
+    assert api.get('/api/attention', headers={'Authorization': 'bearer ' + 'o' * 32}).status_code == 200
+
+
+def test_operator_cannot_claim_collector_heartbeat(tmp_path):
+    api, _ = client(tmp_path)
+    response = api.post('/api/collectors/heartbeat', json={}, headers={
+        'Authorization': 'Bearer ' + 'o' * 32})
+    assert response.status_code == 403
+    assert response.json()['error']['code'] == 'collector_required'
+
+
 def test_manual_allowances_preserve_windows_profiles_and_observation_time(tmp_path):
     api, _ = client(tmp_path)
     auth = {'Authorization': 'Bearer ' + 'o' * 32}
