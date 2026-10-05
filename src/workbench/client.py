@@ -34,6 +34,14 @@ def client(url=None, credentials_file=None, role='operator'):
             raise ValueError('Cloudflare credentials are bound to their configured HTTPS origin')
         credentials = data[role]
         headers = {'CF-Access-Client-Id': credentials['client_id'], 'CF-Access-Client-Secret': credentials['client_secret']}
+    elif set(data) == {'url', 'role', 'token'}:
+        if data['role'] not in {'operator', 'collector'} or data['role'] != role:
+            raise ValueError('Client credential is not authorized for this role')
+        if not isinstance(data['token'], str) or len(data['token']) < 32:
+            raise ValueError('Client token must be at least 32 characters')
+        if url.rstrip('/') != data['url'].rstrip('/'):
+            raise ValueError('Client credential is bound to its configured URL')
+        headers = {'Authorization': 'Bearer ' + data['token']}
     else:
         headers = {'Authorization': 'Bearer '+Auth(data).credentials[role]}
     return httpx.Client(base_url=url.rstrip('/'), headers=headers, timeout=15, follow_redirects=False)
