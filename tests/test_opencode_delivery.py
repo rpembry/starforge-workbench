@@ -194,6 +194,36 @@ def test_corrupt_receipt_is_quarantined_without_blocking_valid_response(tmp_path
     assert not corrupt.exists() and corrupt.with_suffix('.invalid').exists()
 
 
+def test_quarantined_receipt_never_grants_second_provider_send(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    delivery.deliver(INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    receipt = next((tmp_path / 'private-state').glob('*.json'))
+    receipt.write_text('{invalid')
+    assert delivery.pending_responses() == []
+    assert receipt.with_suffix('.invalid').exists()
+    restarted = adapter(tmp_path, fake)
+    with pytest.raises(DeliveryError, match='attempt uncertain'):
+        restarted.deliver(INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    assert len([call for call in fake.calls if call[0] == 'POST']) == 1
+
+
+@pytest.mark.parametrize('invalid', [float('nan'), float('inf'), -float('inf'), True,
+                                     -1, 1e100])
+def test_invalid_receipt_clock_cannot_extend_response_polling(tmp_path, invalid):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    delivery.deliver(INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    path = next((tmp_path / 'private-state').glob('*.json'))
+    receipt = json.loads(path.read_text())
+    receipt['received_at_epoch'] = invalid
+    path.write_text(json.dumps(receipt))
+    assert delivery.pending_responses() == []
+    assert delivery.degraded_receipts == 1
+    assert path.with_suffix('.invalid').exists()
+    assert not any('/message?limit=' in call[1] for call in fake.calls)
+
+
 def test_response_correlation_reaches_past_latest_hundred_messages(tmp_path):
     fake = FakeOpenCode()
     delivery = adapter(tmp_path, fake)

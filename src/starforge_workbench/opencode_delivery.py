@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 import hashlib
 import http.client
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -211,6 +212,11 @@ class OpenCodeDelivery:
         content_hash = hashlib.sha256(text.encode()).hexdigest()
         message_id = 'msg_' + hashlib.sha256(instruction_id.encode()).hexdigest()[:32]
         path = self.root / (hashlib.sha256(instruction_id.encode()).hexdigest() + '.json')
+        # Quarantine keeps the durable one-attempt marker. The bytes may no
+        # longer be readable, so neither a retry nor a new preflight is safe.
+        quarantined = path.with_suffix('.invalid')
+        if quarantined.exists() or quarantined.is_symlink():
+            raise DeliveryError('Prior local delivery receipt is invalid; attempt uncertain')
         if path.is_symlink():
             raise DeliveryError('Unsafe local delivery receipt')
         if path.exists():
@@ -259,6 +265,8 @@ class OpenCodeDelivery:
             _save(path, receipt, exclusive=True)
         except FileExistsError:
             return DeliveryResult('uncertain', 'concurrent_local_attempt', message_id)
+        if quarantined.exists() or quarantined.is_symlink():
+            return DeliveryResult('uncertain', 'prior_attempt_not_proven', message_id)
         payload = {'messageID': message_id, 'model': self.model,
                    'parts': [{'type': 'text', 'text': text}]}
         try:
@@ -296,12 +304,27 @@ class OpenCodeDelivery:
                     not isinstance(message_id, str) or not IDENTITY.fullmatch(message_id)):
                     raise DeliveryError('Invalid local response receipt')
                 received_at = receipt.get('received_at_epoch', path.stat().st_mtime)
-                if type(received_at) not in (int, float) or received_at < 0:
+                if (type(received_at) not in (int, float) or not math.isfinite(received_at) or
+                    received_at < 0 or received_at > time.time() + 300):
                     raise DeliveryError('Invalid local response receipt')
             except (DeliveryError, OSError):
                 # Keep the bytes locally for diagnosis; never let one bad receipt
                 # block unrelated response reports or new claims.
-                os.replace(path, path.with_suffix('.invalid'))
+                # Publish the quarantine marker before removing the canonical
+                # name, so a concurrent deliver never observes no marker.
+                quarantined = path.with_suffix('.invalid')
+                try:
+                    os.link(path, quarantined, follow_symlinks=False)
+                except FileExistsError:
+                    pass
+                except OSError:
+                    # The unreadable canonical receipt still blocks replay.
+                    self.degraded_receipts += 1
+                    continue
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
                 self.degraded_receipts += 1
                 continue
             if time.time() - received_at > INSTRUCTION_RESPONSE_WINDOW_SECONDS:
