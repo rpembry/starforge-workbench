@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import pytest
-from test_api import api, repo, action, COLLECTOR
+from test_api import api, repo, action, COLLECTOR, OPERATOR
 
 
 def run(api, action_id=None, status='running', source_id='fixture', provider='codex'):
@@ -60,7 +60,9 @@ def test_approvals_coalesce_action_and_runs_and_remain_explicit_when_stale(api, 
 def test_collector_priority_dashboard_parity_and_read_only_access(api, repo):
     action(api, execution_mode='agent', status='accepted')
     run(api, status='approval_needed')
+    api.headers['Authorization'] = 'Bearer ' + COLLECTOR
     api.post('/api/collectors/heartbeat', json=dict(source='fixture', instance_id='one', scope='fixture', status='degraded', reason='scan_failed'))
+    api.headers['Authorization'] = 'Bearer ' + OPERATOR
     result = items(api)
     assert [i['priority'] for i in result] == [0, 1, 2]
     assert result == api.get('/api/dashboard').json()['attention']['items']
@@ -74,7 +76,9 @@ def test_collector_priority_dashboard_parity_and_read_only_access(api, repo):
         db.commit()
     assert items(api)[1]['id'] == alert['id']
     assert '90 seconds' in items(api)[1]['reason']
+    api.headers['Authorization'] = 'Bearer ' + COLLECTOR
     api.post('/api/collectors/heartbeat', json=dict(source='fixture', instance_id='one', scope='fixture', status='ok', reason='scan_complete'))
+    api.headers['Authorization'] = 'Bearer ' + OPERATOR
     assert len(items(api)) == 2
     before = len(repo.list('events'))
     items(api)

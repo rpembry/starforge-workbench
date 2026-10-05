@@ -225,14 +225,46 @@ class CoordinatorStore:
         except sqlite3.Error as exc:
             raise Unavailable("coordinator store unavailable") from exc
 
-    def list(self, limit=100):
+    def list(self, limit=100, before: str | None = None):
         if not 1 <= limit <= 1000:
             raise ValueError("invalid page size")
         try:
             with self._connection() as db:
                 db.execute("BEGIN")
-                ids = db.execute("SELECT id FROM jobs ORDER BY created_at,id LIMIT ?", (limit,)).fetchall()
+                if before is None:
+                    ids = db.execute("SELECT id FROM jobs ORDER BY created_at DESC,id DESC LIMIT ?",
+                                     (limit,)).fetchall()
+                else:
+                    cursor = db.execute("SELECT created_at,id FROM jobs WHERE id=?", (before,)).fetchone()
+                    if cursor is None:
+                        raise ValueError("unknown job cursor")
+                    ids = db.execute("""SELECT id FROM jobs WHERE (created_at,id) < (?,?)
+                                      ORDER BY created_at DESC,id DESC LIMIT ?""",
+                                     (cursor["created_at"], cursor["id"], limit)).fetchall()
                 result = [self._view(db, item[0]) for item in ids]
+                db.execute("COMMIT")
+                return result
+        except sqlite3.Error as exc:
+            raise Unavailable("coordinator store unavailable") from exc
+
+    def list_active(self):
+        """Return all live jobs for reconciliation, regardless of lifetime history."""
+        try:
+            with self._connection() as db:
+                ids = db.execute("SELECT id FROM jobs WHERE phase IN ('active','finalizing')").fetchall()
+                return [self._view(db, item[0]) for item in ids]
+        except sqlite3.Error as exc:
+            raise Unavailable("coordinator store unavailable") from exc
+
+    def reservations(self):
+        try:
+            with self._connection() as db:
+                db.execute("BEGIN")
+                pending = db.execute("SELECT COUNT(*) FROM jobs WHERE phase='queued' AND intent='run'").fetchone()[0]
+                active = db.execute("SELECT spec FROM jobs WHERE phase IN ('active','finalizing')").fetchall()
+                result = {"state": "snapshot", "pending": pending, "active": len(active),
+                          "cpu_millis": sum(json.loads(row[0])["resources"]["cpu_millis"] for row in active),
+                          "memory_mb": sum(json.loads(row[0])["resources"]["memory_mb"] for row in active)}
                 db.execute("COMMIT")
                 return result
         except sqlite3.Error as exc:

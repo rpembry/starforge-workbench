@@ -75,6 +75,32 @@ def test_capacity_cancel_and_stale_version(store, spec):
     assert store.admit_next(principal="scheduler", key="4") is None
 
 
+def test_listing_pages_newest_first_and_capacity_ignores_terminal_history(store, spec):
+    first = store.submit(spec, principal="client", key="first")
+    with store._connection() as db:
+        original = db.execute("SELECT spec FROM jobs WHERE id=?", (first["id"],)).fetchone()[0]
+        db.executemany("""INSERT INTO jobs(id,spec,version,intent,phase,outcome,visibility,
+                          reason,seq,attempt_id,created_at,updated_at)
+                          VALUES(?,?,1,'cancel','terminal','cancelled','unknown',NULL,1,NULL,?,?)""",
+                       [(f"synthetic-{number:04d}", original,
+                         f"2099-01-01T00:00:{number // 1000:02d}.{number:06d}+00:00",
+                         f"2099-01-01T00:00:{number // 1000:02d}.{number:06d}+00:00")
+                        for number in range(1001)])
+    first_page = store.list(25)
+    assert first_page[0]["id"] == "synthetic-1000"
+    assert first["id"] not in {job["id"] for job in first_page}
+    second_page = store.list(25, before=first_page[-1]["id"])
+    assert not ({job["id"] for job in first_page} & {job["id"] for job in second_page})
+    seen = {job["id"] for job in first_page}
+    page = second_page
+    while page:
+        seen.update(job["id"] for job in page)
+        page = store.list(25, before=page[-1]["id"])
+    assert len(seen) == 1002 and first["id"] in seen
+    assert store.reservations() == {"state": "snapshot", "pending": 1, "active": 0,
+                                    "cpu_millis": 0, "memory_mb": 0}
+
+
 def test_unknown_evidence_retry_and_stale_observation(store, spec):
     job = store.submit(spec, principal="client", key="a")
     job = store.admit_next(principal="scheduler", key="a")
