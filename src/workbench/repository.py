@@ -48,6 +48,7 @@ SESSION_STALE_AFTER_SECONDS = 30
 SESSION_HOST_OFFLINE_AFTER_SECONDS = 90
 SESSION_MAX_FUTURE_SKEW_SECONDS = 300
 INSTRUCTION_LEASE_SECONDS = 30
+INSTRUCTION_RESPONSE_WINDOW_SECONDS = 2 * 60 * 60
 INSTRUCTION_PRINCIPAL_RATE_LIMIT = 10
 INSTRUCTION_SESSION_RATE_LIMIT = 5
 INSTRUCTION_RATE_WINDOW_SECONDS = 60
@@ -393,6 +394,7 @@ class SQLiteRepository:
 
     @staticmethod
     def _expire_instruction_leases(db, stamp):
+        from datetime import datetime, timedelta
         queued = db.execute("SELECT id,registered_session_id FROM instructions WHERE state='queued' AND expires_at<=?",
                             (stamp,)).fetchall()
         for row in queued:
@@ -409,6 +411,17 @@ class SQLiteRepository:
             SQLiteRepository._instruction_audit(db, row['id'], 'workbench-server',
                                                 row['registered_session_id'], 'uncertain',
                                                 'lease_expired', stamp)
+        response_cutoff = (datetime.fromisoformat(stamp) -
+                           timedelta(seconds=INSTRUCTION_RESPONSE_WINDOW_SECONDS)).isoformat()
+        unobserved = db.execute("""SELECT id,registered_session_id FROM instructions
+            WHERE state='received' AND received_at<=?""", (response_cutoff,)).fetchall()
+        for row in unobserved:
+            db.execute("""UPDATE instructions SET state='uncertain',updated_at=?,terminal_at=?,
+                reason_code='response_unobserved',lease_token_hash=NULL,claim_owner=NULL
+                WHERE id=?""", (stamp, stamp, row['id']))
+            SQLiteRepository._instruction_audit(db, row['id'], 'workbench-server',
+                                                row['registered_session_id'], 'uncertain',
+                                                'response_unobserved', stamp)
 
     @staticmethod
     def _controllable_session(db, identity, owner=None):

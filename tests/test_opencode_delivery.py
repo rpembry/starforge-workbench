@@ -25,8 +25,9 @@ class FakeOpenCode:
             return 200, json.dumps({'id': SESSION}).encode()
         if method == 'GET' and path == f'/session/{OTHER}':
             return 404, b''
-        if method == 'GET' and path == f'/session/{SESSION}/message?limit=100':
-            return 200, json.dumps(self.messages).encode()
+        if method == 'GET' and path.startswith(f'/session/{SESSION}/message?limit='):
+            limit = int(path.rsplit('=', 1)[1])
+            return 200, json.dumps(self.messages[-limit:]).encode()
         if method == 'GET' and '/message/' in path:
             return self.lookup_result, b''
         if method == 'POST' and path == f'/session/{SESSION}/prompt_async':
@@ -175,6 +176,52 @@ def test_correlated_final_response_is_content_free_and_reported_once(tmp_path):
     receipt = next((tmp_path / 'private-state').glob('*.json')).read_text()
     assert 'synthetic_lease_token' not in receipt
     assert 'PRIVATE' not in receipt
+
+
+def test_corrupt_receipt_is_quarantined_without_blocking_valid_response(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    result = delivery.deliver(INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    fake.messages = [{'info': {'id': 'msg_final', 'role': 'assistant',
+        'parentID': result.message_id, 'finish': 'stop',
+        'time': {'created': 1000, 'completed': 1100}}}]
+    corrupt = tmp_path / 'private-state' / ('0' * 64 + '.json')
+    corrupt.write_text('{invalid')
+    corrupt.chmod(0o600)
+    evidence = delivery.pending_responses()
+    assert len(evidence) == 1 and evidence[0].instruction_id == INSTRUCTION
+    assert delivery.degraded_receipts == 1
+    assert not corrupt.exists() and corrupt.with_suffix('.invalid').exists()
+
+
+def test_response_correlation_reaches_past_latest_hundred_messages(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    result = delivery.deliver(INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    fake.messages = [{'info': {'id': 'msg_final', 'role': 'assistant',
+        'parentID': result.message_id, 'finish': 'stop',
+        'time': {'created': 1000, 'completed': 1100}}}] + [
+        {'info': {'id': f'msg_later_{number}', 'role': 'assistant',
+                  'parentID': 'msg_unrelated'}} for number in range(150)]
+    evidence = delivery.pending_responses()
+    assert len(evidence) == 1 and evidence[0].reason == 'provider_response_without_error'
+    assert [path for method, path, _ in fake.calls if '?limit=' in path] == [
+        f'/session/{SESSION}/message?limit=100', f'/session/{SESSION}/message?limit=500']
+
+
+def test_response_receipt_stops_polling_after_server_window(tmp_path):
+    import time
+    from workbench.repository import INSTRUCTION_RESPONSE_WINDOW_SECONDS
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    delivery.deliver(INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    path = next((tmp_path / 'private-state').glob('*.json'))
+    receipt = json.loads(path.read_text())
+    receipt['received_at_epoch'] = time.time() - INSTRUCTION_RESPONSE_WINDOW_SECONDS - 1
+    path.write_text(json.dumps(receipt))
+    assert delivery.pending_responses() == [] and delivery.degraded_receipts == 1
+    assert json.loads(path.read_text())['response_state'] == 'unreportable'
+    assert not any('/message?limit=' in call[1] for call in fake.calls)
 
 
 def test_tool_continuation_is_pending_and_correlated_error_is_terminal(tmp_path):
