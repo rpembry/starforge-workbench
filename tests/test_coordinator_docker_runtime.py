@@ -185,7 +185,15 @@ def test_default_host_reservation_blocks_second_allocation(runtime, tmp_path):
         supervisor.inspect("b" * 32)
 
 
-def test_approved_git_worktree_exports_patch_and_retains_all_work(runtime, tmp_path):
+@pytest.fixture
+def isolated_git_home(tmp_path, monkeypatch):
+    home = tmp_path / 'git-home'
+    (home / 'config').mkdir(parents=True)
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(home / 'config'))
+
+
+def test_approved_git_worktree_exports_patch_and_retains_all_work(runtime, tmp_path, isolated_git_home):
     adapter, fake = runtime
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -308,7 +316,7 @@ def test_partial_git_setup_retains_receipt_and_never_creates_container(runtime, 
     assert adapter.inspect_no_start(spec) is False
 
 
-def test_no_start_retention_keeps_real_git_administration(runtime, tmp_path, monkeypatch):
+def test_no_start_retention_keeps_real_git_administration(runtime, tmp_path, monkeypatch, isolated_git_home):
     adapter, fake = runtime
     repository = tmp_path / "source-repository"
     repository.mkdir()
