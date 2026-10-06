@@ -1,6 +1,8 @@
 import asyncio
+from pathlib import Path
 
 from mcp import Client
+from starforge_workbench.cli import launcher_plan, load
 from workbench.mcp_server import build_server
 
 
@@ -61,3 +63,12 @@ def test_context_tools_default_to_preview_and_reject_live_restore():
     denied = invoke(server, 'restore_session', {'context': 'daily', 'dry_run': False})
     assert denied['status'] == 'denied'
     assert 'WB_MCP_ALLOW_RESTORE' in denied['message']
+
+
+def test_restore_preview_returns_same_plan_as_launcher_dry_run():
+    manifest = Path(__file__).resolve().parents[1] / 'config/workbench.example.yaml'
+    context = load(manifest)['contexts'][0]
+    server = build_server(manifest_path=lambda: manifest)
+    result = invoke(server, 'restore_session', {'context': context['id']})
+    assert result['status'] == 'previewed'
+    assert result['plan'] == launcher_plan([context])

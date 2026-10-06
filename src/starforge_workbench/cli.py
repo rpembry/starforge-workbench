@@ -797,6 +797,17 @@ def titles_main(argv=None):
     return result
 
 
+def launcher_plan(contexts):
+    """Return the same read-only context plan shown by the CLI dry run."""
+    return [{'id': c['id'], 'title': c['title'], 'cwd': str(cwd(c)) if c['cwd'] else None,
+             'additional_cwds': c['additional_cwds'], 'provider': c['provider'],
+             'resume_policy': c['resume_policy'], 'enabled': c['enabled'],
+             'action': ('resume saved conversation or create and remember' if c['provider'] == 'codex'
+                        else ('start interactive qwen3:8b' if c['provider'] == 'ollama'
+                              else 'resume saved conversation or open provider directly'))
+                        if c['enabled'] else 'disabled'} for c in contexts]
+
+
 def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv and raw_argv[0] == 'titles':
@@ -833,9 +844,7 @@ def main(argv=None):
     if args.command in ['attach','_attach','_menu','bind'] and len(args.contexts) != 1:
         raise ValueError('Exactly one context ID required')
     if args.dry_run or args.command in ['list','plan']:
-        print(json.dumps([{'id':c['id'],'title':c['title'],'cwd':str(cwd(c)) if c['cwd'] else None,
-                           'additional_cwds':c['additional_cwds'],'provider':c['provider'], 'resume_policy':c['resume_policy'],
-                           'enabled':c['enabled'],'action':('resume saved conversation or create and remember' if c['provider'] == 'codex' else ('start interactive qwen3:8b' if c['provider'] == 'ollama' else 'resume saved conversation or open provider directly')) if c['enabled'] else 'disabled'} for c in selected], indent=2))
+        print(json.dumps(launcher_plan(selected), indent=2))
         return
     if args.command == 'doctor':
         problems = []
