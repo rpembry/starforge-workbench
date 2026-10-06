@@ -107,6 +107,26 @@ def test_profile_above_host_budget_is_a_prelaunch_rejection(runtime):
     assert fake.create_count == 0
 
 
+def test_malformed_daemon_info_is_not_permanent_plan_rejection(runtime, tmp_path):
+    adapter, fake = runtime
+    original = adapter.command
+
+    def malformed_info(argv, **kwargs):
+        return b'{invalid' if 'info' in argv else original(argv, **kwargs)
+
+    adapter.command = malformed_info
+    journal = tmp_path / 'journal'
+    journal.mkdir(mode=0o700)
+    supervisor = Supervisor(journal, adapter)
+    lease = supervisor.acquire('controller')
+    with pytest.raises(json.JSONDecodeError):
+        supervisor.launch(plan(), controller='controller', generation=lease['generation'],
+                          operation_id='launch-op')
+    with pytest.raises(KeyError):
+        supervisor.inspect(plan()['attempt_id'])
+    assert fake.create_count == 0
+
+
 def test_restricted_scratch_launch_stop_and_export(runtime):
     adapter, fake = runtime
     adapter.validate(plan())

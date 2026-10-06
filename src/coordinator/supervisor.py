@@ -53,6 +53,10 @@ class LaunchRejected(ValueError):
     """The new plan was rejected before a launch intent was journaled."""
 
 
+class PlanRejected(ValueError):
+    """The runtime explicitly rejected a deterministic plan property."""
+
+
 class ReservationFull(Conflict):
     """A valid plan is waiting for supervisor host capacity."""
 
@@ -300,7 +304,7 @@ class Supervisor:
                 self.runtime.validate(plan)  # current policy gates only NEW runtime allocations
             except Conflict:
                 raise
-            except ValueError as exc:
+            except PlanRejected as exc:
                 raise LaunchRejected("runtime plan rejected before launch") from exc
             reservation = getattr(self.runtime, "reservation", None)
             host_budget = getattr(self.runtime, "host_budget", None)

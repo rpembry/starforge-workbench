@@ -5,6 +5,7 @@ import hashlib
 
 from coordinator import CoordinatorStore, JobSpec, Limits, Policy, Unavailable
 from coordinator.dispatch import ControlError, Dispatcher, SupervisorEvidence
+from coordinator.supervisor import PlanRejected
 
 
 class FakeControl:
@@ -265,7 +266,7 @@ class RuntimeForService:
     def validate(self, plan):
         assert plan["profile_ref"] == "offline" and plan["workspace_ref"] == "scratch"
         if not plan["payload"].get("argv"):
-            raise ValueError("invalid synthetic command")
+            raise PlanRejected("invalid synthetic command")
 
     def launch(self, plan):
         self.starts += 1
@@ -424,6 +425,32 @@ def test_transient_supervisor_failure_does_not_make_job_terminal(tmp_path):
     current = store.get(job["id"])
     assert current["phase"] == "active" and current["outcome"] is None
     assert current["visibility"] == "unknown"
+    assert store.pending_commands()[0]["job_id"] == job["id"]
+
+
+def test_generic_validation_value_error_is_not_a_launch_rejection(tmp_path):
+    import pytest
+    from coordinator.supervisor import Supervisor
+    from coordinator.supervisor_service import SupervisorService
+
+    store, spec = setup(tmp_path)
+    root = tmp_path / "supervisor"
+    root.mkdir(mode=0o700)
+
+    class UnreadableRuntime(RuntimeForService):
+        def validate(self, plan):
+            raise ValueError("synthetic malformed daemon response")
+
+    runtime = UnreadableRuntime(root)
+    dispatcher = Dispatcher(store, ServiceBridge(SupervisorService(Supervisor(root, runtime))))
+    job = store.submit(spec, principal="owner", key="bad")
+    dispatcher.tick()
+    with pytest.raises(ControlError, match="ValueError"):
+        dispatcher.tick()
+    result = store.get(job["id"])
+    assert result["phase"] == "active" and result["outcome"] is None
+    assert result["visibility"] == "unknown" and result["reason"] != "launch_rejected"
+    assert not result["attempts"][-1]["no_start_reason"]
     assert store.pending_commands()[0]["job_id"] == job["id"]
 
 

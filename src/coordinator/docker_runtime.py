@@ -18,6 +18,7 @@ from starforge_workbench.docker_worker import (
 )
 from starforge_workbench.execution import parse_profile
 
+from .supervisor import PlanRejected
 from .store import _json
 from .worker_channel import WorkerChannel
 from .worker_protocol import WorkerInbox
@@ -81,52 +82,52 @@ class DockerRuntime:
 
     def validate(self, plan):
         if plan["profile_ref"] not in self.profiles:
-            raise ValueError("unapproved Docker profile")
+            raise PlanRejected("unapproved Docker profile")
         binding = self._workspace_binding(plan["workspace_ref"])
         if binding["kind"] == "git_worktree":
             self._verify_git_source(binding)
         request = self.reservation(plan)
         if (request["cpu_millis"] > self.host_budget["cpu_millis"] or
                 request["memory_mb"] > self.host_budget["memory_mb"]):
-            raise ValueError("approved profile exceeds supervisor host reservation")
+            raise PlanRejected("approved profile exceeds supervisor host reservation")
         capacity = json.loads(self.command(self.docker + ["info", "--format", "{{json .}}"] ))
         if (self.host_budget["cpu_millis"] > capacity["NCPU"] * 1000 or
                 self.host_budget["memory_mb"] * 1024 * 1024 > capacity["MemTotal"]):
             raise WorkerError("supervisor reservation exceeds daemon host capacity")
         kind = plan["worker_type"]
         if kind not in {"command", "protocol_example"} or kind not in self.worker_types:
-            raise ValueError("unregistered worker adapter")
+            raise PlanRejected("unregistered worker adapter")
         if not re.fullmatch(r"[0-9a-f]{32}", plan["attempt_id"]):
-            raise ValueError("invalid attempt identity")
+            raise PlanRejected("invalid attempt identity")
         payload = plan["payload"]
         if kind == "protocol_example":
             if set(payload) != {"input"} or not isinstance(payload["input"], dict):
-                raise ValueError("protocol example requires bounded input only")
+                raise PlanRejected("protocol example requires bounded input only")
             if len(_json(payload["input"]).encode()) > 65_536:
-                raise ValueError("protocol input too large")
+                raise PlanRejected("protocol input too large")
             if not any(m.source == "scratch" for m in self.profiles[plan["profile_ref"]].mounts):
-                raise ValueError("protocol example needs approved scratch mount")
+                raise PlanRejected("protocol example needs approved scratch mount")
             return
         if set(payload) - {"argv", "input", "artifacts"}:
-            raise ValueError("unsupported command payload")
+            raise PlanRejected("unsupported command payload")
         argv = payload.get("argv")
         if (not isinstance(argv, list) or not 1 <= len(argv) <= 128 or
                 any(not isinstance(value, str) or not value or "\x00" in value or
                     len(value.encode()) > 4096 for value in argv)):
-            raise ValueError("invalid command argument vector")
+            raise PlanRejected("invalid command argument vector")
         if sum(len(value.encode()) for value in argv) > 16_384:
-            raise ValueError("command argument vector too large")
+            raise PlanRejected("command argument vector too large")
         declared = payload.get("artifacts", [])
         if not isinstance(declared, list) or len(declared) > 32:
-            raise ValueError("invalid artifact list")
+            raise PlanRejected("invalid artifact list")
         for name in declared:
             if (not isinstance(name, str) or not name or len(name) > 256 or
                     Path(name).is_absolute() or "\x00" in name or
                     any(part in {".", "..", ".git"} for part in Path(name).parts)):
-                raise ValueError("unsafe artifact path")
+                raise PlanRejected("unsafe artifact path")
         if "input" in payload and (not isinstance(payload["input"], dict) or
                                    len(_json(payload["input"]).encode()) > 65_536):
-            raise ValueError("invalid bounded input")
+            raise PlanRejected("invalid bounded input")
 
     def reservation(self, plan):
         profile = self.profiles[plan["profile_ref"]]
@@ -142,12 +143,12 @@ class DockerRuntime:
                 not isinstance(binding["repository"], str) or
                 not isinstance(binding["revision"], str) or
                 not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", binding["revision"])):
-            raise ValueError("unsupported or unapproved workspace adapter")
+            raise PlanRejected("unsupported or unapproved workspace adapter")
         repository = Path(binding["repository"])
         if (not repository.is_absolute() or repository.is_symlink() or
                 not repository.is_dir() or repository.resolve() != repository or
                 repository == self.root or repository in self.root.parents or self.root in repository.parents):
-            raise ValueError("Git workspace repository must be an isolated real path")
+            raise PlanRejected("Git workspace repository must be an isolated real path")
         return {"kind": "git_worktree", "repository": str(repository),
                 "revision": binding["revision"]}
 
