@@ -43,6 +43,19 @@ def test_signed_browser_and_machine_roles(access):
     assert api.get('/api/dashboard').status_code == 200
 
 
+def test_optional_cloudflare_viewer_service_can_read_only_attention(tmp_path):
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwks = SimpleNamespace(get_signing_key_from_jwt=lambda _: SimpleNamespace(key=key.public_key()))
+    auth = CloudflareAuth('https://team.cloudflareaccess.com', 'audience',
+                          ['owner@example.com'], {'viewer.access': 'viewer'}, jwks=jwks)
+    with TestClient(create_app(SQLiteRepository(tmp_path/'state'/'data.sqlite'), auth)) as api:
+        api.headers['Cf-Access-Jwt-Assertion'] = signed(key, common_name='viewer.access', email=None)
+        assert api.get('/api/attention').status_code == 200
+        assert api.get('/api/dashboard').status_code == 403
+        assert api.get('/api/status/attention').status_code == 403
+        assert api.post('/api/actions', json={'title': 'Synthetic action'}).status_code == 403
+
+
 def test_signed_browser_can_queue_but_collector_cannot_use_send_ui(access):
     api, key = access
     api.headers['Cf-Access-Jwt-Assertion'] = signed(key, common_name='collector.access')
@@ -111,6 +124,11 @@ def test_cloudflare_client_is_origin_bound_and_uses_distinct_roles(tmp_path, mon
     with api_client(None,p,'collector') as api:
         assert api.headers['CF-Access-Client-Id']=='collector.access'
         assert 'Authorization' not in api.headers
+    data = json.loads(p.read_text())
+    data['viewer'] = {'client_id': 'viewer.access', 'client_secret': 'fixture-viewer'}
+    p.write_text(json.dumps(data))
+    with api_client(None, p, 'attention') as viewer:
+        assert viewer.headers['CF-Access-Client-Id'] == 'viewer.access'
     for url in ['https://evil.example', 'http://127.0.0.1:8027']:
         with pytest.raises(ValueError):api_client(url,p)
     p.chmod(0o644)

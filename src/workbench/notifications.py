@@ -545,7 +545,7 @@ def fetch_snapshot(config):
     if not config.api_client_file:
         raise NotificationError('api_client_file_required')
     try:
-        with client(credentials_file=Path(config.api_client_file).expanduser()) as api:
+        with client(credentials_file=Path(config.api_client_file).expanduser(), role='attention') as api:
             response = api.get('/api/attention')
             response.raise_for_status()
             return response.json()

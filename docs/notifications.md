@@ -42,6 +42,14 @@ silently select a different deployment. The dashboard URL must use HTTPS without
 credentials, a query, or fragment. Its link is sent to Pushover; it is not an access
 token and does not bypass your dashboard's authentication.
 
+For least-privilege API access, use a private role-bound client file containing
+the configured API `url`, `"role":"viewer"`, and a distinct viewer token from
+the server's optional viewer credential. A viewer can read only
+`GET /api/attention`. The notifier prefers viewer credentials when present.
+Existing operator-only client files and two-token server files still work, but
+they continue to give this worker operator authority until replaced. Do not
+copy the server credential file to the notifier host.
+
 The external Pushover file must also be owned by your user with mode **0600**:
 
 ```dotenv

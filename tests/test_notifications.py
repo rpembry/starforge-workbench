@@ -449,8 +449,13 @@ def test_api_consumption_is_read_only_and_rejected_delivery_blocks_until_explici
     def respond(request):
         assert request.method == 'GET' and request.url.path == '/api/attention'
         return httpx.Response(200, json=snapshot([item()]))
-    monkeypatch.setattr(n, 'client', lambda **kw: httpx.Client(base_url='https://workbench.example.test', transport=httpx.MockTransport(respond)))
+    roles = []
+    def attention_client(**kwargs):
+        roles.append(kwargs['role'])
+        return httpx.Client(base_url='https://workbench.example.test', transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(n, 'client', attention_client)
     assert n.fetch_snapshot(config) == snapshot([item()])
+    assert roles == ['attention']
     rejected = Mock(side_effect=n.NotificationError('delivery_rejected'))
     assert tick(config, [item()], rejected)['status'] == 'blocked'
     assert tick(config, [item()], rejected, NOW+10000)['status'] == 'blocked'
