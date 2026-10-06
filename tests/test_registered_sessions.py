@@ -90,7 +90,7 @@ def test_registered_session_visibility_is_server_derived(api, repo):
     register_host(api)
     assert api.post('/api/registered-sessions', json=body()).status_code == 201
     with repo.connection() as db:
-        db.execute('UPDATE registered_sessions SET heartbeat_at=?', (stamp(-40),))
+        db.execute('UPDATE registered_sessions SET heartbeat_at=?', (stamp(-80),))
         db.commit()
     api.headers['Authorization'] = 'Bearer ' + OPERATOR
     assert api.get('/api/registered-sessions/registered_session_0001').json()['visibility'] == 'stale'

@@ -15,6 +15,7 @@ from pathlib import Path
 import httpx
 
 from .client import client
+from .repository import SESSION_HOST_OFFLINE_AFTER_SECONDS
 from .worklog_import import sensitive
 
 ACCOMPLISHMENT = re.compile(r'^(done|created|updated|fixed|installed|verified|removed|added|cleaned|merged|pushed|configured|implemented|addressed)\b', re.I)
@@ -176,6 +177,8 @@ def main():
     args=p.parse_args()
     if args.interval<10:
         p.error('Minimum interval is 10 seconds')
+    if args.interval > SESSION_HOST_OFFLINE_AFTER_SECONDS - 30:
+        p.error('Interval must leave at least 30 seconds below the host-offline threshold')
     args.state.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
     if args.state.is_symlink() or args.state.parent.stat().st_mode & 0o077:
         raise ValueError('Use a private local state directory')

@@ -124,7 +124,7 @@ def test_sessions_view_distinguishes_stale_offline_unknown_and_work(api, repo, m
     with repo.connection() as db:
         current = datetime.now(timezone.utc)
         db.execute('UPDATE registered_sessions SET heartbeat_at=? WHERE id=?',
-                   ((current - timedelta(seconds=40)).isoformat(), 'registered_session_0002'))
+                   ((current - timedelta(seconds=80)).isoformat(), 'registered_session_0002'))
         db.execute('UPDATE collectors SET heartbeat_at=? WHERE source=?',
                    ((current - timedelta(seconds=100)).isoformat(), 'synthetic-collector'))
         db.commit()

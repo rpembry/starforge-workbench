@@ -17,6 +17,7 @@ from pathlib import Path
 import yaml
 
 from .client import client
+from .repository import SESSION_HOST_OFFLINE_AFTER_SECONDS
 
 
 def timestamp(value):
@@ -301,11 +302,13 @@ def main():
     p.add_argument('--launcher-state', type=Path,
                    default=Path(os.environ.get('WB_LAUNCHER_STATE', '~/.local/state/starforge-ai-workbench')).expanduser(),
                    help='protected launcher binding root (read only)')
-    p.add_argument('--interval', type=int, default=0, help='0 submits once; otherwise seconds between heartbeats (minimum 10)')
+    p.add_argument('--interval', type=int, default=0, help='0 submits once; otherwise 10–60 seconds between heartbeats')
     p.add_argument('--dry-run', action='store_true')
     args = p.parse_args()
     if args.interval and args.interval < 10:
         p.error('Minimum interval is 10 seconds')
+    if args.interval > SESSION_HOST_OFFLINE_AFTER_SECONDS - 30:
+        p.error('Interval must leave at least 30 seconds below the host-offline threshold')
     if args.source is not None and not args.source.strip():
         p.error('Collector source must not be empty')
     instance_id = str(uuid.uuid4())
