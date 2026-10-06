@@ -68,7 +68,7 @@ def install(app, operator, socket: str, *, factory=None):
             return getattr(client, method)(*args, **kwargs)
 
     @app.get("/coordinator", response_class=HTMLResponse, dependencies=[Depends(operator)])
-    async def overview(request: Request):
+    def overview(request: Request):
         try:
             health = call("health")
             capabilities = call("capabilities")
@@ -95,7 +95,7 @@ def install(app, operator, socket: str, *, factory=None):
                     submit_key=secrets.token_urlsafe(24))
 
     @app.get("/coordinator/jobs/{job_id}", response_class=HTMLResponse, dependencies=[Depends(operator)])
-    async def detail(request: Request, job_id: str, cursor: int = 0):
+    def detail(request: Request, job_id: str, cursor: int = 0):
         if not ID.fullmatch(job_id):
             return HTMLResponse("Invalid job ID", status_code=404)
         try:
@@ -113,7 +113,7 @@ def install(app, operator, socket: str, *, factory=None):
                     action_keys={name: secrets.token_urlsafe(24) for name in ("cancel", "retry", "reattach")})
 
     @app.get("/ui/coordinator/jobs/{job_id}/status", dependencies=[Depends(operator)])
-    async def job_status(job_id: str):
+    def job_status(job_id: str):
         if not ID.fullmatch(job_id):
             return JSONResponse({"error": "invalid_job_id"}, status_code=404)
         try:
@@ -124,12 +124,12 @@ def install(app, operator, socket: str, *, factory=None):
                                                  "visibility", "reason", "updated_at")}
 
     @app.get("/assets/coordinator-poll.js", dependencies=[Depends(operator)])
-    async def coordinator_poll_script():
+    def coordinator_poll_script():
         return FileResponse(Path(__file__).with_name("static") / "coordinator-poll.js",
                             media_type="application/javascript")
 
     @app.post("/ui/coordinator/validate", response_class=HTMLResponse)
-    async def validate(request: Request, spec: str = Form(""), who=Depends(operator)):
+    def validate(request: Request, spec: str = Form(""), who=Depends(operator)):
         try:
             parsed = JobSpec.model_validate_json(spec)
             result = call("validate", parsed)
@@ -145,7 +145,7 @@ def install(app, operator, socket: str, *, factory=None):
                     spec=spec, submit_key=submit_key)
 
     @app.post("/ui/coordinator/submit", response_class=HTMLResponse)
-    async def submit(request: Request, spec: str = Form(""), key: str = Form(""),
+    def submit(request: Request, spec: str = Form(""), key: str = Form(""),
                confirmed: str = Form(""), who=Depends(operator)):
         if confirmed != "yes" or not KEY.fullmatch(key) or len(spec.encode()) > 100_000:
             return HTMLResponse("Invalid explicit submission", status_code=422)
@@ -162,7 +162,7 @@ def install(app, operator, socket: str, *, factory=None):
                         retryable=exc.status == 503)
 
     @app.post("/ui/coordinator/jobs/{job_id}/{action}", response_class=HTMLResponse)
-    async def mutate(request: Request, job_id: str, action: str, version: int = Form(...),
+    def mutate(request: Request, job_id: str, action: str, version: int = Form(...),
                key: str = Form(""), confirmed: str = Form(""), who=Depends(operator)):
         if (not ID.fullmatch(job_id) or action not in {"cancel", "retry", "reattach"}
                 or version < 1 or confirmed != "yes" or not KEY.fullmatch(key)):
@@ -178,7 +178,7 @@ def install(app, operator, socket: str, *, factory=None):
 
     @app.get("/coordinator/jobs/{job_id}/attempts/{attempt_id}/evidence",
              response_class=HTMLResponse, dependencies=[Depends(operator)])
-    async def evidence(request: Request, job_id: str, attempt_id: str, cursor: int = 0):
+    def evidence(request: Request, job_id: str, attempt_id: str, cursor: int = 0):
         if not ID.fullmatch(job_id) or not ID.fullmatch(attempt_id) or cursor < 0:
             return HTMLResponse("Invalid evidence identity", status_code=404)
         try:
