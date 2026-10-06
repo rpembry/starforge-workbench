@@ -10,7 +10,7 @@ import sqlite3
 import pytest
 
 from coordinator.docker_runtime import DockerRuntime
-from coordinator.supervisor import Conflict, OwnershipUnknown, Supervisor
+from coordinator.supervisor import Conflict, LaunchRejected, OwnershipUnknown, Supervisor
 from coordinator.worker_sdk import WorkerClient
 from starforge_workbench.docker_worker import WorkerError
 
@@ -97,6 +97,14 @@ def runtime(tmp_path, monkeypatch):
     monkeypatch.setattr("coordinator.docker_runtime.verify_container", lambda item, receipt, p: None)
     return DockerRuntime(root, profiles={"offline": profile()},
                          workspaces={"scratch": "scratch"}, command_fn=fake), fake
+
+
+def test_profile_above_host_budget_is_a_prelaunch_rejection(runtime):
+    adapter, fake = runtime
+    adapter.host_budget["cpu_millis"] = 500
+    with pytest.raises(ValueError, match="approved profile exceeds"):
+        adapter.validate(plan())
+    assert fake.create_count == 0
 
 
 def test_restricted_scratch_launch_stop_and_export(runtime):
@@ -542,7 +550,8 @@ def test_policy_revocation_cannot_prevent_prelaunch_tombstone(runtime, tmp_path)
     assert supervisor.launch(plan(), controller="controller",
                              generation=lease["generation"], operation_id="launch-op")["state"] == "stopped"
     assert fake.create_count == 0
-    with pytest.raises(ValueError, match="unapproved"):
+    with pytest.raises(LaunchRejected) as rejection:
         adapter.profiles.pop("offline")
         supervisor.launch({**plan(), "attempt_id": "b" * 32}, controller="controller",
                           generation=lease["generation"], operation_id="new-op")
+    assert "unapproved" in str(rejection.value.__cause__)

@@ -88,7 +88,7 @@ class DockerRuntime:
         request = self.reservation(plan)
         if (request["cpu_millis"] > self.host_budget["cpu_millis"] or
                 request["memory_mb"] > self.host_budget["memory_mb"]):
-            raise WorkerError("approved profile exceeds supervisor host reservation")
+            raise ValueError("approved profile exceeds supervisor host reservation")
         capacity = json.loads(self.command(self.docker + ["info", "--format", "{{json .}}"] ))
         if (self.host_budget["cpu_millis"] > capacity["NCPU"] * 1000 or
                 self.host_budget["memory_mb"] * 1024 * 1024 > capacity["MemTotal"]):

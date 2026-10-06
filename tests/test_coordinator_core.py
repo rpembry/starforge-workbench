@@ -203,12 +203,13 @@ def test_schema_one_migration_preserves_jobs(store, spec):
     original = store.submit(spec, principal="client", key="first")
     with sqlite3.connect(store.path) as db:
         db.execute("DROP TABLE operation_aliases")
+        db.execute("DROP TABLE quarantined_commands")
         db.execute("ALTER TABLE attempts DROP COLUMN no_start_reason")
         db.execute("PRAGMA user_version=1")
     reopened = CoordinatorStore(store.root, store.policy)
     assert reopened.get(original["id"])["id"] == original["id"]
     with sqlite3.connect(store.path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_positive_no_start_terminal_replay_and_retry(store, spec):
