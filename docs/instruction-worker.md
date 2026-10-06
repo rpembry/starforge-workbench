@@ -42,6 +42,12 @@ collector principal so the worker can claim its registration; the ordinary
 multi-context collector keeps its existing identity. See the
 [one-context rollout](mobile-control-rollout.md) for the cutover. The worker
 reloads its configuration every five seconds.
+While enabled, each sweep posts a collector heartbeat under a distinct
+`<host>:instruction-worker` source. A clean sweep reports `ok`; missing local
+registration state or another sweep failure reports `degraded`. A silent worker
+ages into the existing `collector_health` offline attention rule after 90
+seconds. A disabled worker sends no heartbeat, so a prior enabled heartbeat can
+age offline until an operator reviews or removes that collector record.
 Setting `enabled` to false stops future claims without deleting server pending
 records or private attempt receipts. The server kill switch independently
 rejects new claims. Neither switch cancels an already transmitted instruction.

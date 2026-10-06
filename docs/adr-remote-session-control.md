@@ -57,8 +57,12 @@ its host collector is still visible. An offline registration belongs to a host
 whose collector heartbeat has exceeded the host threshold. Neither condition
 means the task or provider failed. `working` and `idle` are not first-release
 states unless a later provider contract supplies generation-safe evidence.
-The current server thresholds are 30 seconds for a session heartbeat and 90
-seconds for its host collector heartbeat. A collector observation timestamp may
+The current server thresholds are 75 seconds for a session heartbeat and 90
+seconds for its host collector heartbeat. Shipped publishers run every 30 seconds
+plus scan time, leaving margin before a healthy registration becomes stale.
+Collectors and observers reject intervals above 60 seconds, leaving at least
+30 seconds before host-offline visibility (subject to scan and network delay).
+A collector observation timestamp may
 be at most five minutes ahead of server time to tolerate clock skew; visibility
 is based on server-recorded heartbeats, not that timestamp. This tolerance is
 not evidence that a future-dated observation has already occurred.

@@ -3,8 +3,10 @@ import argparse
 import json
 import os
 from pathlib import Path
+import socket
 import stat
 import time
+import uuid
 
 import httpx
 
@@ -164,12 +166,33 @@ def cycle(api, config, adapter, resolver=resolve_opencode_registration):
     return counts
 
 
+def worker_sweep(api, config, adapter, instance_id, resolver=resolve_opencode_registration):
+    """Report worker health separately from provider and instruction outcomes."""
+    if not config['enabled']:
+        return cycle(api, config, adapter, resolver)
+    health = dict(source=socket.gethostname()+':instruction-worker', instance_id=instance_id,
+                  scope='remote instruction delivery', status='ok', reason='scan_complete', observed_runs=0)
+    try:
+        if not Path(config['registration_state']).is_file():
+            raise OSError('Registration state unavailable')
+        counts = cycle(api, config, adapter, resolver)
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, httpx.HTTPError):
+        health.update(status='degraded', reason='scan_failed')
+        api.post('/api/collectors/heartbeat', json=health).raise_for_status()
+        raise
+    if counts['ambiguous']:
+        health.update(status='degraded', reason='submission_failed')
+    api.post('/api/collectors/heartbeat', json=health).raise_for_status()
+    return counts
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, type=Path)
     parser.add_argument('--credentials-file', type=Path)
     parser.add_argument('--once', action='store_true')
     args = parser.parse_args()
+    instance_id = str(uuid.uuid4())
     while True:
         try:
             config = load_config(args.config)
@@ -177,13 +200,13 @@ def main():
                 adapter = OpenCodeDelivery(config['opencode_origin'], config['delivery_state'],
                                            config['provider_id'], config['model_id'])
                 with client(role='collector', credentials_file=args.credentials_file) as api:
-                    counts = cycle(api, config, adapter)
+                    counts = worker_sweep(api, config, adapter, instance_id)
             else:
                 counts = {'eligible': 0, 'claimed': 0, 'reported': 0,
                           'responses_reported': 0, 'previews_sent': 0, 'ambiguous': 0}
             if args.once or counts['claimed'] or counts['ambiguous']:
                 print(json.dumps(counts, sort_keys=True), flush=True)
-        except (OSError, ValueError, WorkerConfigError, httpx.HTTPError):
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, WorkerConfigError, httpx.HTTPError):
             # No paths, credentials, instruction text or provider output in logs.
             print('{"worker":"unavailable"}', flush=True)
         if args.once:

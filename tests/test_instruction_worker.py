@@ -1,11 +1,12 @@
 """Synthetic worker checks: no live server, provider, or conversation input."""
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
-from starforge_workbench.instruction_worker import cycle, load_config
+from starforge_workbench.instruction_worker import cycle, load_config, worker_sweep
 from starforge_workbench.opencode_delivery import DeliveryResult, ResponseEvidence
 from workbench.auth import Auth
 from workbench.main import create_app
@@ -57,6 +58,10 @@ class Response:
     def json(self):
         return self.value
 
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError('Synthetic HTTP failure')
+
 
 class FakeAPI:
     def __init__(self):
@@ -71,6 +76,8 @@ class FakeAPI:
 
     def post(self, path, json):
         self.calls.append((path, json))
+        if path == '/api/collectors/heartbeat':
+            return Response(200, {'status': json['status']})
         if path == '/api/instructions/claim':
             return Response(self.claim_status, self.claim if self.claim_status == 200 else None)
         if path.endswith('/renew'):
@@ -127,6 +134,48 @@ def config(tmp_path, enabled=True):
             'delivery_state': str(root), 'opencode_origin': 'http://127.0.0.1:4098',
             'provider_id': 'openai', 'model_id': 'synthetic-model',
             'contexts': ['opencode']}
+
+
+def test_enabled_worker_reports_clean_and_degraded_health_without_disabled_heartbeat(tmp_path):
+    api, adapter = FakeAPI(), FakeAdapter()
+    settings = config(tmp_path)
+    worker_sweep(api, settings, adapter, 'synthetic-instance', lambda *args: None)
+    health = [body for path, body in api.calls if path == '/api/collectors/heartbeat']
+    assert len(health) == 1 and health[0]['status'] == 'ok'
+    assert health[0]['source'].endswith(':instruction-worker')
+
+    settings['registration_state'] = str(tmp_path / 'missing.json')
+    with pytest.raises(OSError):
+        worker_sweep(api, settings, adapter, 'synthetic-instance')
+    health = [body for path, body in api.calls if path == '/api/collectors/heartbeat']
+    assert len(health) == 2 and health[-1]['status'] == 'degraded'
+    assert health[-1]['reason'] == 'scan_failed'
+
+    worker_sweep(api, {**settings, 'enabled': False}, adapter, 'synthetic-instance')
+    assert len([path for path, _ in api.calls if path == '/api/collectors/heartbeat']) == 2
+
+
+def test_silent_worker_heartbeat_projects_offline_attention(tmp_path):
+    repo = SQLiteRepository(tmp_path / 'server' / 'workbench.sqlite')
+    operator = 'operator-synthetic-' + 'a' * 32
+    collector = 'collector-synthetic-' + 'b' * 32
+    with TestClient(create_app(repo, Auth({'operator': operator, 'collector': collector}))) as api:
+        api.headers['Authorization'] = 'Bearer ' + collector
+        posted = api.post('/api/collectors/heartbeat', json={
+            'source': 'synthetic-host:instruction-worker', 'instance_id': 'synthetic-instance',
+            'scope': 'remote instruction delivery', 'status': 'ok',
+            'reason': 'scan_complete', 'observed_runs': 0})
+        assert posted.status_code == 200
+        with repo.connection() as db:
+            db.execute('UPDATE collectors SET heartbeat_at=? WHERE source=?',
+                       ((datetime.now(timezone.utc) - timedelta(seconds=91)).isoformat(),
+                        'synthetic-host:instruction-worker'))
+            db.commit()
+        api.headers['Authorization'] = 'Bearer ' + operator
+        items = api.get('/api/attention').json()['items']
+        assert any(item['kind'] == 'collector_health' and
+                   item['title'] == 'synthetic-host:instruction-worker' and
+                   '90 seconds' in item['reason'] for item in items)
 
 
 def test_claim_only_exact_registration_then_report_admission(tmp_path):

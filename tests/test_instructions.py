@@ -89,6 +89,16 @@ def test_create_is_bounded_idempotent_and_does_not_echo_invalid_text(api):
     assert api.post('/api/instructions', json=instruction_body(3, text='x' * 2001)).status_code == 422
 
 
+def test_registration_older_than_publish_interval_stays_sendable(api, repo):
+    register_session(api)
+    with repo.connection() as db:
+        db.execute('UPDATE registered_sessions SET heartbeat_at=? WHERE id=?',
+                   (stamp(-35), SESSION_ID))
+        db.commit()
+    assert api.get('/api/registered-sessions/' + SESSION_ID).json()['visibility'] == 'fresh'
+    assert api.post('/api/instructions', json=instruction_body()).status_code == 201
+
+
 def test_roles_are_separated_and_worker_reads_only_by_claim(api):
     register_session(api)
     item = create_instruction(api)
@@ -140,7 +150,7 @@ def test_create_rejects_uncontrollable_targets(api, change, code):
 def test_create_rejects_stale_and_offline_targets(api, repo):
     register_session(api)
     with repo.connection() as db:
-        db.execute('UPDATE registered_sessions SET heartbeat_at=?', (stamp(-31),))
+        db.execute('UPDATE registered_sessions SET heartbeat_at=?', (stamp(-80),))
         db.commit()
     assert api.post('/api/instructions', json=instruction_body()).json()['error']['code'] == 'target_unavailable'
     with repo.connection() as db:
