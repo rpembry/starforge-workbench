@@ -129,6 +129,12 @@ Claude collection starts with a persisted cutoff covering the preceding day. Ope
 
 The release installer preserves an existing `/etc/workbench/service.env` byte-for-byte and requires it to be a regular, nonsymlink file owned by `root:workbench` with mode `0600` or `0640`. A first install with no such file must explicitly pass `--init-service-env` to initialize it from the example; otherwise installation stops before switching the active release or activating services. Review the initialized private values before using the service.
 
+### Upgrade and rollback
+
+Before switching a server release, the installer stops `workbench.service` and, when its database exists, saves an integrity-checked SQLite backup under `/var/lib/workbench/backups` as the `workbench` user. It prints that backup path. The previous release target is recorded in the root-private `/opt/workbench/rollback-target` file before the `current` symlink changes. A first installation records `none`. The installer then starts the service and waits for the loopback `/healthz` endpoint; an active systemd unit alone does not count as a successful install.
+
+If the health check fails, inspect the service logs and the recorded target. Manual rollback is: stop `workbench.service`, relink `/opt/workbench/current` to the recorded release, and restart. Restore the printed backup before restarting **only if** the new release migrated the database schema; an older release cannot open a newer schema. Preserve the failed database for diagnosis, and verify the restored backup with `PRAGMA integrity_check` before using it. Backup retention is left to the operator. For an explicit snapshot, run `deploy/backup-state.py --database PATH --dest PRIVATE_DIRECTORY` as the database owner.
+
 No task execution scheduler is implied by run heartbeats or attention records. Reporting time windows and the default human actor label are simple personal conventions to adapt.
 
 ## Personal display and reporting settings
