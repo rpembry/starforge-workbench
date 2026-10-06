@@ -174,6 +174,7 @@ def test_correlated_final_response_is_content_free_and_reported_once(tmp_path):
     restarted.mark_response(INSTRUCTION, 'reported')
     assert adapter(tmp_path, fake).pending_responses() == []
     receipt = next((tmp_path / 'private-state').glob('*.json')).read_text()
+    assert json.loads(receipt)['state'] == 'tombstone'
     assert 'synthetic_lease_token' not in receipt
     assert 'PRIVATE' not in receipt
 
@@ -268,8 +269,40 @@ def test_response_receipt_stops_polling_after_server_window(tmp_path):
     receipt['received_at_epoch'] = time.time() - INSTRUCTION_RESPONSE_WINDOW_SECONDS - 1
     path.write_text(json.dumps(receipt))
     assert delivery.pending_responses() == [] and delivery.degraded_receipts == 1
-    assert json.loads(path.read_text())['response_state'] == 'unreportable'
+    assert json.loads(path.read_text())['disposition'] == 'unreportable'
+    assert json.loads(path.read_text())['state'] == 'tombstone'
     assert not any('/message?limit=' in call[1] for call in fake.calls)
+
+
+def test_terminal_tombstone_blocks_replay_without_lookup_after_restart(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    delivery.deliver(INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    path = next((tmp_path / 'private-state').glob('*.json'))
+    before = path.stat().st_size
+    delivery.mark_response(INSTRUCTION, 'reported')
+    tombstone = json.loads(path.read_text())
+    assert path.stat().st_size < before
+    assert set(tombstone) == {'state', 'disposition', 'session_id', 'message_id', 'content_sha256'}
+    calls = len(fake.calls)
+    assert adapter(tmp_path, fake).deliver(INSTRUCTION, SESSION, 'synthetic text').reason == 'prior_admission'
+    assert len(fake.calls) == calls
+    with pytest.raises(DeliveryError, match='changed target'):
+        adapter(tmp_path, fake).deliver(INSTRUCTION, SESSION, 'different text')
+
+
+def test_legacy_terminal_receipt_compacts_during_response_scan(tmp_path):
+    fake = FakeOpenCode()
+    delivery = adapter(tmp_path, fake)
+    delivery.deliver(INSTRUCTION, SESSION, 'synthetic text', 'synthetic_lease_token')
+    path = next((tmp_path / 'private-state').glob('*.json'))
+    receipt = json.loads(path.read_text())
+    receipt['response_state'] = 'reported'
+    receipt.pop('lease_token')
+    path.write_text(json.dumps(receipt))
+    assert adapter(tmp_path, fake).pending_responses() == []
+    assert json.loads(path.read_text())['state'] == 'tombstone'
+    assert adapter(tmp_path, fake).deliver(INSTRUCTION, SESSION, 'synthetic text').reason == 'prior_admission'
 
 
 def test_tool_continuation_is_pending_and_correlated_error_is_terminal(tmp_path):

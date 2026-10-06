@@ -144,6 +144,20 @@ def _load(path):
         os.close(fd)
 
 
+def _tombstone(path, receipt, instruction_id, disposition):
+    """Keep only the durable one-attempt identity after response reporting ends."""
+    if (not isinstance(instruction_id, str) or not IDENTITY.fullmatch(instruction_id) or
+        path.name != hashlib.sha256(instruction_id.encode()).hexdigest() + '.json' or
+        receipt.get('instruction_id') != instruction_id or
+        not isinstance(receipt.get('session_id'), str) or
+        not isinstance(receipt.get('message_id'), str) or
+        not isinstance(receipt.get('content_sha256'), str)):
+        raise DeliveryError('Invalid terminal delivery receipt')
+    return {'state': 'tombstone', 'disposition': disposition,
+            'session_id': receipt['session_id'], 'message_id': receipt['message_id'],
+            'content_sha256': receipt['content_sha256']}
+
+
 class OpenCodeDelivery:
     """A single logical instruction is never posted a second time.
 
@@ -228,6 +242,10 @@ class OpenCodeDelivery:
             if (receipt.get('session_id') != session_id or receipt.get('message_id') != message_id or
                 receipt.get('content_sha256') != content_hash):
                 raise DeliveryError('Instruction identity changed target')
+            if receipt.get('state') == 'tombstone':
+                if receipt.get('disposition') == 'reported':
+                    return DeliveryResult('received', 'prior_admission', message_id)
+                return DeliveryResult('uncertain', 'prior_attempt_not_proven', message_id)
             if receipt.get('state') == 'received':
                 return DeliveryResult('received', 'prior_admission', message_id)
             # An attempted POST may have crossed the provider boundary. A 404
@@ -295,6 +313,10 @@ class OpenCodeDelivery:
                 continue
             try:
                 receipt = _load(path)
+                if receipt.get('state') == 'received' and receipt.get('response_state') in {'reported', 'unreportable'}:
+                    _save(path, _tombstone(path, receipt, receipt.get('instruction_id'),
+                                           receipt['response_state']))
+                    continue
                 if receipt.get('state') != 'received' or receipt.get('response_state') != 'pending':
                     continue
                 instruction_id = receipt.get('instruction_id')
@@ -408,9 +430,12 @@ class OpenCodeDelivery:
             raise DeliveryError('Invalid response receipt state')
         path = self.root / (hashlib.sha256(instruction_id.encode()).hexdigest() + '.json')
         receipt = _load(path)
+        if receipt.get('state') == 'tombstone' and receipt.get('disposition') == state:
+            self._previews.pop(instruction_id, None)
+            return
+        if receipt.get('state') != 'received' or receipt.get('response_state') not in {'pending', state}:
+            raise DeliveryError('Invalid response receipt transition')
         if receipt.get('instruction_id') != instruction_id:
             raise DeliveryError('Instruction identity changed target')
-        receipt['response_state'] = state
-        receipt.pop('lease_token', None)
-        _save(path, receipt)
+        _save(path, _tombstone(path, receipt, instruction_id, state))
         self._previews.pop(instruction_id, None)
