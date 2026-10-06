@@ -19,6 +19,12 @@ from .worklog_import import sensitive
 
 ACCOMPLISHMENT = re.compile(r'^(done|created|updated|fixed|installed|verified|removed|added|cleaned|merged|pushed|configured|implemented|addressed)\b', re.I)
 MAX_LINE = 16 * 1024 * 1024
+MAX_DIAGNOSTICS = 256
+
+
+def _limit_entries(entries):
+    while len(entries) > MAX_DIAGNOSTICS:
+        entries.pop(next(iter(entries)))
 
 
 def atomic_state(path, data):
@@ -42,13 +48,17 @@ def record_problem(state, path, cursor, reason, line=b'', digest=None):
     # Keep a replayable local reference, never the response text or exception value.
     identity=f'{path}:{cursor["identity"]}:{cursor["offset"]}:{reason}'
     key=hashlib.sha256(identity.encode()).hexdigest()
-    state.setdefault('_problems',{})[key]=dict(path=str(path),identity=cursor['identity'],
+    problems = state.setdefault('_problems',{})
+    problems[key]=dict(path=str(path),identity=cursor['identity'],
         offset=cursor['offset'],reason=reason,sha256=digest or hashlib.sha256(line).hexdigest())
+    _limit_entries(problems)
 
 
 def observe(api, sessions, state, cutoff, known, parser=None):
     cutoff_time=datetime.fromisoformat(cutoff.replace('Z','+00:00'))
     counts={'submitted':0,'withheld':0,'malformed':0,'failed_files':0}
+    for collection in ('_problems', '_references', '_file_errors'):
+        _limit_entries(state.get(collection, {}))
     if not sessions.is_dir():
         raise OSError('Session directory unavailable')
     for path in sorted(sessions.rglob('*.jsonl')):
@@ -59,10 +69,10 @@ def observe(api, sessions, state, cutoff, known, parser=None):
             # Do not advance a failed delivery or unreadable file. Other files still run.
             reason='delivery_failed' if isinstance(exc,httpx.HTTPError) else 'file_scan_failed'
             state.setdefault('_file_errors',{})[key]={'path':str(path),'reason':reason}
+            _limit_entries(state['_file_errors'])
             counts['failed_files']+=1
         else:
             state.get('_file_errors',{}).pop(key,None)
-    counts['malformed']=len(state.get('_problems',{}))
     return counts
 
 
@@ -93,6 +103,7 @@ def observe_file(api,path,state,key,cutoff_time,known,counts,parser):
                     digest.update(chunk)
                     complete=chunk.endswith(b'\n')
                 record_problem(state,path,cursor,'oversize_record',digest=digest.hexdigest())
+                counts['malformed'] += 1
                 if not complete:
                     break  # An incomplete record remains replayable after append.
                 cursor['offset']=stream.tell()  # Quarantine this record, then keep scanning.
@@ -104,6 +115,7 @@ def observe_file(api,path,state,key,cutoff_time,known,counts,parser):
                 event=parser(record,path,cutoff_time,known)
             except (ValueError,TypeError,KeyError,IndexError,OverflowError):
                 record_problem(state,path,cursor,'malformed_record',line)
+                counts['malformed'] += 1
                 cursor['offset']=stream.tell()
                 continue
             if event:
@@ -112,7 +124,9 @@ def observe_file(api,path,state,key,cutoff_time,known,counts,parser):
                 response=api.post('/api/events',json=event)
                 response.raise_for_status()
                 counts['submitted']+=1
-                state.setdefault('_references',{})[event['source_id']]={'path':str(path),'timestamp':record['timestamp'],'offset':cursor['offset']}
+                references = state.setdefault('_references',{})
+                references[event['source_id']]={'path':str(path),'timestamp':record['timestamp'],'offset':cursor['offset']}
+                _limit_entries(references)
             cursor['offset']=stream.tell()  # Only after successful delivery or recorded quarantine.
 
 
