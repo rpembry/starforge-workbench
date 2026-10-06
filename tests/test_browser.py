@@ -1,4 +1,5 @@
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -28,6 +29,28 @@ def test_browser_workspace_rejects_credentials_and_duplicate_names(tmp_path):
 
 def test_load_missing_config_has_empty_default_workspace(tmp_path):
     assert browser.load_config(tmp_path / 'missing.yaml') == {'version': 1, 'workspaces': {'default': []}}
+
+
+def test_concurrent_browser_entry_adds_preserve_every_entry(tmp_path):
+    config = tmp_path / 'browser-workspaces.yaml'
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        list(pool.map(lambda n: browser.add_entry(f'Site {n}', f'https://example.com/{n}', path=config),
+                      range(48)))
+    assert {item['name'] for item in browser.entries(path=config)} == {f'Site {n}' for n in range(48)}
+    assert config.stat().st_mode & 0o077 == 0
+    assert not list(tmp_path.glob('.browser-workspaces.yaml-*'))
+
+
+def test_hardlinked_config_cannot_silently_detach_desktop_state(tmp_path):
+    import os
+    config = tmp_path / 'browser-workspaces.yaml'
+    browser.add_entry('Mail', 'https://mail.example.com/', path=config)
+    desktop = tmp_path / 'desktop-workspaces.yaml'
+    os.link(config, desktop)
+    with pytest.raises(browser.BrowserConfigError):
+        browser.add_entry('Docs', 'https://example.com/', path=config)
+    assert config.samefile(desktop)
+    assert 'Docs' not in desktop.read_text()
 
 
 class FakeChrome:
