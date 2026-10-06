@@ -222,6 +222,26 @@ def _save_registration_state(path, value):
             pass
 
 
+def _process_gone(process, scan):
+    if process is None or scan is None:
+        return False
+    if scan['boot_id'] != process['boot_id']:
+        return True
+    current_birth = scan['processes'].get(process['pid'])
+    return (current_birth is not None and current_birth != process['birth'] or
+            current_birth is None and process['pid'] not in scan['present_pids'])
+
+
+def _submit_stopped_run(api, item, context_id):
+    process = item['process']
+    stopped_run = dict(source=socket.gethostname()+':tmux', source_id=process['source_id'],
+        context=context_id, provider=item['provider'], actor=item['provider'], status='stopped',
+        started_at=process['started_at'], last_activity_at=item['last_activity_at'],
+        activity_basis='Exact provider process absent after successful scan')
+    response = api.post('/api/runs', json=stopped_run)
+    response.raise_for_status()
+
+
 def publish_registered_sessions(api, manifest, selected, submitted_runs, collector_source,
                                 registration_state, launcher_state, scan=None):
     """Publish bounded metadata for live configured contexts; never control them."""
@@ -245,6 +265,9 @@ def publish_registered_sessions(api, manifest, selected, submitted_runs, collect
         ).hexdigest()
         item = state['contexts'].get(context['id'])
         if item is not None and item['generation'] != generation and not item['stopped']:
+            exited = _process_gone(item['process'], scan)
+            if exited:
+                _submit_stopped_run(api, item, context['id'])
             replaced = {
                 'id': item['id'],
                 'collector_source': collector_source,
@@ -254,7 +277,7 @@ def publish_registered_sessions(api, manifest, selected, submitted_runs, collect
                 'run_id': item['run_id'],
                 'action_id': item['action_id'],
                 'evidence_state': 'stopped',
-                'reason': 'registration_replaced',
+                'reason': 'process_stopped' if exited else 'registration_replaced',
                 'summary': '',
                 'observation_sequence': item['sequence']+1,
                 'observed_at': datetime.now(timezone.utc).isoformat(),
@@ -301,21 +324,9 @@ def publish_registered_sessions(api, manifest, selected, submitted_runs, collect
         for context_id, item in state['contexts'].items():
             if context_id not in contexts or context_id in observed_contexts or item['stopped']:
                 continue
-            process = item['process']
-            if process is None:
-                continue  # A v1 record has no exact process evidence to stop.
-            if scan['boot_id'] == process['boot_id']:
-                current_birth = scan['processes'].get(process['pid'])
-                if current_birth == process['birth'] or (
-                    current_birth is None and process['pid'] in scan['present_pids']
-                ):
-                    continue  # Present or unreadable PID is not positive stop evidence.
-            stopped_run = dict(source=socket.gethostname()+':tmux', source_id=process['source_id'],
-                context=context_id, provider=item['provider'], actor=item['provider'], status='stopped',
-                started_at=process['started_at'], last_activity_at=item['last_activity_at'],
-                activity_basis='Exact provider process absent after successful scan')
-            response = api.post('/api/runs', json=stopped_run)
-            response.raise_for_status()
+            if not _process_gone(item['process'], scan):
+                continue  # Unknown or still-present process is not stop evidence.
+            _submit_stopped_run(api, item, context_id)
             stopped = dict(id=item['id'], collector_source=collector_source, host=item['host'],
                 display_name=item['display_name'], provider=item['provider'], run_id=item['run_id'],
                 action_id=item['action_id'], evidence_state='stopped', reason='process_stopped',

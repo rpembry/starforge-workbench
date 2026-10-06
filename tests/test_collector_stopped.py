@@ -119,6 +119,43 @@ def test_two_panes_keep_one_run_and_one_registration_then_exact_exit_stops(tmp_p
         assert not repo.dashboard()['stale_runs']
 
 
+def test_oldest_pane_exit_stops_old_run_while_newer_pane_remains(tmp_path):
+    proc, manifest, launcher, state, repo = setup(tmp_path)
+    with TestClient(create_app(repo, Auth({'collector': 'c' * 40, 'operator': 'o' * 40}))) as api:
+        api.headers['Authorization'] = 'Bearer ' + 'c' * 40
+        scan(api, proc, manifest, launcher, state)
+        old = repo.list('runs')[0]
+        old_id = repo.list_registered_sessions()[0]['id']
+        shutil.rmtree(proc / '20')
+        assert scan(api, proc, manifest, launcher, state)['observed_runs'] == 1
+        runs = repo.list('runs')
+        assert len(runs) == 2
+        assert repo.get('runs', old['id'])['status'] == 'stopped'
+        assert next(run for run in runs if run['id'] != old['id'])['status'] == 'running'
+        assert repo.get_registered_session(old_id)['reason'] == 'process_stopped'
+        assert repo.get_registered_session(old_id)['evidence_state'] == 'stopped'
+        assert _registration_state(state)['contexts']['synthetic']['id'] != old_id
+        delayed = api.post('/api/runs', json={
+            'source': old['source'], 'source_id': old['source_id'],
+            'context': old['context'], 'provider': old['provider'], 'actor': old['actor'],
+            'status': 'running', 'started_at': old['started_at'],
+            'activity_basis': 'delayed synthetic heartbeat'})
+        assert delayed.status_code == 409
+        assert repo.get('runs', old['id'])['status'] == 'stopped'
+
+
+def test_new_canonical_process_does_not_mark_still_live_old_run_stopped(tmp_path):
+    proc, manifest, launcher, state, repo = setup(tmp_path)
+    with TestClient(create_app(repo, Auth({'collector': 'c' * 40, 'operator': 'o' * 40}))) as api:
+        api.headers['Authorization'] = 'Bearer ' + 'c' * 40
+        scan(api, proc, manifest, launcher, state, output='sfwb-synthetic|30|0|1100\n')
+        old = repo.list('runs')[0]
+        old_id = repo.list_registered_sessions()[0]['id']
+        scan(api, proc, manifest, launcher, state)
+        assert repo.get_registered_session(old_id)['reason'] == 'registration_replaced'
+        assert repo.get('runs', old['id'])['status'] == 'running'
+
+
 def test_changed_boot_stops_prior_generation_without_revival(tmp_path):
     proc, manifest, launcher, state, repo = setup(tmp_path)
     with TestClient(create_app(repo, Auth({'collector': 'c' * 40, 'operator': 'o' * 40}))) as api:
