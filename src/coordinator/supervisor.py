@@ -49,6 +49,18 @@ class RecoveryUncertain(OwnershipUnknown):
         super().__init__("startup ownership recovery incomplete; new starts blocked")
 
 
+class LaunchRejected(ValueError):
+    """The new plan was rejected before a launch intent was journaled."""
+
+
+class PlanRejected(ValueError):
+    """The runtime explicitly rejected a deterministic plan property."""
+
+
+class ReservationFull(Conflict):
+    """A valid plan is waiting for supervisor host capacity."""
+
+
 def _serialized(method):
     """Serialize authority changes and runtime mutations across service processes."""
     @wraps(method)
@@ -288,7 +300,12 @@ class Supervisor:
                     raise Conflict("attempt or operation identity conflict")
                 # A lost launch response must be reconciled, never repeated.
                 return self._attempt(old)
-            self.runtime.validate(plan)  # current policy gates only NEW runtime allocations
+            try:
+                self.runtime.validate(plan)  # current policy gates only NEW runtime allocations
+            except Conflict:
+                raise
+            except PlanRejected as exc:
+                raise LaunchRejected("runtime plan rejected before launch") from exc
             reservation = getattr(self.runtime, "reservation", None)
             host_budget = getattr(self.runtime, "host_budget", None)
             requested = reservation(plan) if reservation is not None else None
@@ -303,7 +320,7 @@ class Supervisor:
                 if (len(active) >= host_budget["max_active"] or
                         used_cpu + requested["cpu_millis"] > host_budget["cpu_millis"] or
                         used_memory + requested["memory_mb"] > host_budget["memory_mb"]):
-                    raise Conflict("supervisor host reservation full")
+                    raise ReservationFull("supervisor host reservation full")
             deadline = now + plan["deadline_seconds"]
             orphan_deadline = (min(deadline, now + policy["max_orphan_seconds"])
                                if policy["mode"] == "trusted_local"

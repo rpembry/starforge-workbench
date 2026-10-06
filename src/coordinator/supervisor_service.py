@@ -15,7 +15,8 @@ import struct
 import sys
 
 from .docker_runtime import DockerRuntime
-from .supervisor import Conflict, Fenced, OwnershipUnknown, RecoveryUncertain, Supervisor, WatchdogUncertain
+from .supervisor import (Conflict, Fenced, LaunchRejected, OwnershipUnknown,
+                         RecoveryUncertain, Supervisor, WatchdogUncertain)
 
 
 MAX_REQUEST = 131_072
@@ -76,7 +77,7 @@ class SupervisorService:
             request = json.loads(line)
             result = await asyncio.to_thread(self.dispatch, request, owner=owner)
             response = {"ok": True, "result": result}
-        except (ValueError, TypeError, KeyError, PermissionError, Conflict,
+        except (ValueError, TypeError, KeyError, PermissionError, Conflict, LaunchRejected,
                 OwnershipUnknown, asyncio.TimeoutError, asyncio.IncompleteReadError,
                 asyncio.LimitOverrunError) as exc:
             response = {"ok": False, "error": type(exc).__name__}

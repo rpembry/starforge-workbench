@@ -93,6 +93,7 @@ class Dispatcher:
         self.lease: dict | None = None
         self.renew_at = 0.0
         self.last_error: str | None = None
+        self.last_problem: dict | None = None
 
     def _lease(self):
         if self.lease is None:
@@ -121,7 +122,7 @@ class Dispatcher:
                     item.get("incarnation") == attempt["incarnation"] and
                     item.get("plan") == self._plan(job))
 
-    def _observe(self, job: dict, item: dict):
+    def _observe(self, job: dict, item: dict, *, terminal_reason: str | None = None):
         if not self._owned(job, item):
             raise Conflict("supervisor attempt identity mismatch")
         state = item["state"]
@@ -176,7 +177,8 @@ class Dispatcher:
             return self.store.record_no_start(
                 job["id"], attempt_id=item["id"], incarnation=item["incarnation"],
                 observation_seq=evidence["observation_seq"],
-                supervisor_id=evidence["supervisor_id"], reason=no_start_reason)
+                supervisor_id=evidence["supervisor_id"], reason=no_start_reason,
+                terminal_reason=terminal_reason)
         if (job["visibility"] == "fresh" and attempt["phase"] == state and
                 (state == "running" or evidence is None and job["phase"] == "finalizing")):
             return job
@@ -196,6 +198,8 @@ class Dispatcher:
         if not attempt_id:
             return
         if op["kind"] in {"admit", "retry"}:
+            terminal_reason = ("launch_rejected" if json.loads(op["response"]).get("launch_rejected")
+                               else None)
             if job["intent"] == "cancel":
                 # Canonical launch op ID creates a durable no-start tombstone or
                 # stops the exact existing runtime. Delayed launch cannot win.
@@ -212,16 +216,32 @@ class Dispatcher:
             except ControlError as exc:
                 if exc.code != "KeyError":
                     raise
-                item = self.control.call("launch", plan=self._plan(job),
-                                         controller=self.controller,
-                                         generation=self.lease["generation"],
-                                         operation_id=op["id"])
+                try:
+                    item = self.control.call("launch", plan=self._plan(job),
+                                             controller=self.controller,
+                                             generation=self.lease["generation"],
+                                             operation_id=op["id"])
+                except ControlError as launch_error:
+                    if launch_error.code != "LaunchRejected":
+                        raise
+                    self.store.note_launch_rejection(op["id"])
+                    item = self.control.call("abandon", plan=self._plan(job),
+                                             controller=self.controller,
+                                             generation=self.lease["generation"],
+                                             operation_id=op["id"])
+                    observed = self._observe(job, item, terminal_reason="launch_rejected")
+                    if item["state"] == "stopped" and observed["visibility"] == "fresh":
+                        self.store.set_command_status(op["id"], "confirmed")
+                        self.last_problem = {"job_id": job["id"], "code": "launch_rejected"}
+                    return
             if not self._owned(job, item):
                 raise Conflict("supervisor attempt identity mismatch")
             item = self.control.call("reconcile", attempt_id=attempt_id,
                                      controller=self.controller,
                                      generation=self.lease["generation"])
-            observed = self._observe(job, item)
+            observed = self._observe(job, item, terminal_reason=terminal_reason)
+            if observed["reason"] == "launch_rejected":
+                self.last_problem = {"job_id": job["id"], "code": "launch_rejected"}
             if item["state"] in {"running", "stopped"} and observed["visibility"] == "fresh":
                 self.store.set_command_status(op["id"], "confirmed")
         elif op["kind"] == "reattach":
@@ -300,10 +320,23 @@ class Dispatcher:
             try:
                 self._command(op)
                 processed += 1
-            except (ControlError, Unavailable) as exc:
+            except (ControlError, Conflict) as exc:
+                if isinstance(exc, ControlError) and exc.code == "ReservationFull":
+                    continue  # Valid plan; a later cancel or stop can free capacity.
+                if isinstance(exc, Conflict) or exc.code == "Conflict":
+                    self.store.quarantine_command(op["id"])
+                    self.last_problem = {"job_id": op["job_id"], "code": "identity_conflict"}
+                    processed += 1
+                    continue
                 if isinstance(exc, ControlError) and exc.code == "Fenced":
                     self.lease = None
                 self.store.set_command_status(op["id"], "unknown")
+                self.last_problem = {"job_id": op["job_id"], "code": exc.code}
+                self._mark_active_unknown()
+                raise
+            except Unavailable:
+                self.store.set_command_status(op["id"], "unknown")
+                self.last_problem = {"job_id": op["job_id"], "code": "unavailable"}
                 self._mark_active_unknown()
                 raise
         # Reconcile already owned active attempts too; no event is emitted for
@@ -318,12 +351,28 @@ class Dispatcher:
             except ControlError as exc:
                 if exc.code == "KeyError":
                     continue  # prelaunch intent; never invent runtime evidence
+                if exc.code == "Conflict":
+                    self.store.mark_identity_conflict(job["id"])
+                    self.last_problem = {"job_id": job["id"], "code": "identity_conflict"}
+                    continue
                 self._mark_active_unknown()
                 raise
             except Unavailable:
                 self._mark_active_unknown()
                 raise
-            self._observe(job, item)
+            try:
+                self._observe(job, item)
+            except Conflict:
+                self.store.mark_identity_conflict(job["id"])
+                self.last_problem = {"job_id": job["id"], "code": "identity_conflict"}
+                continue
+            except ControlError as exc:
+                if exc.code != "Conflict":
+                    self._mark_active_unknown()
+                    raise
+                self.store.mark_identity_conflict(job["id"])
+                self.last_problem = {"job_id": job["id"], "code": "identity_conflict"}
+                continue
         admitted = self.store.admit_next(principal="coordinator-dispatch",
                                          key=uuid.uuid4().hex)
         return {"processed": processed, "admitted": admitted["id"] if admitted else None}
@@ -337,7 +386,8 @@ class SupervisorEvidence:
 
     def health(self) -> dict:
         return {"state": "unavailable" if self.dispatcher.last_error else
-                "ready" if self.dispatcher.lease else "unknown"}
+                "ready" if self.dispatcher.lease else "unknown",
+                "last_problem": self.dispatcher.last_problem}
 
     def capabilities(self) -> dict:
         return {"worker_types": sorted(self.dispatcher.store.policy.worker_types),
