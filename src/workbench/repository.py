@@ -93,6 +93,21 @@ def _migrate_utc_instants(db):
         raise
 
 
+def _migrate_instruction_renewals(db):
+    """Old active claims are uncertain on expiry; their renewal history is unknown."""
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        columns = {row['name'] for row in db.execute('PRAGMA table_info(instructions)')}
+        if 'renewed_at' not in columns:
+            db.execute('ALTER TABLE instructions ADD COLUMN renewed_at TEXT')
+        db.execute("UPDATE instructions SET renewed_at=updated_at WHERE state='claimed' AND renewed_at IS NULL")
+        db.execute('INSERT INTO schema_migrations VALUES (?, ?)', (15, now()))
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+
+
 class SQLiteRepository:
     def __init__(self, path: Path):
         self.path = path
@@ -114,7 +129,7 @@ class SQLiteRepository:
                 db.execute('INSERT INTO schema_migrations VALUES (?, ?)', (1, now()))
                 db.commit()
             versions = [r[0] for r in db.execute('SELECT version FROM schema_migrations ORDER BY version')]
-            supported = [list(range(1, version + 1)) for version in range(1, 15)]
+            supported = [list(range(1, version + 1)) for version in range(1, 16)]
             if versions not in supported:
                 raise RuntimeError('Unsupported database schema version')
             for version, filename in [(2, '002_collectors.sql'), (3, '003_imports.sql'),
@@ -135,6 +150,8 @@ class SQLiteRepository:
                 db.executescript('BEGIN IMMEDIATE;\n'+migration.read_text())
                 db.execute('INSERT INTO schema_migrations VALUES (?, ?)', (14, now()))
                 db.commit()
+            if 15 not in versions:
+                _migrate_instruction_renewals(db)
 
     @contextmanager
     def connection(self):
@@ -431,7 +448,7 @@ class SQLiteRepository:
     @staticmethod
     def _instruction_public(row, include_text=True):
         row = dict(row)
-        for key in ('operator_principal', 'lease_token_hash', 'claim_owner'):
+        for key in ('operator_principal', 'lease_token_hash', 'claim_owner', 'renewed_at'):
             row.pop(key, None)
         if not include_text:
             row.pop('instruction_text', None)
@@ -457,14 +474,22 @@ class SQLiteRepository:
             SQLiteRepository._instruction_audit(db, row['id'], 'workbench-server',
                                                 row['registered_session_id'], 'expired',
                                                 'instruction_expired', stamp)
-        abandoned = db.execute("SELECT id,registered_session_id FROM instructions WHERE state='claimed' AND lease_until<=?",
+        abandoned = db.execute("SELECT id,registered_session_id,renewed_at,expires_at FROM instructions WHERE state='claimed' AND lease_until<=?",
                                (stamp,)).fetchall()
         for row in abandoned:
-            db.execute("UPDATE instructions SET state='uncertain',updated_at=?,terminal_at=?,reason_code='lease_expired',lease_until=NULL WHERE id=?",
-                       (stamp, stamp, row['id']))
+            if row['renewed_at'] is None:
+                expired = row['expires_at'] <= stamp
+                state = 'expired' if expired else 'queued'
+                reason = 'instruction_expired' if expired else 'lease_expired_before_attempt'
+                db.execute("""UPDATE instructions SET state=?,updated_at=?,terminal_at=?,reason_code=?,
+                    claimed_at=NULL,renewed_at=NULL,lease_until=NULL,lease_token_hash=NULL,claim_owner=NULL
+                    WHERE id=?""", (state, stamp, stamp if expired else None, reason, row['id']))
+            else:
+                state, reason = 'uncertain', 'lease_expired'
+                db.execute("UPDATE instructions SET state='uncertain',updated_at=?,terminal_at=?,reason_code='lease_expired',lease_until=NULL WHERE id=?",
+                           (stamp, stamp, row['id']))
             SQLiteRepository._instruction_audit(db, row['id'], 'workbench-server',
-                                                row['registered_session_id'], 'uncertain',
-                                                'lease_expired', stamp)
+                                                row['registered_session_id'], state, reason, stamp)
         response_cutoff = (datetime.fromisoformat(stamp) -
                            timedelta(seconds=INSTRUCTION_RESPONSE_WINDOW_SECONDS)).isoformat()
         unobserved = db.execute("""SELECT id,registered_session_id FROM instructions
@@ -611,7 +636,7 @@ class SQLiteRepository:
             lease_until = min(current + timedelta(seconds=INSTRUCTION_LEASE_SECONDS),
                               datetime.fromisoformat(row['expires_at'])).isoformat(timespec='microseconds')
             changed = db.execute('''UPDATE instructions SET state='claimed',claimed_at=?,lease_until=?,
-                lease_token_hash=?,claim_owner=?,attempt_count=attempt_count+1,updated_at=?,reason_code='worker_claimed'
+                lease_token_hash=?,claim_owner=?,attempt_count=attempt_count+1,updated_at=?,renewed_at=NULL,reason_code='worker_claimed'
                 WHERE id=? AND state='queued' ''',
                 (stamp, lease_until, hashlib.sha256(token.encode()).hexdigest(), principal, stamp, row['id']))
             if changed.rowcount != 1:
@@ -659,8 +684,8 @@ class SQLiteRepository:
                 raise Problem(409, 'invalid_transition', 'Only an active claim can be renewed')
             lease_until = min(current + timedelta(seconds=INSTRUCTION_LEASE_SECONDS),
                               datetime.fromisoformat(row['expires_at'])).isoformat(timespec='microseconds')
-            db.execute('UPDATE instructions SET lease_until=?,updated_at=? WHERE id=?',
-                       (lease_until, stamp, identity))
+            db.execute('UPDATE instructions SET lease_until=?,updated_at=?,renewed_at=? WHERE id=?',
+                       (lease_until, stamp, stamp, identity))
             renewed = db.execute('SELECT * FROM instructions WHERE id=?', (identity,)).fetchone()
             db.commit()
             return self._instruction_public(renewed, include_text=False)
@@ -685,7 +710,7 @@ class SQLiteRepository:
                     raise Problem(409, 'invalid_transition', 'Result requires an active claim')
                 if outcome == 'retryable':
                     update = dict(state='queued', claimed_at=None, lease_until=None, lease_token_hash=None,
-                                  claim_owner=None, updated_at=stamp, reason_code=reason)
+                                  claim_owner=None, renewed_at=None, updated_at=stamp, reason_code=reason)
                 elif outcome == 'received':
                     update = dict(state='received', received_at=stamp, lease_until=None,
                                   updated_at=stamp, reason_code=reason)

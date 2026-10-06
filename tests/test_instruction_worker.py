@@ -90,6 +90,8 @@ class FakeAdapter:
         self.response_evidence = []
         self.marked = []
         self.previews = {}
+        self.recorded = False
+        self.deliver_error = None
 
     def pending_responses(self):
         return self.response_evidence
@@ -102,7 +104,12 @@ class FakeAdapter:
 
     def deliver(self, instruction_id, session_id, text, lease_token):
         self.calls.append((instruction_id, session_id, text, lease_token))
+        if self.deliver_error is not None:
+            raise self.deliver_error
         return DeliveryResult(self.state, 'synthetic', 'msg_synthetic')
+
+    def attempt_recorded(self, instruction_id):
+        return self.recorded
 
 
 def config(tmp_path, enabled=True):
@@ -273,6 +280,35 @@ def test_renew_failure_and_ambiguous_delivery_never_retry_provider(tmp_path):
     assert len(adapter.calls) == 1
     assert api.calls[-1][1]['outcome'] == 'uncertain'
     assert api.calls[-1][1]['reason_code'] == 'delivery_ambiguous'
+
+
+def test_local_failure_before_renew_is_retryable_without_adapter_call(tmp_path):
+    api, adapter = FakeAPI(), FakeAdapter()
+    seen = 0
+
+    def resolver(*args):
+        nonlocal seen
+        seen += 1
+        if seen == 2:
+            raise OSError('synthetic local preflight failure')
+        return SESSION
+
+    result = cycle(api, config(tmp_path), adapter, resolver)
+    assert result['reported'] == 1 and not adapter.calls
+    assert api.calls[-1][1]['outcome'] == 'retryable'
+    assert api.calls[-1][1]['reason_code'] == 'local_preflight_failed'
+
+
+def test_delivery_exception_uses_durable_attempt_boundary(tmp_path):
+    for recorded, expected in ((False, 'retryable'), (True, 'uncertain')):
+        api, adapter = FakeAPI(), FakeAdapter()
+        adapter.recorded = recorded
+        adapter.deliver_error = RuntimeError('synthetic adapter interruption')
+        result = cycle(api, config(tmp_path), adapter, lambda *args: SESSION)
+        assert result['reported'] == 1 and len(adapter.calls) == 1
+        assert api.calls[-1][1]['outcome'] == expected
+        assert api.calls[-1][1]['reason_code'] == (
+            'worker_interrupted' if recorded else 'local_preflight_failed')
 
 
 def test_changed_claim_target_fails_closed(tmp_path):

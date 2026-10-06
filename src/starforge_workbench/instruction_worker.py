@@ -132,20 +132,29 @@ def cycle(api, config, adapter, resolver=resolve_opencode_registration):
         try:
             confirmed = resolver(registered_id, config['manifest'], state_file,
                                  config['launcher_state'], selected)
+        except (OSError, ValueError, RuntimeError, KeyError):
+            outcome, reason = 'retryable', 'local_preflight_failed'
+        else:
             if confirmed != exact:
                 outcome, reason = 'failed', 'session_missing'
             else:
                 renewed = _post(api, f'/api/instructions/{instruction_id}/renew',
                                 {'lease_token': token})
                 if renewed is None or renewed.status_code != 200:
-                    # No transmission without a confirmed live lease.
+                    # No transmission without a confirmed live lease. The
+                    # server requeues an unrenewed claim when its lease lapses.
                     counts['ambiguous'] += 1
                     continue
-                result = adapter.deliver(instruction_id, exact, text, token)
-                outcome, reason = _result_outcome(result)
-        except (OSError, ValueError, RuntimeError, KeyError):
-            # After a claim, unknown local failure must not become another POST.
-            outcome, reason = 'uncertain', 'worker_interrupted'
+                try:
+                    result = adapter.deliver(instruction_id, exact, text, token)
+                    outcome, reason = _result_outcome(result)
+                except (OSError, ValueError, RuntimeError, KeyError):
+                    try:
+                        receipt_exists = adapter.attempt_recorded(instruction_id)
+                    except (AttributeError, OSError, ValueError, RuntimeError):
+                        receipt_exists = True  # Missing/unreadable proof fails closed.
+                    outcome, reason = (('uncertain', 'worker_interrupted') if receipt_exists else
+                                       ('retryable', 'local_preflight_failed'))
         report = _post(api, f'/api/instructions/{instruction_id}/results', {
             'lease_token': token, 'outcome': outcome, 'reason_code': reason})
         if report is not None and report.status_code == 200:

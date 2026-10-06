@@ -316,7 +316,7 @@ class InstructionLeaseIn(Model):
 
 class InstructionResultIn(InstructionLeaseIn):
     outcome: Literal['retryable', 'received', 'responded', 'failed', 'uncertain']
-    reason_code: Literal['provider_unavailable', 'session_busy', 'provider_accepted',
+    reason_code: Literal['provider_unavailable', 'session_busy', 'local_preflight_failed', 'provider_accepted',
                          'provider_response_error', 'provider_response_without_error',
                          'provider_rejected', 'session_missing', 'unsupported_provider',
                          'acknowledgement_lost', 'delivery_ambiguous', 'worker_interrupted']
@@ -324,7 +324,7 @@ class InstructionResultIn(InstructionLeaseIn):
     @model_validator(mode='after')
     def matching_reason(self):
         valid = {
-            'retryable': {'provider_unavailable', 'session_busy'},
+            'retryable': {'provider_unavailable', 'session_busy', 'local_preflight_failed'},
             'received': {'provider_accepted'},
             'responded': {'provider_response_error', 'provider_response_without_error'},
             'failed': {'provider_rejected', 'session_missing', 'unsupported_provider'},
