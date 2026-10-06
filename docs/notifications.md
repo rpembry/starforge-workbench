@@ -134,8 +134,10 @@ no existing service needs restarting. `watch` rereads configuration each poll.
   synchronized. Duplicate identical IDs coalesce; contradictory duplicates fail
   closed rather than guessing.
 - A selected provider item with a valid ID but malformed evidence is quarantined
-  individually; `once`, `watch`, and `preview` report `quarantined_items`. Other
-  categories can still notify. Its prior delivery occurrence is retained so an
+  individually; `once`, `watch`, and `preview` report `quarantined_items`. An
+  undelivered quarantined item remains pending and reports `quarantined_pending`;
+  `once` exits nonzero until valid evidence returns. Other categories can still
+  notify. Its prior delivery occurrence is retained so an
   invalid observation does not rearm an acknowledged alert. Disabled provider
   categories are not validated. Provider observation times up to five minutes
   ahead of the snapshot are accepted, matching API ingestion tolerance. Invalid

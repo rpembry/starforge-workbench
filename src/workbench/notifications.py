@@ -491,26 +491,35 @@ def poll(config, snapshot, sender=None, current=None, preview=False, retry_pendi
     if preview:
         state = read_state(folder, config)
         pending = reconcile(state, items, config, stamp, quarantined)
+        quarantined_pending = sum(key not in state.entries or not state.entries[key].delivered
+                                  for key in quarantined)
+        if quarantined_pending:
+            report['quarantined_pending'] = quarantined_pending
+        pending_count = len(pending) + quarantined_pending
         eligible = sum(not state.entries[key].delivered and not state.entries[key].blocked and
                        state.entries[key].failures < config.max_attempts for key in items)
         deferred = quiet_hours(config, current) if eligible and not state.blocked else None
         if state.blocked:
             delivery = 'blocked_unknown'
         elif not pending:
-            delivery = 'none'
+            delivery = 'quarantined' if quarantined_pending else 'none'
         elif not eligible:
             delivery = 'blocked'
         elif deferred:
             delivery = 'deferred_quiet_hours'
         else:
             delivery = 'backoff' if current < state.not_before else 'eligible'
-        return dict(status='preview', pending=len(pending), blocked=state.blocked, **report,
+        return dict(status='preview', pending=pending_count, blocked=state.blocked, **report,
                     attempt=attempt_view(state), blocked_items=sum(e.blocked for e in state.entries.values() if not e.delivered), not_before=state.not_before,
                     quiet_hours=deferred, delivery=delivery,
                     payload=message(pending, config) if pending else None)
     with locked_state(folder):
         state = read_state(folder, config)
         reconcile(state, items, config, stamp, quarantined)
+        quarantined_pending = sum(key not in state.entries or not state.entries[key].delivered
+                                  for key in quarantined)
+        if quarantined_pending:
+            report['quarantined_pending'] = quarantined_pending
         if state.blocked:
             save_state(folder, state)
             return dict(status='unknown', attempt=attempt_view(state), **report)
@@ -519,19 +528,21 @@ def poll(config, snapshot, sender=None, current=None, preview=False, retry_pendi
                 if not entry.delivered:
                     entry.blocked, entry.failures = False, 0
         pending = {key: item for key, item in items.items() if not state.entries[key].delivered}
+        pending_count = len(pending) + quarantined_pending
         eligible = {key: item for key, item in pending.items()
                     if not state.entries[key].blocked and state.entries[key].failures < config.max_attempts}
         if not eligible:
             save_state(folder, state)
-            return dict(status='blocked' if pending else 'quiet', pending=len(pending), **report)
+            return dict(status='blocked' if pending else 'quarantined' if quarantined_pending else 'quiet',
+                        pending=pending_count, **report)
         deferred = quiet_hours(config, current)
         if deferred:
             save_state(folder, state)
-            return dict(status='deferred', reason='quiet_hours', pending=len(pending),
+            return dict(status='deferred', reason='quiet_hours', pending=pending_count,
                         eligible=len(eligible), quiet_hours=deferred, **report)
         if current < state.not_before:
             save_state(folder, state)
-            return dict(status='backoff', pending=len(pending), not_before=state.not_before, **report)
+            return dict(status='backoff', pending=pending_count, not_before=state.not_before, **report)
         payload = message(list(eligible.values()), config)
         state.attempt = Attempt(outcome='sending', members={key: state.entries[key].model_copy(deep=True) for key in eligible})
         failures = max(state.entries[key].failures for key in eligible)
@@ -549,7 +560,7 @@ def poll(config, snapshot, sender=None, current=None, preview=False, retry_pendi
                     entry.blocked = not exc.retryable or entry.failures >= config.max_attempts
             save_state(folder, state)
             return dict(status='unknown' if exc.unknown else ('blocked' if all(state.entries[k].blocked for k in eligible) else 'retry_pending'),
-                        pending=len(pending), error=exc.code, attempt=attempt_view(state), **report)
+                        pending=pending_count, error=exc.code, attempt=attempt_view(state), **report)
         for key in eligible:
             entry = state.entries[key]
             entry.delivered, entry.outcome = True, 'delivered'
@@ -558,7 +569,8 @@ def poll(config, snapshot, sender=None, current=None, preview=False, retry_pendi
         state.delivered_at = current
         state.not_before = current+config.min_interval_seconds
         save_state(folder, state)
-        return dict(status='delivered', count=len(eligible), **report)
+        return dict(status='delivered', count=len(eligible),
+                    **({'pending': quarantined_pending} if quarantined_pending else {}), **report)
 
 
 def fetch_snapshot(config):
@@ -625,7 +637,7 @@ def main(argv=None):
             result = {'status': 'error', 'error': exc.code if isinstance(exc, NotificationError) else 'notification_local_error'}
             print(json.dumps(result), flush=True)
         if args.command != 'watch':
-            return 2 if result['status'] in {'error', 'blocked', 'retry_pending', 'unknown'} else 0
+            return 2 if result['status'] in {'error', 'blocked', 'retry_pending', 'unknown', 'quarantined'} or result.get('quarantined_pending', 0) else 0
         time.sleep(config.poll_seconds if 'config' in locals() else 30)
 
 

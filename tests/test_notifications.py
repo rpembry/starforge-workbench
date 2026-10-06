@@ -247,8 +247,34 @@ def test_invalid_provider_item_is_quarantined_without_blocking_collector_alert(c
     assert 'collector visibility' in sender.call_args.args[1]['message']
     assert 'provider error' not in sender.call_args.args[1]['message']
     preview = tick(config, [malformed], sender, NOW+1, preview=True)
-    assert preview['quarantined_items'] == 1 and preview['pending'] == 0
+    assert preview['quarantined_items'] == 1 and preview['pending'] == 1
+    assert preview['delivery'] == 'quarantined'
     assert sender.call_count == 1
+
+
+def test_undelivered_quarantined_provider_remains_visibly_pending(config, monkeypatch,
+                                                                   tmp_path, capsys):
+    original = provider_item('provider_error')
+    failure = Mock(side_effect=n.NotificationError('delivery_not_submitted', retryable=True))
+    assert tick(config, [original], failure)['status'] == 'retry_pending'
+    malformed = copy.deepcopy(original)
+    malformed['evidence'] = 'invalid'
+    sender = Mock(side_effect=AssertionError('quarantined item must not deliver'))
+    result = tick(config, [malformed], sender, NOW+1)
+    assert result['status'] == 'quarantined'
+    assert result['pending'] == result['quarantined_pending'] == 1
+    assert result['quarantined_items'] == 1
+    preview = tick(config, [malformed], sender, NOW+1, preview=True)
+    assert preview['pending'] == 1 and preview['delivery'] == 'quarantined'
+    config_path = tmp_path / 'notifier.json'
+    private_write(config_path, config.model_dump_json())
+    monkeypatch.setattr(n, 'fetch_snapshot', lambda settings: snapshot([malformed], NOW+1))
+    monkeypatch.setattr(n.time, 'time', lambda: NOW+1)
+    assert n.main(['once', '--config', str(config_path)]) == 2
+    assert json.loads(capsys.readouterr().out)['quarantined_pending'] == 1
+    assert tick(config, [provider_item('provider_error', sequence=2, observed=NOW+2)],
+                Mock(), NOW+31)['status'] == 'delivered'
+    sender.assert_not_called()
 
 
 def test_disabled_provider_category_is_not_validated(config):
