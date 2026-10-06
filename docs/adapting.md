@@ -79,6 +79,19 @@ uv run wb-api GET /openapi.json --url http://127.0.0.1:8027
 uv run wb-api GET /api/attention --url http://127.0.0.1:8027
 ```
 
+Keep the two-token `WB_CREDENTIALS_FILE` on the API server. For a separate
+collector process, provision only its collector token in a private, owned,
+mode-0600 client file such as:
+
+```json
+{"url":"http://127.0.0.1:8027","role":"collector","token":"<the collector token>"}
+```
+
+Pass that path as the collector's `--credentials-file` (or `WB_CLIENT_CONFIG`).
+The client refuses to use this file for operator calls or another URL. Existing
+two-token server files still work with local clients for compatibility, but do
+not copy the server file to a collector host.
+
 Local mode authenticates with bearer headers. An ordinary browser navigation does not automatically supply those headers. The deployed browser flow is designed around Cloudflare Access; adapt its configuration before expecting interactive browser login.
 
 In Cloudflare mode, set `WB_AUTH_MODE=cloudflare`, `WB_ACCESS_CONFIG` to a file containing `issuer`, `audience`, `browser_emails`, and `service_roles`, and `WB_PUBLIC_ORIGIN` to your HTTPS application origin. `service_roles` maps verified service identities to `operator` or `collector`. Inspect `CloudflareAuth` and its tests for the exact schema. Cloudflare machine client configuration includes its HTTPS `url`, `auth_type: cloudflare`, and role-specific `client_id`/`client_secret` values. Keep those files outside Git.
