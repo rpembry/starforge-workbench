@@ -48,6 +48,17 @@ def test_command_bounds_and_stderr():
         w.command([sys.executable, '-c', 'import time;time.sleep(10)'], timeout=.05)
 
 
+def test_git_ignores_machine_filters_but_keeps_local_filter_visible(repo, tmp_path, monkeypatch):
+    home = tmp_path / 'hostile-home'
+    home.mkdir()
+    (home / '.gitconfig').write_text('[filter "machine"]\n\tclean = cat\n')
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(home))
+    assert b'filter.machine' not in w.git(repo, 'config', '--name-only', '--list')
+    subprocess.run(['git', '-C', str(repo), 'config', 'filter.local.clean', 'cat'], check=True)
+    assert b'filter.local.clean' in w.git(repo, 'config', '--name-only', '--list')
+
+
 @pytest.mark.parametrize('name', ['../secret', '/etc/passwd', '.git', 'x/.git/config', 'a\x00b'])
 @pytest.mark.skipif(os.getuid() == 0, reason='Worker rejects root caller before validating artifact paths')
 def test_reject_artifact_escape_before_runtime(name, repo, state):

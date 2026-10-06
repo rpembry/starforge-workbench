@@ -85,13 +85,14 @@ def cycle(api, config, adapter, resolver=resolve_opencode_registration):
         if report is not None and report.status_code == 200:
             adapter.mark_response(evidence.instruction_id, 'reported')
             counts['responses_reported'] += 1
-        elif report is not None and report.status_code in (409, 422):
+        elif report is not None and report.status_code in (404, 409, 422):
             # The server rejected the durable lease/state pairing. Repeating
             # cannot make that transition valid and must not loop forever.
             adapter.mark_response(evidence.instruction_id, 'unreportable')
             counts['ambiguous'] += 1
         else:
             counts['ambiguous'] += 1
+    counts['ambiguous'] += getattr(adapter, 'degraded_receipts', 0)
     state_file = Path(config['registration_state'])
     if not state_file.is_file():
         return counts

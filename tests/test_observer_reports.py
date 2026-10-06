@@ -75,7 +75,7 @@ def test_malformed_timestamp_cannot_starve_same_or_later_files_after_restart(tmp
         state=json.loads(path.read_text())  # A process restart retains diagnostic evidence.
         with (sessions/'b.jsonl').open('ab') as f:f.write(record('Verified later activity.','2026-09-12T11:00:00Z'))
         again=observe(api,sessions,state,'2026-09-01T00:00:00Z',set())
-        assert again['submitted']==1 and again['malformed']==1
+        assert again['submitted']==1 and again['malformed']==0
         assert observe(api,sessions,state,'2026-09-01T00:00:00Z',set())['submitted']==0
     assert len({e['source_id'] for e in calls})==3
     problem=next(iter(state['_problems'].values()))
@@ -105,8 +105,25 @@ def test_complete_oversize_record_is_quarantined_without_starving_later_answers(
         state=json.loads(snapshot.read_text())
         with path.open('ab') as stream:stream.write(record('Verified another answer.','2026-09-12T11:00:00Z'))
         again=observe(api,sessions,state,'2026-09-01T00:00:00Z',set())
-        assert again['submitted']==1 and again['malformed']==1
+        assert again['submitted']==1 and again['malformed']==0
     assert len(calls)==2 and all('compacted' not in item['summary'] for item in calls)
+
+
+def test_observer_diagnostics_and_references_are_bounded(tmp_path):
+    from datetime import timedelta
+    from workbench.codex_observer import MAX_DIAGNOSTICS
+    path = tmp_path / 'fixture.jsonl'
+    start = datetime(2026, 9, 12, 10, tzinfo=timezone.utc)
+    path.write_bytes(b''.join(record('Added synthetic activity.',
+        (start + timedelta(seconds=number)).isoformat()) for number in range(300)) +
+        b''.join(record('Fixed malformed fixture.', f'invalid-{number}') for number in range(300)))
+    state = {}
+    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(201)),
+                      base_url='https://fixture.example') as api:
+        result = observe(api, tmp_path, state, '2026-09-01T00:00:00Z', set())
+        assert result['submitted'] == result['malformed'] == 300
+        assert len(state['_references']) == len(state['_problems']) == MAX_DIAGNOSTICS
+        assert observe(api, tmp_path, state, '2026-09-01T00:00:00Z', set())['malformed'] == 0
 
 
 def test_incomplete_oversize_record_remains_replayable(tmp_path, monkeypatch):

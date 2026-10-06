@@ -265,14 +265,23 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
             return {'context': context, 'dry_run': dry_run, 'status': 'denied',
                     'message': 'Set WB_MCP_ALLOW_RESTORE=1 for a deliberate live restoration'}
         if restore is None:
-            from starforge_workbench.cli import main as launcher
-            args = ['--manifest', str(manifest_path())]
             if dry_run:
-                args.append('--dry-run')
-            launcher([*args, 'up', context, '--headless'])
+                from starforge_workbench.cli import launcher_plan, load
+                selected = [item for item in load(manifest_path())['contexts'] if item['id'] == context]
+                if not selected:
+                    return {'context': context, 'dry_run': True, 'status': 'denied',
+                            'message': 'Unknown Workbench context'}
+                plan = launcher_plan(selected)
+            else:
+                from starforge_workbench.cli import main as launcher
+                launcher(['--manifest', str(manifest_path()), 'up', context, '--headless'])
         else:
-            restore(context, dry_run)
-        return {'context': context, 'dry_run': dry_run, 'status': 'previewed' if dry_run else 'restore_requested'}
+            plan = restore(context, dry_run)
+        result = {'context': context, 'dry_run': dry_run,
+                  'status': 'previewed' if dry_run else 'restore_requested'}
+        if dry_run and plan is not None:
+            result['plan'] = plan
+        return result
 
     if selected_flow_profile:
         register_flow_tools(server, profile=selected_flow_profile, allow_write=selected_flow_write,

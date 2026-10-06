@@ -109,7 +109,10 @@ def lock(name, blocking=True):
     secure_dir(STATE)
     fd = os.open(STATE/(name+'.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            raise ValueError(f'Workbench lock is busy: {name}') from None
         yield
     finally:
         os.close(fd)
@@ -337,7 +340,7 @@ def open_tab(c, manifest):
     command = [str(SELF), '--manifest', str(manifest), '_attach', c['id']]
     path = STATE/'terminal.json'
     owner = read_state(path)
-    if owner and birth(owner['pid']) == owner['birth']:
+    if owner and owner.get('birth') is not None and birth(owner['pid']) == owner['birth']:
         # Address the exact standalone process, never the active desktop application.
         bridge(owner['pid'], 'tab', command=shlex.join(command), title=c['title'], cwd=str(cwd(c)))
     else:
@@ -357,7 +360,11 @@ def open_tab(c, manifest):
                               '--title='+c['title'], '--working-directory='+str(cwd(c))],
                              env=terminal_env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True)
-        atomic(path, {'pid': p.pid, 'birth': birth(p.pid)})
+        started_at = birth(p.pid)
+        if started_at is not None:
+            atomic(path, {'pid': p.pid, 'birth': started_at})
+        else:
+            path.unlink(missing_ok=True)
         for _ in range(50):
             try:
                 bridge(p.pid)
@@ -672,8 +679,8 @@ def provider_argv(c, choice):
         raise ValueError('This context does not permit conversation resume')
     if c['provider'] == 'codex':
         base = [exe, '-c', 'check_for_update_on_startup=false', '-C', str(cwd(c)), '-s', 'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write', '-a', 'on-request']
-        for p in c['additional_cwds']:
-            base += ['--add-dir', str(Path(p).expanduser().resolve())]
+        for directory in directories(c)[1:]:
+            base += ['--add-dir', str(directory)]
         if choice == 'picker':
             return base+['resume', '--all']
         if choice == 'resume':
@@ -790,6 +797,17 @@ def titles_main(argv=None):
     return result
 
 
+def launcher_plan(contexts):
+    """Return the same read-only context plan shown by the CLI dry run."""
+    return [{'id': c['id'], 'title': c['title'], 'cwd': str(cwd(c)) if c['cwd'] else None,
+             'additional_cwds': c['additional_cwds'], 'provider': c['provider'],
+             'resume_policy': c['resume_policy'], 'enabled': c['enabled'],
+             'action': ('resume saved conversation or create and remember' if c['provider'] == 'codex'
+                        else ('start interactive qwen3:8b' if c['provider'] == 'ollama'
+                              else 'resume saved conversation or open provider directly'))
+                        if c['enabled'] else 'disabled'} for c in contexts]
+
+
 def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv and raw_argv[0] == 'titles':
@@ -826,9 +844,7 @@ def main(argv=None):
     if args.command in ['attach','_attach','_menu','bind'] and len(args.contexts) != 1:
         raise ValueError('Exactly one context ID required')
     if args.dry_run or args.command in ['list','plan']:
-        print(json.dumps([{'id':c['id'],'title':c['title'],'cwd':str(cwd(c)) if c['cwd'] else None,
-                           'additional_cwds':c['additional_cwds'],'provider':c['provider'], 'resume_policy':c['resume_policy'],
-                           'enabled':c['enabled'],'action':('resume saved conversation or create and remember' if c['provider'] == 'codex' else ('start interactive qwen3:8b' if c['provider'] == 'ollama' else 'resume saved conversation or open provider directly')) if c['enabled'] else 'disabled'} for c in selected], indent=2))
+        print(json.dumps(launcher_plan(selected), indent=2))
         return
     if args.command == 'doctor':
         problems = []

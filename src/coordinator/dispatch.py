@@ -278,7 +278,7 @@ class Dispatcher:
             raise Conflict("unsupported pending coordinator command")
 
     def _mark_active_unknown(self):
-        for job in self.store.list(1000):
+        for job in self.store.list_active():
             if job["phase"] in {"active", "finalizing"} and job["visibility"] != "unknown":
                 self.store.mark_visibility_unknown(job["id"], expected_version=job["version"])
 
@@ -308,7 +308,7 @@ class Dispatcher:
                 raise
         # Reconcile already owned active attempts too; no event is emitted for
         # an unchanged healthy observation. Unknown visibility is not failure.
-        for job in self.store.list(1000):
+        for job in self.store.list_active():
             if job["phase"] not in {"active", "finalizing"} or not job["attempt_id"]:
                 continue
             try:

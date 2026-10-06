@@ -38,8 +38,8 @@ class Auth:
 
     def authenticate(self, request: Request):
         header = request.headers.get('authorization', '')
-        if header.startswith('Bearer '):
-            token = header[7:]
+        scheme, separator, token = header.partition(' ')
+        if separator and scheme.casefold() == 'bearer':
             for role, expected in self.credentials.items():
                 if hmac.compare_digest(token, expected):
                     return Principal(role, role)

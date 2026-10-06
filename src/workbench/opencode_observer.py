@@ -24,33 +24,48 @@ ATTENTION_FIELDS = {
                      'incident_id', 'sequence', 'observed_at', 'reason', 'state', 'provenance'},
 }
 IDENTITY = re.compile(r'[A-Za-z0-9_.:-]{1,200}')
+MAX_DIAGNOSTICS = 256
+MAX_PENDING_MESSAGES = 1000
+PENDING_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+
+
+def _diagnostic(state, collection, digest, reason):
+    entries = state.setdefault(collection, {})
+    entries[digest] = reason
+    while len(entries) > MAX_DIAGNOSTICS:
+        entries.pop(next(iter(entries)))
 
 
 def scan(api, database, state):
     counts = dict(submitted=0, malformed=0, failed=0)
-    seen = state.setdefault('acknowledged', [])
-    known = set(seen)
+    diagnostics = state.get('diagnostics', {})
+    while len(diagnostics) > MAX_DIAGNOSTICS:
+        diagnostics.pop(next(iter(diagnostics)))
+    # The legacy acknowledged list is used once while moving to the cursor.
+    known = set(state.get('acknowledged', []))
+    pending = state.setdefault('pending_messages', {})
+    cursor = state.get('message_cursor', [state['cutoff_ms'] - 1, ''])
     # mode=ro does not create a missing database; no immutable flag, so WAL is visible.
     with sqlite3.connect(database.resolve().as_uri()+'?mode=ro', uri=True, timeout=2) as db:
-        rows = db.execute('''select m.id,m.session_id,m.data from message m join session s
-            on m.session_id=s.id where s.parent_id is null and m.time_created>=?
-            order by m.time_created,m.id''', (state['cutoff_ms'],))
-        for message_id, session_id, raw in rows:
+        def process(message_id, session_id, raw, created):
             source_id = hashlib.sha256(f'opencode:{session_id}:{message_id}'.encode()).hexdigest()
             if source_id in known:
-                continue
+                pending.pop(message_id, None)
+                return
             try:
                 message = json.loads(raw)
                 if not isinstance(message, dict):
                     raise ValueError('message shape')
                 if message.get('role') != 'assistant':
-                    continue
+                    pending.pop(message_id, None)
+                    return
                 stamp = message.get('time')
                 if not isinstance(stamp,dict):
                     raise ValueError('time shape')
                 completed = stamp.get('completed')
                 if completed is None:
-                    continue  # Streaming records are revisited until completed.
+                    pending[message_id] = {'session_id': session_id, 'time_created': created}
+                    return  # Streaming records are revisited until completed.
                 if isinstance(completed,bool) or not isinstance(completed,(int,float)):
                     raise ValueError('timestamp')
                 occurred = datetime.fromtimestamp(completed/1000,timezone.utc).isoformat()
@@ -65,9 +80,9 @@ def scan(api, database, state):
                         details[field]=value
             except (ValueError,TypeError,OverflowError,OSError):
                 counts['malformed']+=1
-                # Hash-only diagnostics remain local; bad records are retried, not discarded.
-                state.setdefault('diagnostics',{})[source_id]='invalid_metadata'
-                continue
+                _diagnostic(state, 'diagnostics', source_id, 'invalid_metadata')
+                pending[message_id] = {'session_id': session_id, 'time_created': created}
+                return
             try:
                 response=api.post('/api/events',json=dict(kind='observation',
                     summary='OpenCode recorded assistant activity',details=json.dumps(details,sort_keys=True),
@@ -75,16 +90,47 @@ def scan(api, database, state):
                 response.raise_for_status()
             except httpx.HTTPError:
                 counts['failed']+=1
-                continue
-            seen.append(source_id);known.add(source_id)
+                pending[message_id] = {'session_id': session_id, 'time_created': created}
+                return
+            pending.pop(message_id, None)
             state.setdefault('diagnostics',{}).pop(source_id,None)
             counts['submitted']+=1
+        for message_id, item in list(pending.items()):
+            row = db.execute('''SELECT m.data FROM message m JOIN session s ON m.session_id=s.id
+                WHERE m.id=? AND m.session_id=? AND s.parent_id IS NULL''',
+                (message_id, item['session_id'])).fetchone()
+            if row is None:
+                pending.pop(message_id, None)
+            else:
+                process(message_id, item['session_id'], row[0], item['time_created'])
+        rows = db.execute('''SELECT m.id,m.session_id,m.data,m.time_created FROM message m
+            JOIN session s ON m.session_id=s.id WHERE s.parent_id IS NULL
+            AND m.time_created>=? AND (m.time_created>? OR (m.time_created=? AND m.id>?))
+            ORDER BY m.time_created,m.id''',
+            (state['cutoff_ms'], cursor[0], cursor[0], cursor[1]))
+        for message_id, session_id, raw, created in rows:
+            process(message_id, session_id, raw, created)
+            cursor = [created, message_id]
+            state['message_cursor'] = cursor
+    newest = cursor[0]
+    for message_id, item in list(pending.items()):
+        if newest - item['time_created'] > PENDING_RETENTION_MS:
+            _diagnostic(state, 'diagnostics', hashlib.sha256(message_id.encode()).hexdigest(), 'stale_pending_message')
+            pending.pop(message_id)
+    while len(pending) > MAX_PENDING_MESSAGES:
+        message_id = next(iter(pending))
+        _diagnostic(state, 'diagnostics', hashlib.sha256(message_id.encode()).hexdigest(), 'pending_limit_reached')
+        pending.pop(message_id)
+    state.pop('acknowledged', None)
     return counts
 
 
 def scan_attention(api, queue, state):
     """Forward allowlisted plugin records in order; never read provider content."""
     counts = dict(submitted=0, malformed=0, rejected=0, failed=0)
+    diagnostics = state.get('attention_diagnostics', {})
+    while len(diagnostics) > MAX_DIAGNOSTICS:
+        diagnostics.pop(next(iter(diagnostics)))
     offset = state.get('attention_offset', 0)
     with queue.open('rb') as source:
         file_stat = os.fstat(source.fileno())
@@ -121,15 +167,14 @@ def scan_attention(api, queue, state):
                 body = {key: value for key, value in record.items() if key != 'kind'}
             except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
                 counts['malformed'] += 1
-                state.setdefault('attention_diagnostics', {})[hashlib.sha256(raw).hexdigest()] = 'invalid_metadata'
+                _diagnostic(state, 'attention_diagnostics', hashlib.sha256(raw).hexdigest(), 'invalid_metadata')
                 state['attention_offset'] = end
                 continue
             try:
                 response = api.post(endpoint, json=body)
-                if response.status_code == 409 and response.json().get('error', {}).get('code') in {
-                    'duplicate_observation', 'out_of_order_observation', 'stale_generation',
-                    'generation_conflict'}:
+                if 400 <= response.status_code < 500 and response.status_code not in {401, 408, 429}:
                     counts['rejected'] += 1
+                    _diagnostic(state, 'attention_diagnostics', hashlib.sha256(raw).hexdigest(), 'rejected_record')
                 else:
                     response.raise_for_status()
                     counts['submitted'] += 1
@@ -175,7 +220,8 @@ def main():
                             raise ValueError('Attention event queue must be private')
                         counts['attention'] = scan_attention(api,args.attention_events,state)
                     attention = counts.get('attention', {})
-                    if counts['malformed'] or counts['failed'] or attention.get('malformed') or attention.get('failed'):
+                    if (counts['malformed'] or counts['failed'] or attention.get('malformed') or
+                            attention.get('failed') or attention.get('rejected')):
                         health.update(status='degraded',reason='scan_failed')
                     print(json.dumps(counts),flush=True)
                 except (OSError,ValueError,TypeError,sqlite3.Error):

@@ -2,6 +2,7 @@
 import json
 
 import asyncio
+import threading
 import httpx
 import pytest
 
@@ -89,6 +90,34 @@ def test_reject_browser_paths_and_unavailable_evidence(fixture):
                     profile_ref="/tmp/unsafe")).status_code == 422
     assert api.post("/v1/jobs/validate", json=dict(spec.model_dump(mode="json"),
                     payload={"data": "x" * 70_000})).status_code == 422
+
+
+def test_slow_store_read_does_not_block_other_requests(fixture):
+    _, store, _ = fixture
+    started, release = threading.Event(), threading.Event()
+
+    class SlowStore:
+        policy = store.policy
+        def __getattr__(self, name):
+            return getattr(store, name)
+        def list(self, *args, **kwargs):
+            started.set()
+            release.wait(timeout=3)
+            return store.list(*args, **kwargs)
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(create_app(SlowStore())),
+                                     base_url='http://coordinator') as client:
+            slow = asyncio.create_task(client.get('/v1/jobs'))
+            try:
+                assert await asyncio.to_thread(started.wait, 1)
+                fast = await asyncio.wait_for(client.get('/v1/capacity'), timeout=1)
+                assert fast.status_code == 200 and not slow.done()
+            finally:
+                release.set()
+            assert (await slow).status_code == 200
+
+    asyncio.run(exercise())
 
 
 class APIClient:

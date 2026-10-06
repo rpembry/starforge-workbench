@@ -103,6 +103,27 @@ def test_roles_are_separated_and_worker_reads_only_by_claim(api):
     assert api.post('/api/instructions/claim', json={'registered_session_id': SESSION_ID}).status_code == 401
 
 
+def test_received_response_window_ends_as_uncertain_and_revokes_lease(api, repo):
+    register_session(api)
+    item = create_instruction(api)
+    claimed = claim(api).json()
+    result = api.post(f"/api/instructions/{item['id']}/results", json={
+        'lease_token': claimed['lease_token'], 'outcome': 'received',
+        'reason_code': 'provider_accepted'})
+    assert result.status_code == 200 and result.json()['state'] == 'received'
+    with repo.connection() as db:
+        db.execute('UPDATE instructions SET received_at=? WHERE id=?', (stamp(-2 * 60 * 60 - 1), item['id']))
+        db.commit()
+    api.headers['Authorization'] = 'Bearer ' + OPERATOR
+    terminal = api.get(f"/api/instructions/{item['id']}").json()
+    assert terminal['state'] == 'uncertain'
+    assert terminal['reason_code'] == 'response_unobserved'
+    assert terminal['history'][-1]['reason_code'] == 'response_unobserved'
+    with repo.connection() as db:
+        row = db.execute('SELECT lease_token_hash,claim_owner FROM instructions WHERE id=?', (item['id'],)).fetchone()
+    assert row['lease_token_hash'] is None and row['claim_owner'] is None
+
+
 @pytest.mark.parametrize('change,code', [
     ({'evidence_state': 'unknown'}, 'target_uncontrollable'),
     ({'evidence_state': 'stopped'}, 'target_uncontrollable'),
@@ -375,13 +396,13 @@ def test_upgrade_from_version_seven_preserves_registered_sessions(api, repo):
         db.execute('DROP TABLE flow_work_items')
         db.execute('DROP TABLE instruction_audit')
         db.execute('DROP TABLE instructions')
-        db.execute('DELETE FROM schema_migrations WHERE version IN (8,9,10,11,12)')
+        db.execute('DELETE FROM schema_migrations WHERE version IN (8,9,10,11,12,13,14)')
         db.commit()
     upgraded = SQLiteRepository(repo.path)
     assert upgraded.get_registered_session(SESSION_ID)['display_name'] == 'Synthetic OpenCode'
     with upgraded.connection() as db:
         assert [row[0] for row in db.execute(
-            'SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 13))
+                'SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 15))
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='instructions'").fetchone()
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='instruction_audit'").fetchone()
 

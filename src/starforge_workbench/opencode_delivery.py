@@ -8,13 +8,17 @@ from dataclasses import dataclass, field
 import hashlib
 import http.client
 import json
+import math
 import os
 from pathlib import Path
 import re
 import stat
 import tempfile
+import time
 import unicodedata
 from urllib.parse import urlsplit
+
+from workbench.repository import INSTRUCTION_RESPONSE_WINDOW_SECONDS
 
 
 IDENTITY = re.compile(r'[A-Za-z0-9_-]{16,128}')
@@ -95,6 +99,14 @@ def _origin(value):
     return port
 
 
+def _sync_directory(path):
+    directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def _save(path, receipt, exclusive=False):
     data = (json.dumps(receipt, sort_keys=True) + '\n').encode()
     fd, temporary = tempfile.mkstemp(prefix='.delivery-', dir=path.parent)
@@ -111,11 +123,7 @@ def _save(path, receipt, exclusive=False):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    _sync_directory(path.parent)
 
 
 def _load(path):
@@ -134,6 +142,20 @@ def _load(path):
         raise DeliveryError('Invalid local delivery receipt') from exc
     finally:
         os.close(fd)
+
+
+def _tombstone(path, receipt, instruction_id, disposition):
+    """Keep only the durable one-attempt identity after response reporting ends."""
+    if (not isinstance(instruction_id, str) or not IDENTITY.fullmatch(instruction_id) or
+        path.name != hashlib.sha256(instruction_id.encode()).hexdigest() + '.json' or
+        receipt.get('instruction_id') != instruction_id or
+        not isinstance(receipt.get('session_id'), str) or
+        not isinstance(receipt.get('message_id'), str) or
+        not isinstance(receipt.get('content_sha256'), str)):
+        raise DeliveryError('Invalid terminal delivery receipt')
+    return {'state': 'tombstone', 'disposition': disposition,
+            'session_id': receipt['session_id'], 'message_id': receipt['message_id'],
+            'content_sha256': receipt['content_sha256']}
 
 
 class OpenCodeDelivery:
@@ -158,6 +180,7 @@ class OpenCodeDelivery:
         # disk, and are removed the first time they are taken or when the
         # instruction's disposition is finalized.
         self._previews = {}
+        self.degraded_receipts = 0
 
     def _http(self, method, path, payload=None):
         connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=self.timeout)
@@ -166,7 +189,8 @@ class OpenCodeDelivery:
             headers = {} if body is None else {'Content-Type': 'application/json'}
             connection.request(method, path, body=body, headers=headers)
             response = connection.getresponse()
-            if method == 'GET' and path.endswith('/message?limit=100'):
+            if method == 'GET' and any(path.endswith(f'/message?limit={limit}')
+                                       for limit in (100, 500, 1000)):
                 # The API includes message parts. They remain local, are never
                 # logged or persisted here, and are bounded before parsing.
                 data = response.read(8 * 1024 * 1024 + 1)
@@ -206,6 +230,11 @@ class OpenCodeDelivery:
         content_hash = hashlib.sha256(text.encode()).hexdigest()
         message_id = 'msg_' + hashlib.sha256(instruction_id.encode()).hexdigest()[:32]
         path = self.root / (hashlib.sha256(instruction_id.encode()).hexdigest() + '.json')
+        # Quarantine keeps the durable one-attempt marker. The bytes may no
+        # longer be readable, so neither a retry nor a new preflight is safe.
+        quarantined = path.with_suffix('.invalid')
+        if quarantined.exists() or quarantined.is_symlink():
+            raise DeliveryError('Prior local delivery receipt is invalid; attempt uncertain')
         if path.is_symlink():
             raise DeliveryError('Unsafe local delivery receipt')
         if path.exists():
@@ -213,6 +242,10 @@ class OpenCodeDelivery:
             if (receipt.get('session_id') != session_id or receipt.get('message_id') != message_id or
                 receipt.get('content_sha256') != content_hash):
                 raise DeliveryError('Instruction identity changed target')
+            if receipt.get('state') == 'tombstone':
+                if receipt.get('disposition') == 'reported':
+                    return DeliveryResult('received', 'prior_admission', message_id)
+                return DeliveryResult('uncertain', 'prior_attempt_not_proven', message_id)
             if receipt.get('state') == 'received':
                 return DeliveryResult('received', 'prior_admission', message_id)
             # An attempted POST may have crossed the provider boundary. A 404
@@ -220,6 +253,7 @@ class OpenCodeDelivery:
             found = self._lookup(session_id, message_id)
             if found == 'present':
                 receipt['state'] = 'received'
+                receipt.setdefault('received_at_epoch', time.time())
                 _save(path, receipt)
                 return DeliveryResult('received', 'message_record_found', message_id)
             receipt['state'] = 'uncertain'
@@ -253,6 +287,8 @@ class OpenCodeDelivery:
             _save(path, receipt, exclusive=True)
         except FileExistsError:
             return DeliveryResult('uncertain', 'concurrent_local_attempt', message_id)
+        if quarantined.exists() or quarantined.is_symlink():
+            return DeliveryResult('uncertain', 'prior_attempt_not_proven', message_id)
         payload = {'messageID': message_id, 'model': self.model,
                    'parts': [{'type': 'text', 'text': text}]}
         try:
@@ -261,6 +297,7 @@ class OpenCodeDelivery:
             status = None
         if status == 204:
             receipt['state'] = 'received'
+            receipt['received_at_epoch'] = time.time()
             _save(path, receipt)
             return DeliveryResult('received', 'api_admitted', message_id)
         receipt['state'] = 'uncertain'
@@ -270,22 +307,64 @@ class OpenCodeDelivery:
     def pending_responses(self):
         """Return terminal response evidence without provider content."""
         evidence = []
+        self.degraded_receipts = 0
         for path in sorted(self.root.glob('*.json')):
             if not re.fullmatch(r'[a-f0-9]{64}\.json', path.name):
                 continue
-            receipt = _load(path)
-            if receipt.get('state') != 'received' or receipt.get('response_state') != 'pending':
+            try:
+                receipt = _load(path)
+                if receipt.get('state') == 'received' and receipt.get('response_state') in {'reported', 'unreportable'}:
+                    _save(path, _tombstone(path, receipt, receipt.get('instruction_id'),
+                                           receipt['response_state']))
+                    continue
+                if receipt.get('state') != 'received' or receipt.get('response_state') != 'pending':
+                    continue
+                instruction_id = receipt.get('instruction_id')
+                lease_token = receipt.get('lease_token')
+                session_id = receipt.get('session_id')
+                message_id = receipt.get('message_id')
+                if (not isinstance(instruction_id, str) or not IDENTITY.fullmatch(instruction_id) or
+                    path.name != hashlib.sha256(instruction_id.encode()).hexdigest() + '.json' or
+                    not isinstance(lease_token, str) or not IDENTITY.fullmatch(lease_token) or
+                    not isinstance(session_id, str) or not IDENTITY.fullmatch(session_id) or
+                    not isinstance(message_id, str) or not IDENTITY.fullmatch(message_id)):
+                    raise DeliveryError('Invalid local response receipt')
+                received_at = receipt.get('received_at_epoch', path.stat().st_mtime)
+                if (type(received_at) not in (int, float) or not math.isfinite(received_at) or
+                    received_at < 0 or received_at > time.time() + 300):
+                    raise DeliveryError('Invalid local response receipt')
+            except (DeliveryError, OSError):
+                # Keep the bytes locally for diagnosis; never let one bad receipt
+                # block unrelated response reports or new claims.
+                # Publish the quarantine marker before removing the canonical
+                # name, so a concurrent deliver never observes no marker.
+                quarantined = path.with_suffix('.invalid')
+                try:
+                    os.link(path, quarantined, follow_symlinks=False)
+                except FileExistsError:
+                    pass
+                except OSError:
+                    # The unreadable canonical receipt still blocks replay.
+                    self.degraded_receipts += 1
+                    continue
+                try:
+                    # The marker must survive a power loss before the
+                    # canonical one-attempt name is removed.
+                    _sync_directory(self.root)
+                except OSError:
+                    self.degraded_receipts += 1
+                    continue
+                try:
+                    os.unlink(path)
+                    _sync_directory(self.root)
+                except OSError:
+                    pass
+                self.degraded_receipts += 1
                 continue
-            instruction_id = receipt.get('instruction_id')
-            lease_token = receipt.get('lease_token')
-            session_id = receipt.get('session_id')
-            message_id = receipt.get('message_id')
-            if (not isinstance(instruction_id, str) or not IDENTITY.fullmatch(instruction_id) or
-                path.name != hashlib.sha256(instruction_id.encode()).hexdigest() + '.json' or
-                not isinstance(lease_token, str) or not IDENTITY.fullmatch(lease_token) or
-                not isinstance(session_id, str) or not IDENTITY.fullmatch(session_id) or
-                not isinstance(message_id, str) or not IDENTITY.fullmatch(message_id)):
-                raise DeliveryError('Invalid local response receipt')
+            if time.time() - received_at > INSTRUCTION_RESPONSE_WINDOW_SECONDS:
+                self.mark_response(instruction_id, 'unreportable')
+                self.degraded_receipts += 1
+                continue
             result = self._response(session_id, message_id)
             if result:
                 outcome, reason, excerpt = result
@@ -304,25 +383,29 @@ class OpenCodeDelivery:
         return self._previews.pop(instruction_id, None)
 
     def _response(self, session_id, message_id):
-        try:
-            status, body = self.transport(
-                'GET', f'/session/{session_id}/message?limit=100')
-        except (OSError, TimeoutError, http.client.HTTPException):
-            return None
-        if status != 200 or len(body) > 8 * 1024 * 1024:
-            return None
-        try:
-            messages = json.loads(body)
-            if not isinstance(messages, list):
+        matched = []
+        for limit in (100, 500, 1000):
+            try:
+                status, body = self.transport(
+                    'GET', f'/session/{session_id}/message?limit={limit}')
+            except (OSError, TimeoutError, http.client.HTTPException):
                 return None
-            matched = []
-            for item in messages:
-                info = item.get('info') if isinstance(item, dict) else None
-                if (isinstance(info, dict) and info.get('role') == 'assistant' and
-                        info.get('parentID') == message_id):
-                    matched.append(item)
-        except (UnicodeError, ValueError, AttributeError):
-            return None
+            if status != 200 or len(body) > 8 * 1024 * 1024:
+                return None
+            try:
+                messages = json.loads(body)
+                if not isinstance(messages, list):
+                    return None
+                matched = []
+                for item in messages:
+                    info = item.get('info') if isinstance(item, dict) else None
+                    if (isinstance(info, dict) and info.get('role') == 'assistant' and
+                            info.get('parentID') == message_id):
+                        matched.append(item)
+            except (UnicodeError, ValueError, AttributeError):
+                return None
+            if matched or len(messages) < limit:
+                break
         # The API's returned order is treated as chronological. A later
         # terminal record (error or clean stop) supersedes an earlier one for
         # the same parent, so a transient error the agent went on to resolve
@@ -347,9 +430,12 @@ class OpenCodeDelivery:
             raise DeliveryError('Invalid response receipt state')
         path = self.root / (hashlib.sha256(instruction_id.encode()).hexdigest() + '.json')
         receipt = _load(path)
+        if receipt.get('state') == 'tombstone' and receipt.get('disposition') == state:
+            self._previews.pop(instruction_id, None)
+            return
+        if receipt.get('state') != 'received' or receipt.get('response_state') not in {'pending', state}:
+            raise DeliveryError('Invalid response receipt transition')
         if receipt.get('instruction_id') != instruction_id:
             raise DeliveryError('Instruction identity changed target')
-        receipt['response_state'] = state
-        receipt.pop('lease_token', None)
-        _save(path, receipt)
+        _save(path, _tombstone(path, receipt, instruction_id, state))
         self._previews.pop(instruction_id, None)

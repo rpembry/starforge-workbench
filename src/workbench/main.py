@@ -132,8 +132,11 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
             origin = request.headers.get('origin')
             expected_origin = os.environ.get('WB_PUBLIC_ORIGIN', str(request.base_url)).rstrip('/')
             if (origin and origin.rstrip('/') != expected_origin) or (request.url.path.startswith('/ui/') and not origin):
-                return JSONResponse(status_code=403, content={'error': {'code': 'origin_rejected', 'message': 'Cross-origin writes are disabled'}})
-        response = await call_next(request)
+                response = JSONResponse(status_code=403, content={'error': {'code': 'origin_rejected', 'message': 'Cross-origin writes are disabled'}})
+            else:
+                response = await call_next(request)
+        else:
+            response = await call_next(request)
         response.headers['Cache-Control'] = 'no-store'
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['Referrer-Policy'] = 'no-referrer'
@@ -175,7 +178,7 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
 
     @app.get('/api/attention', dependencies=[Depends(attention_reader)])
     def attention():
-        return repository.dashboard()['attention']
+        return repository.attention()
 
     @app.get('/api/status/config')
     def status_config(who=Depends(operator)):
@@ -400,7 +403,7 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
         return repository.import_batch(body.model_dump(mode='json'), who.name)
 
     @app.post('/api/collectors/heartbeat')
-    def collector_heartbeat(body: CollectorIn, who=Depends(writer)):
+    def collector_heartbeat(body: CollectorIn, who=Depends(collector)):
         return repository.collector_heartbeat(body.model_dump(mode='json'), who.name)
 
     @app.post('/api/provider-attention/generations', status_code=201)
@@ -425,8 +428,7 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     def session_page(identity, notice=None, error=None, retry_key=None):
         from .session_views import display_instruction, display_session
         item = display_session(repository.get_registered_session(identity), repository)
-        history = [display_instruction(repository.get_instruction(row['id']))
-                   for row in repository.list_instructions(20, 0, identity)]
+        history = [display_instruction(row) for row in repository.list_instructions_with_history(identity)]
         key = retry_key if retry_key and re.fullmatch(r'[A-Za-z0-9._~-]{16,128}', retry_key) else secrets.token_urlsafe(24)
         errors = {
             'target_unavailable': 'The session became stale or offline. Refresh its collector evidence before retrying.',

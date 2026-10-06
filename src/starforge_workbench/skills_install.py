@@ -36,6 +36,8 @@ def _source(source: str | Path | None, name: str) -> tuple[Path, str, dict[str, 
         raise ValueError('Skill source must select the exact Git checkout root')
     if _git(root, 'status', '--porcelain', '--', f'skills/{name}'):
         raise ValueError('Skill source has uncommitted changes; select a committed revision')
+    if _git(root, 'status', '--porcelain', '--ignored', '--', f'skills/{name}'):
+        raise ValueError('Skill source contains ignored files; select a clean committed revision')
     path = root / 'skills' / name
     if not path.is_dir() or path.is_symlink() or not (path / 'SKILL.md').is_file():
         raise ValueError('Selected skill is missing from the pinned source')

@@ -13,7 +13,15 @@ Level = Annotated[int, Field(ge=0, le=3)]
 
 
 def now():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat(timespec='microseconds')
+
+
+def utc_instant(value: str) -> str:
+    """Use one sortable representation for every persisted aware instant."""
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError('Timezone is required')
+    return parsed.astimezone(timezone.utc).isoformat(timespec='microseconds')
 
 
 class Model(BaseModel):
