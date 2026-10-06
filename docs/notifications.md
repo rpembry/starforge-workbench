@@ -133,6 +133,17 @@ no existing service needs restarting. `watch` rereads configuration each poll.
   or older than the last accepted snapshot cannot reset deduplication. Keep clocks
   synchronized. Duplicate identical IDs coalesce; contradictory duplicates fail
   closed rather than guessing.
+- A selected provider item with a valid ID but malformed evidence is quarantined
+  individually; `once`, `watch`, and `preview` report `quarantined_items`. An
+  undelivered quarantined item remains pending and reports `quarantined_pending`;
+  `once` exits nonzero until valid evidence returns. Other categories can still
+  notify. Its prior delivery occurrence is retained so an
+  invalid observation does not rearm an acknowledged alert. Disabled provider
+  categories are not validated. Provider observation times up to five minutes
+  ahead of the snapshot are accepted, matching API ingestion tolerance. Invalid
+  snapshot structure, missing IDs, out-of-order snapshots or provider generations,
+  conflicting evidence, and contradictory duplicate IDs still reject the whole
+  snapshot without changing delivery state.
 - Connect/pool failures known to precede submission retain pending work and retry
   with bounded backoff. Budgets belong to each item occurrence, so new items do not
   inherit an unrelated exhausted budget. HTTP 4xx and explicit rejection are

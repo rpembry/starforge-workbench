@@ -237,6 +237,85 @@ def test_provider_stale_replayed_and_conflicting_evidence_fail_closed(config):
     assert sender.call_count == 2
 
 
+def test_invalid_provider_item_is_quarantined_without_blocking_collector_alert(config):
+    sender = Mock()
+    malformed = provider_item('provider_error', identity='provider:bad')
+    malformed['evidence'] = [{'resource': 'provider_attention', 'timestamps': {}}]
+    result = tick(config, [item('collector', 'collector_health'), malformed], sender)
+    assert result['status'] == 'delivered'
+    assert result['count'] == 1 and result['quarantined_items'] == 1
+    assert 'collector visibility' in sender.call_args.args[1]['message']
+    assert 'provider error' not in sender.call_args.args[1]['message']
+    preview = tick(config, [malformed], sender, NOW+1, preview=True)
+    assert preview['quarantined_items'] == 1 and preview['pending'] == 1
+    assert preview['delivery'] == 'quarantined'
+    assert sender.call_count == 1
+
+
+def test_undelivered_quarantined_provider_remains_visibly_pending(config, monkeypatch,
+                                                                   tmp_path, capsys):
+    original = provider_item('provider_error')
+    failure = Mock(side_effect=n.NotificationError('delivery_not_submitted', retryable=True))
+    assert tick(config, [original], failure)['status'] == 'retry_pending'
+    malformed = copy.deepcopy(original)
+    malformed['evidence'] = 'invalid'
+    sender = Mock(side_effect=AssertionError('quarantined item must not deliver'))
+    result = tick(config, [malformed], sender, NOW+1)
+    assert result['status'] == 'quarantined'
+    assert result['pending'] == result['quarantined_pending'] == 1
+    assert result['quarantined_items'] == 1
+    preview = tick(config, [malformed], sender, NOW+1, preview=True)
+    assert preview['pending'] == 1 and preview['delivery'] == 'quarantined'
+    config_path = tmp_path / 'notifier.json'
+    private_write(config_path, config.model_dump_json())
+    monkeypatch.setattr(n, 'fetch_snapshot', lambda settings: snapshot([malformed], NOW+1))
+    monkeypatch.setattr(n.time, 'time', lambda: NOW+1)
+    assert n.main(['once', '--config', str(config_path)]) == 2
+    assert json.loads(capsys.readouterr().out)['quarantined_pending'] == 1
+    assert tick(config, [provider_item('provider_error', sequence=2, observed=NOW+2)],
+                Mock(), NOW+31)['status'] == 'delivered'
+    sender.assert_not_called()
+
+
+def test_disabled_provider_category_is_not_validated(config):
+    config.categories = ['collector_health']
+    malformed = provider_item('provider_error')
+    malformed['evidence'] = 'not provider evidence'
+    sender = Mock()
+    result = tick(config, [item('collector', 'collector_health'), malformed], sender)
+    assert result['status'] == 'delivered' and result.get('quarantined_items', 0) == 0
+    assert sender.call_count == 1
+
+
+def test_provider_clock_skew_and_quarantine_preserve_delivered_occurrence(config):
+    sender = Mock()
+    first = provider_item()
+    assert tick(config, [first], sender)['status'] == 'delivered'
+    skewed = provider_item(sequence=2, observed=NOW+3)
+    accepted = tick(config, [skewed], sender, NOW+2)
+    assert accepted['status'] == 'quiet' and accepted.get('quarantined_items', 0) == 0
+    too_far = provider_item(sequence=3, observed=NOW+304)
+    held = tick(config, [too_far], sender, NOW+3)
+    assert held['status'] == 'quiet' and held['quarantined_items'] == 1
+    restored = provider_item(sequence=3, observed=NOW+4)
+    assert tick(config, [restored], sender, NOW+5)['status'] == 'quiet'
+    assert sender.call_count == 1
+
+
+def test_contradictory_provider_duplicates_still_reject_snapshot(config):
+    sender = Mock()
+    assert tick(config, [provider_item()], sender)['status'] == 'delivered'
+    folder = Path(config.state_dir)
+    before = (folder / 'delivery.json').read_bytes()
+    bad = provider_item(sequence=2, observed=NOW+1)
+    bad['evidence'] = 'invalid'
+    other = copy.deepcopy(bad)
+    other['reason'] = 'contradiction'
+    with pytest.raises(n.NotificationError, match='invalid_or_stale_attention_snapshot'):
+        tick(config, [bad, other], sender, NOW+2)
+    assert (folder / 'delivery.json').read_bytes() == before
+
+
 def test_distinct_provider_incidents_and_repeated_evidence(config):
     sender = Mock()
     first = provider_item()
