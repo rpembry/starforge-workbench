@@ -54,7 +54,8 @@ def _fake(bin_dir, name, script):
 
 
 def _run_installer(tmp_path, health_ok, backup_ok=True, first_install=False,
-                   configured_db=None, env_body=None, db_present=True, default_decoy=False):
+                   configured_db=None, env_body=None, db_present=True, default_decoy=False,
+                   dropin_override=False):
     opt = tmp_path / 'opt/workbench'
     release = opt / 'releases/new'
     old = opt / 'releases/old'
@@ -77,6 +78,10 @@ def _run_installer(tmp_path, health_ok, backup_ok=True, first_install=False,
     for name in ('access.json', 'tunnel-token'):
         (etc / name).write_text('synthetic')
     (tmp_path / 'etc/systemd/system').mkdir(parents=True)
+    if dropin_override:
+        dropins = tmp_path / 'etc/systemd/system/workbench.service.d'
+        dropins.mkdir()
+        (dropins / 'override.conf').write_text('[Service]\nEnvironment=WB_DATABASE=/synthetic/other.sqlite\n')
     state = tmp_path / 'var/lib/workbench'
     state.mkdir(parents=True)
     database = configured_db or state / 'workbench.sqlite'
@@ -117,6 +122,9 @@ printf '%s\n' "$BACKUP_DIR/synthetic-backup.sqlite"
     script.write_text(INSTALLER.read_text().replace('/opt/workbench', str(opt))
                       .replace('/etc/workbench', str(etc))
                       .replace('/etc/systemd/system', str(tmp_path / 'etc/systemd/system'))
+                      .replace('/run/systemd/system', str(tmp_path / 'run/systemd/system'))
+                      .replace('/usr/lib/systemd/system', str(tmp_path / 'usr/lib/systemd/system'))
+                      .replace('/lib/systemd/system', str(tmp_path / 'lib/systemd/system'))
                       .replace('/var/lib/workbench', str(state)))
     events = tmp_path / 'events'
     result = subprocess.run(['sh', str(script), str(release)], capture_output=True, text=True,
@@ -199,3 +207,12 @@ def test_installer_fails_before_stop_on_unparseable_database_config(tmp_path, en
     assert not events
     assert (opt / 'current').resolve() == old
     assert 'Cannot determine configured database' in result.stderr
+
+
+def test_installer_rejects_effective_unit_override_before_stop(tmp_path):
+    result, events, opt, old, _ = _run_installer(
+        tmp_path, health_ok=True, dropin_override=True)
+    assert result.returncode != 0
+    assert not events
+    assert (opt / 'current').resolve() == old
+    assert 'Unsupported workbench.service override' in result.stderr

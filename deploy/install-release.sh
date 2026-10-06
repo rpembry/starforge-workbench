@@ -31,6 +31,15 @@ chmod 0640 /etc/workbench/access.json
 chmod 0600 /etc/workbench/tunnel-token
 "$release/deploy/check-service-env.sh" /etc/workbench/service.env "$release/deploy/service.env.example" 0 "$(getent group workbench | cut -d: -f3)" no
 database=$("$release/.venv/bin/python" "$release/deploy/service-database.py" /etc/workbench/service.env)
+for dropin in /etc/systemd/system/workbench.service.d/*.conf \
+              /run/systemd/system/workbench.service.d/*.conf \
+              /usr/lib/systemd/system/workbench.service.d/*.conf \
+              /lib/systemd/system/workbench.service.d/*.conf; do
+    if [ -e "$dropin" ] || [ -L "$dropin" ]; then
+        echo "Unsupported workbench.service override: $dropin" >&2
+        exit 1
+    fi
+done
 install -o root -g root -m 0644 deploy/workbench.service /etc/systemd/system/workbench.service
 install -o root -g root -m 0644 deploy/workbench-tunnel.service /etc/systemd/system/workbench-tunnel.service
 previous=none
