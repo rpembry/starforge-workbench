@@ -22,12 +22,12 @@ class Principal:
 
 class Auth:
     def __init__(self, credentials: dict):
-        if set(credentials) != {'operator', 'collector'}:
-            raise RuntimeError('Credentials must contain separate operator and collector tokens')
+        if set(credentials) not in ({'operator', 'collector'}, {'operator', 'collector', 'viewer'}):
+            raise RuntimeError('Credentials must contain separate operator and collector tokens, with optional viewer')
         if any(not isinstance(v, str) or len(v) < 32 for v in credentials.values()):
             raise RuntimeError('Use randomly generated tokens of at least 32 characters')
-        if credentials['operator'] == credentials['collector']:
-            raise RuntimeError('Operator and collector tokens must differ')
+        if len(set(credentials.values())) != len(credentials):
+            raise RuntimeError('Operator, collector, and viewer tokens must differ')
         self.credentials = credentials
 
     @classmethod
@@ -43,7 +43,7 @@ class Auth:
             for role, expected in self.credentials.items():
                 if hmac.compare_digest(token, expected):
                     return Principal(role, role)
-        raise Problem(401, 'unauthorized', 'A valid operator or collector bearer token is required')
+        raise Problem(401, 'unauthorized', 'A valid Workbench bearer token is required')
 
 
 class CloudflareAuth:
@@ -53,7 +53,7 @@ class CloudflareAuth:
         import jwt
         if not re.fullmatch(r'https://[a-z0-9-]+\.cloudflareaccess\.com', issuer):
             raise RuntimeError('Cloudflare issuer must be a trusted team HTTPS origin')
-        if not audience or not browser_emails or any(role not in {'operator', 'collector'} for role in service_roles.values()):
+        if not audience or not browser_emails or any(role not in {'operator', 'collector', 'viewer'} for role in service_roles.values()):
             raise RuntimeError('Cloudflare audience, browser allowlist, and valid roles are required')
         self.issuer, self.audience = issuer, audience
         self.browser_emails = {email.casefold() for email in browser_emails}
