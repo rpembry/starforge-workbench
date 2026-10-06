@@ -51,13 +51,14 @@ def _fake(bin_dir, name, script):
     path.chmod(0o755)
 
 
-def _run_installer(tmp_path, health_ok, backup_ok=True):
+def _run_installer(tmp_path, health_ok, backup_ok=True, first_install=False):
     opt = tmp_path / 'opt/workbench'
     release = opt / 'releases/new'
     old = opt / 'releases/old'
     release.mkdir(parents=True)
     old.mkdir()
-    (opt / 'current').symlink_to(old)
+    if not first_install:
+        (opt / 'current').symlink_to(old)
     (release / 'uv.lock').write_text('synthetic')
     (release / 'deploy').mkdir()
     (release / '.venv/bin').mkdir(parents=True)
@@ -73,7 +74,8 @@ def _run_installer(tmp_path, health_ok, backup_ok=True):
     (tmp_path / 'etc/systemd/system').mkdir(parents=True)
     state = tmp_path / 'var/lib/workbench'
     state.mkdir(parents=True)
-    (state / 'workbench.sqlite').write_text('synthetic')
+    if not first_install:
+        (state / 'workbench.sqlite').write_text('synthetic')
     runtime = tmp_path / 'opt/workbench-runtime'
     runtime.mkdir()
     _fake(runtime, 'uv', 'exit 0\n')
@@ -84,6 +86,7 @@ def _run_installer(tmp_path, health_ok, backup_ok=True):
     _fake(bin_dir, 'chown', 'exit 0\n')
     _fake(bin_dir, 'install', 'for arg do previous=${last-}; last=$arg; done\ncp "$previous" "$last"\n')
     _fake(bin_dir, 'systemctl', '''printf 'systemctl %s current=%s rollback=%s\n' "$1" "$(readlink "$CURRENT_LINK")" "$(cat "$ROLLBACK_RECORD" 2>/dev/null || echo missing)" >> "$EVENTS"
+if [ "$FIRST_INSTALL" = yes ] && [ "$1" = stop ]; then exit 5; fi
 exit 0
 ''')
     _fake(bin_dir, 'runuser', '''printf 'backup current=%s\n' "$(readlink "$CURRENT_LINK")" >> "$EVENTS"
@@ -106,6 +109,7 @@ printf '%s\n' "$BACKUP_DIR/synthetic-backup.sqlite"
                                  'ROLLBACK_RECORD': str(opt / 'rollback-target'),
                                  'BACKUP_DIR': str(state / 'backups'),
                                  'BACKUP_OK': 'yes' if backup_ok else 'no',
+                                 'FIRST_INSTALL': 'yes' if first_install else 'no',
                                  'HEALTH_OK': 'yes' if health_ok else 'no'}, check=False)
     assert events.exists(), (result.returncode, result.stdout, result.stderr)
     return result, events.read_text().splitlines(), opt, old, release
@@ -138,3 +142,11 @@ def test_backup_failure_preserves_previous_release_and_restarts_service(tmp_path
     assert not (opt / 'rollback-target').exists()
     assert f'systemctl start current={old} rollback=missing' in events
     assert 'backup failed' in result.stderr
+
+
+def test_first_install_tolerates_missing_prior_service_and_records_none(tmp_path):
+    result, events, opt, _, release = _run_installer(tmp_path, health_ok=True, first_install=True)
+    assert result.returncode == 0, result.stderr
+    assert (opt / 'current').resolve() == release
+    assert (opt / 'rollback-target').read_text().strip() == 'none'
+    assert not any(event.startswith('backup ') for event in events)

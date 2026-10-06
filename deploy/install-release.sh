@@ -40,7 +40,11 @@ elif [ -e /opt/workbench/current ]; then
     echo 'Current release is not a symlink' >&2
     exit 1
 fi
-systemctl stop workbench.service
+if [ "$previous" = none ]; then
+    systemctl stop workbench.service 2>/dev/null || :
+else
+    systemctl stop workbench.service
+fi
 backup=none
 if [ -e /var/lib/workbench/workbench.sqlite ] || [ -L /var/lib/workbench/workbench.sqlite ]; then
     if backup=$(runuser -u workbench -- "$release/.venv/bin/python" "$release/deploy/backup-state.py"); then
