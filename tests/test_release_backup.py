@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKUP = ROOT / 'deploy/backup-state.py'
@@ -51,7 +53,8 @@ def _fake(bin_dir, name, script):
     path.chmod(0o755)
 
 
-def _run_installer(tmp_path, health_ok, backup_ok=True, first_install=False):
+def _run_installer(tmp_path, health_ok, backup_ok=True, first_install=False,
+                   configured_db=None, env_body=None, db_present=True, default_decoy=False):
     opt = tmp_path / 'opt/workbench'
     release = opt / 'releases/new'
     old = opt / 'releases/old'
@@ -62,20 +65,27 @@ def _run_installer(tmp_path, health_ok, backup_ok=True, first_install=False):
     (release / 'uv.lock').write_text('synthetic')
     (release / 'deploy').mkdir()
     (release / '.venv/bin').mkdir(parents=True)
+    (release / '.venv/bin/python').symlink_to(sys.executable)
     for name in ('workbench.service', 'workbench-tunnel.service', 'service.env.example'):
         (release / 'deploy' / name).write_text('synthetic')
+    (release / 'deploy/service-database.py').write_bytes((ROOT / 'deploy/service-database.py').read_bytes())
     check = release / 'deploy/check-service-env.sh'
     check.write_text('#!/bin/sh\nexit 0\n')
     check.chmod(0o755)
     etc = tmp_path / 'etc/workbench'
     etc.mkdir(parents=True)
-    for name in ('access.json', 'tunnel-token', 'service.env'):
+    for name in ('access.json', 'tunnel-token'):
         (etc / name).write_text('synthetic')
     (tmp_path / 'etc/systemd/system').mkdir(parents=True)
     state = tmp_path / 'var/lib/workbench'
     state.mkdir(parents=True)
-    if not first_install:
-        (state / 'workbench.sqlite').write_text('synthetic')
+    database = configured_db or state / 'workbench.sqlite'
+    (etc / 'service.env').write_text(env_body if env_body is not None else f'WB_DATABASE={database}\n')
+    if not first_install and db_present:
+        database.parent.mkdir(parents=True, exist_ok=True)
+        database.write_text('synthetic')
+    if default_decoy:
+        (state / 'workbench.sqlite').write_text('decoy')
     runtime = tmp_path / 'opt/workbench-runtime'
     runtime.mkdir()
     _fake(runtime, 'uv', 'exit 0\n')
@@ -89,7 +99,13 @@ def _run_installer(tmp_path, health_ok, backup_ok=True, first_install=False):
 if [ "$FIRST_INSTALL" = yes ] && [ "$1" = stop ]; then exit 5; fi
 exit 0
 ''')
-    _fake(bin_dir, 'runuser', '''printf 'backup current=%s\n' "$(readlink "$CURRENT_LINK")" >> "$EVENTS"
+    _fake(bin_dir, 'runuser', '''database=missing
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = --database ]; then database=$2; break; fi
+    shift
+done
+printf 'backup source=%s current=%s\n' "$database" "$(readlink "$CURRENT_LINK")" >> "$EVENTS"
+if [ ! -f "$database" ]; then exit 1; fi
 if [ "$BACKUP_OK" = no ]; then exit 1; fi
 mkdir -p "$BACKUP_DIR"
 : > "$BACKUP_DIR/synthetic-backup.sqlite"
@@ -111,8 +127,7 @@ printf '%s\n' "$BACKUP_DIR/synthetic-backup.sqlite"
                                  'BACKUP_OK': 'yes' if backup_ok else 'no',
                                  'FIRST_INSTALL': 'yes' if first_install else 'no',
                                  'HEALTH_OK': 'yes' if health_ok else 'no'}, check=False)
-    assert events.exists(), (result.returncode, result.stdout, result.stderr)
-    return result, events.read_text().splitlines(), opt, old, release
+    return result, events.read_text().splitlines() if events.exists() else [], opt, old, release
 
 
 def test_installer_backs_up_and_records_target_before_switch_then_requires_health(tmp_path):
@@ -121,7 +136,7 @@ def test_installer_backs_up_and_records_target_before_switch_then_requires_healt
     assert (opt / 'current').resolve() == release
     assert (opt / 'rollback-target').read_text().strip() == str(old)
     assert stat.S_IMODE((opt / 'rollback-target').stat().st_mode) == 0o600
-    assert events.index(f'backup current={old}') > events.index(
+    assert events.index(f'backup source={tmp_path / "var/lib/workbench/workbench.sqlite"} current={old}') > events.index(
         f'systemctl stop current={old} rollback=missing')
     assert f'systemctl daemon-reload current={release} rollback={old}' in events
     assert 'health check failed' in result.stderr
@@ -150,3 +165,37 @@ def test_first_install_tolerates_missing_prior_service_and_records_none(tmp_path
     assert (opt / 'current').resolve() == release
     assert (opt / 'rollback-target').read_text().strip() == 'none'
     assert not any(event.startswith('backup ') for event in events)
+
+
+def test_installer_backs_up_configured_database_not_default_decoy(tmp_path):
+    custom = tmp_path / 'var/lib/workbench/custom.sqlite'
+    result, events, opt, old, _ = _run_installer(
+        tmp_path, health_ok=True, configured_db=custom, default_decoy=True)
+    assert result.returncode == 0, result.stderr
+    assert f'backup source={custom} current={old}' in events
+    assert f'Database source: {custom}; backup:' in result.stdout
+    assert (opt / 'rollback-target').read_text().strip() == str(old)
+
+
+def test_installer_fails_before_stop_when_configured_database_missing(tmp_path):
+    custom = tmp_path / 'var/lib/workbench/missing.sqlite'
+    result, events, opt, old, _ = _run_installer(
+        tmp_path, health_ok=True, configured_db=custom, db_present=False)
+    assert result.returncode != 0
+    assert not events
+    assert (opt / 'current').resolve() == old
+    assert 'Configured database is missing' in result.stderr
+
+
+@pytest.mark.parametrize('env_body', [
+    'WB_DATABASE="/var/lib/workbench/workbench.sqlite"\n',
+    'WB_DATABASE=/var/lib/workbench/a.sqlite\nWB_DATABASE=/var/lib/workbench/b.sqlite\n',
+    'WB_DATABASE=$(touch /tmp/synthetic-never-run)\n',
+    'WB_OTHER=/var/lib/workbench/workbench.sqlite\n',
+])
+def test_installer_fails_before_stop_on_unparseable_database_config(tmp_path, env_body):
+    result, events, opt, old, _ = _run_installer(tmp_path, health_ok=True, env_body=env_body)
+    assert result.returncode != 0
+    assert not events
+    assert (opt / 'current').resolve() == old
+    assert 'Cannot determine configured database' in result.stderr

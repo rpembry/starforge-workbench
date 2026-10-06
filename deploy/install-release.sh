@@ -30,6 +30,7 @@ chown root:workbench /etc/workbench/access.json
 chmod 0640 /etc/workbench/access.json
 chmod 0600 /etc/workbench/tunnel-token
 "$release/deploy/check-service-env.sh" /etc/workbench/service.env "$release/deploy/service.env.example" 0 "$(getent group workbench | cut -d: -f3)" no
+database=$("$release/.venv/bin/python" "$release/deploy/service-database.py" /etc/workbench/service.env)
 install -o root -g root -m 0644 deploy/workbench.service /etc/systemd/system/workbench.service
 install -o root -g root -m 0644 deploy/workbench-tunnel.service /etc/systemd/system/workbench-tunnel.service
 previous=none
@@ -40,15 +41,19 @@ elif [ -e /opt/workbench/current ]; then
     echo 'Current release is not a symlink' >&2
     exit 1
 fi
+if [ "$previous" != none ] && [ ! -e "$database" ] && [ ! -L "$database" ]; then
+    echo "Configured database is missing: $database" >&2
+    exit 1
+fi
 if [ "$previous" = none ]; then
     systemctl stop workbench.service 2>/dev/null || :
 else
     systemctl stop workbench.service
 fi
 backup=none
-if [ -e /var/lib/workbench/workbench.sqlite ] || [ -L /var/lib/workbench/workbench.sqlite ]; then
-    if backup=$(runuser -u workbench -- "$release/.venv/bin/python" "$release/deploy/backup-state.py"); then
-        echo "Database backup: $backup"
+if [ -e "$database" ] || [ -L "$database" ]; then
+    if backup=$(runuser -u workbench -- "$release/.venv/bin/python" "$release/deploy/backup-state.py" --database "$database" --dest /var/lib/workbench/backups); then
+        echo "Database source: $database; backup: $backup"
     else
         echo 'Database backup failed; release was not switched' >&2
         if [ "$previous" != none ]; then systemctl start workbench.service; fi
