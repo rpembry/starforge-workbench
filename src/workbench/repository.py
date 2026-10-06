@@ -113,7 +113,7 @@ class SQLiteRepository:
                 db.execute('INSERT INTO schema_migrations VALUES (?, ?)', (1, now()))
                 db.commit()
             versions = [r[0] for r in db.execute('SELECT version FROM schema_migrations ORDER BY version')]
-            supported = [list(range(1, version + 1)) for version in range(1, 14)]
+            supported = [list(range(1, version + 1)) for version in range(1, 15)]
             if versions not in supported:
                 raise RuntimeError('Unsupported database schema version')
             for version, filename in [(2, '002_collectors.sql'), (3, '003_imports.sql'),
@@ -129,6 +129,11 @@ class SQLiteRepository:
                     db.commit()
             if 13 not in versions:
                 _migrate_utc_instants(db)
+            if 14 not in versions:
+                migration = Path(__file__).with_name('migrations')/'014_attention_indexes.sql'
+                db.executescript('BEGIN IMMEDIATE;\n'+migration.read_text())
+                db.execute('INSERT INTO schema_migrations VALUES (?, ?)', (14, now()))
+                db.commit()
 
     @contextmanager
     def connection(self):
@@ -530,6 +535,24 @@ class SQLiteRepository:
             db.commit()
             return [self._instruction_public(row) for row in rows]
 
+    def list_instructions_with_history(self, session_id, limit=20):
+        """Read a session timeline after one lease-expiration transaction."""
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._expire_instruction_leases(db, now())
+            rows = db.execute('''SELECT * FROM instructions WHERE registered_session_id=?
+                ORDER BY created_at DESC,id LIMIT ?''', (session_id, limit)).fetchall()
+            history = {row['id']: [] for row in rows}
+            if rows:
+                placeholders = ','.join('?' for _ in rows)
+                for event in db.execute(f'''SELECT id,instruction_id,actor,registered_session_id,
+                    state,reason_code,occurred_at FROM instruction_audit
+                    WHERE instruction_id IN ({placeholders}) ORDER BY occurred_at,id''',
+                    tuple(history)):
+                    history[event['instruction_id']].append(dict(event))
+            db.commit()
+            return [dict(self._instruction_public(row), history=history[row['id']]) for row in rows]
+
     def get_instruction(self, identity):
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -785,7 +808,6 @@ class SQLiteRepository:
             for collector in collectors:
                 age = (current-datetime.fromisoformat(collector['heartbeat_at'])).total_seconds()
                 collector['heartbeat_age_seconds'] = max(0, int(age))
-                collector['health'] = 'offline' if age > 90 else collector['status']
             provider_attention = [dict(r) for r in db.execute('''SELECT i.*,g.generation_started_at
                 FROM provider_attention_incidents i JOIN provider_attention g
                   ON g.provider=i.provider AND g.session_id=i.session_id AND g.generation_id=i.generation_id
@@ -794,9 +816,8 @@ class SQLiteRepository:
                 stamp = observation['last_observed_at']
                 age = (current-datetime.fromisoformat(stamp)).total_seconds()
                 observation['freshness_age_seconds'] = max(0, int(age))
-                observation['fresh'] = bool(observation['reason']) and age <= 90
             committed = {'accepted', 'in_progress', 'waiting', 'approval_needed'}
-            from .attention import derive
+            from .attention_projection import prepare
             from .recent import present
             from .analytics import traffic_summary
             stamp = current.isoformat(timespec='microseconds')
@@ -804,7 +825,7 @@ class SQLiteRepository:
                 "SELECT * FROM events WHERE source=? ORDER BY occurred_at DESC", ("ga4-daily-collector",)
             )]
             result = dict(generated_at=stamp, collectors=collectors,
-                attention=derive(actions, runs, collectors, stamp, provider_attention),
+                attention=prepare(actions, runs, collectors, provider_attention, current),
                 provider_attention=provider_attention,
                 quarantined_imports=db.execute("SELECT count(*) FROM import_records WHERE disposition='quarantined'").fetchone()[0],
                 needs_you={'collectors': [c for c in collectors if c['health'] != 'ok'], 'actions': [a for a in actions if a['status'] in committed and (a['execution_mode'] in {'human', 'waiting'} or a['status'] in {'waiting', 'approval_needed'})],
@@ -819,3 +840,8 @@ class SQLiteRepository:
         from .report_suggestions import view
         result['report_suggestions'] = view(self, 'dashboard', result)
         return result
+
+    def attention(self):
+        from .attention_projection import read
+        with self.connection() as db:
+            return read(db)
