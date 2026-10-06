@@ -200,10 +200,14 @@ class SQLiteRepository:
                                 raise Problem(409, 'identity_conflict', 'Run identity cannot change context or provider')
                             if data['started_at'] != row['started_at']:
                                 raise Problem(409, 'identity_conflict', 'A process restart requires a new run identity')
+                            if row['status'] == 'stopped' and data['status'] != 'stopped':
+                                raise Problem(409, 'stopped_run', 'Positive stop evidence cannot be revived by a heartbeat')
                             # A heartbeat cannot erase operator-assigned work or an
                             # explicit waiting/approval state with process-presence data.
                             update = {k: data[k] for k in ['last_activity_at', 'activity_basis']}
-                            if row['status'] not in {'waiting', 'approval_needed'}:
+                            # Positive process-exit evidence supersedes an older
+                            # waiting/approval observation for this exact run.
+                            if data['status'] == 'stopped' or row['status'] not in {'waiting', 'approval_needed'}:
                                 update['status'] = data['status']
                             update.update(heartbeat_at=now(), version=row['version']+1)
                             self._update(db, table, row['id'], update)
