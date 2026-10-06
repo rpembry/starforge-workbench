@@ -58,9 +58,14 @@ def private_directory(path):
     return path
 
 
-def command(argv, timeout=30, limit=MAX_ARTIFACT, combined=False):
+def command(argv, timeout=30, limit=MAX_ARTIFACT, combined=False, isolated_git=False):
     """Drain bounded output without a shell, inherited Git overrides, or disk spooling."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(('GIT_', 'DOCKER_'))}
+    if isolated_git:
+        # Git must execute with the same config scope that the source check
+        # inspected. Machine filters are neither approved nor applied; local
+        # repository filters remain visible and are rejected by the validator.
+        env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
     try:
         with subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, env=env) as process:
@@ -99,7 +104,7 @@ def command(argv, timeout=30, limit=MAX_ARTIFACT, combined=False):
 
 def git(repo, *args):
     return command(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
-                    '-C', str(repo), *args])
+                    '-C', str(repo), *args], isolated_git=True)
 
 
 def docker_prefix(sudo=False):

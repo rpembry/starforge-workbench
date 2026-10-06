@@ -1,0 +1,22 @@
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      GIT_CONFIG_GLOBAL: /dev/null
+      GIT_CONFIG_NOSYSTEM: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: Test with isolated Git configuration
+        run: |
+          mkdir -p "$RUNNER_TEMP/test-home/config"
+          HOME="$RUNNER_TEMP/test-home" XDG_CONFIG_HOME="$RUNNER_TEMP/test-home/config" uv run pytest -q -rs
+      - run: node --test tests/keep_collector.test.mjs
+      - run: git fetch --no-tags --depth=1 origin main && git diff --check FETCH_HEAD HEAD

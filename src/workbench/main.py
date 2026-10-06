@@ -122,8 +122,11 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
             origin = request.headers.get('origin')
             expected_origin = os.environ.get('WB_PUBLIC_ORIGIN', str(request.base_url)).rstrip('/')
             if (origin and origin.rstrip('/') != expected_origin) or (request.url.path.startswith('/ui/') and not origin):
-                return JSONResponse(status_code=403, content={'error': {'code': 'origin_rejected', 'message': 'Cross-origin writes are disabled'}})
-        response = await call_next(request)
+                response = JSONResponse(status_code=403, content={'error': {'code': 'origin_rejected', 'message': 'Cross-origin writes are disabled'}})
+            else:
+                response = await call_next(request)
+        else:
+            response = await call_next(request)
         response.headers['Cache-Control'] = 'no-store'
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['Referrer-Policy'] = 'no-referrer'
@@ -390,7 +393,7 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
         return repository.import_batch(body.model_dump(mode='json'), who.name)
 
     @app.post('/api/collectors/heartbeat')
-    def collector_heartbeat(body: CollectorIn, who=Depends(principal)):
+    def collector_heartbeat(body: CollectorIn, who=Depends(collector)):
         return repository.collector_heartbeat(body.model_dump(mode='json'), who.name)
 
     @app.post('/api/provider-attention/generations', status_code=201)

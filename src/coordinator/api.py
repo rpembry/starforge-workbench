@@ -139,16 +139,7 @@ def create_app(store: CoordinatorStore, *, adapter: EvidenceAdapter | None = Non
 
     @app.get("/v1/capacity")
     async def capacity():
-        jobs = store.list(1000)
-        if len(jobs) == 1000:
-            return {"limits": store.policy.limits.model_dump(),
-                    "reservations": {"state": "unknown", "reason": "bounded read reached 1000 jobs"}}
-        active = [job for job in jobs if job["phase"] in {"active", "finalizing"}]
-        return {"limits": store.policy.limits.model_dump(), "reservations": {
-            "state": "snapshot", "pending": sum(job["phase"] == "queued" and job["intent"] == "run" for job in jobs),
-            "active": len(active),
-            "cpu_millis": sum(job["spec"]["resources"]["cpu_millis"] for job in active),
-            "memory_mb": sum(job["spec"]["resources"]["memory_mb"] for job in active)}}
+        return {"limits": store.policy.limits.model_dump(), "reservations": store.reservations()}
 
     @app.post("/v1/jobs/validate")
     async def validate(spec: JobSpec):
@@ -169,13 +160,14 @@ def create_app(store: CoordinatorStore, *, adapter: EvidenceAdapter | None = Non
         return {"job": job, "operation": {"key": body.idempotency_key, "state": "confirmed"}}
 
     @app.get("/v1/jobs")
-    async def jobs(limit: int = 100):
+    async def jobs(limit: int = 100, before: str | None = None):
         # List is a summary surface. The detailed, socket-protected job route
         # carries the opaque payload and approved policy references.
         fields = ("id", "version", "intent", "phase", "outcome", "visibility",
                   "reason", "attempt_id", "created_at", "updated_at")
-        return {"jobs": [{field: job[field] for field in fields}
-                         for job in store.list(limit)]}
+        page = store.list(limit, before=before)
+        return {"jobs": [{field: job[field] for field in fields} for job in page],
+                "next_cursor": page[-1]["id"] if len(page) == limit else None}
 
     @app.get("/v1/jobs/{job_id}")
     async def job(job_id: str):
