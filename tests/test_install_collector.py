@@ -51,14 +51,20 @@ def setup_install(tmp_path, monkeypatch):
 
 def test_installer_preflight_prevents_enabling_without_manifest(tmp_path, monkeypatch):
     home, base, release, config, calls = setup_install(tmp_path, monkeypatch)
+    installed = home / '.config/systemd/user/workbench-collector.service'
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(b'[Service]\nExecStart=/bin/old-collector\n')
+    original = installed.read_bytes()
     with pytest.raises(SystemExit, match='Collector manifest must be a private, owned regular file'):
         MODULE.install(release)
     assert not any('enable' in call for call in calls)
     assert not (base / 'collector-current').exists()
+    assert installed.read_bytes() == original
     (config / 'workbench.yaml').symlink_to(release / 'uv.lock')
     with pytest.raises(SystemExit, match='Collector manifest must be a private, owned regular file'):
         MODULE.install(release)
     assert not any('enable' in call for call in calls)
+    assert installed.read_bytes() == original
 
 
 def test_installer_replaces_stale_staging_link_and_reports_other_enabled_units(
@@ -120,9 +126,14 @@ def test_installer_refuses_public_manifest_and_keeps_current_on_verify_failure(
     manifest.write_text('contexts: []\n')
     current = base / 'collector-current'
     current.symlink_to(base / 'collector-releases/old')
+    installed = home / '.config/systemd/user/workbench-collector.service'
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(b'[Service]\nExecStart=/bin/old-collector\n')
+    original = installed.read_bytes()
     with pytest.raises(SystemExit, match='private, owned regular file'):
         MODULE.install(release)
     assert current.readlink() == base / 'collector-releases/old'
+    assert installed.read_bytes() == original
     manifest.chmod(0o600)
 
     def failed_verify(args, **kwargs):
@@ -135,4 +146,5 @@ def test_installer_refuses_public_manifest_and_keeps_current_on_verify_failure(
     with pytest.raises(subprocess.CalledProcessError):
         MODULE.install(release)
     assert current.readlink() == base / 'collector-releases/old'
+    assert installed.read_bytes() == original
     assert not any('enable' in call for call in calls)

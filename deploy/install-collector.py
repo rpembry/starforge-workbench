@@ -5,13 +5,14 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
-def unit_manifest(unit: Path, home: Path) -> Path:
+def unit_manifest(unit: Path, home: Path, *, dropins: Path | None = None) -> Path:
     """Read the effective user unit command, including local drop-in overrides."""
     command = None
-    dropins = unit.with_name(unit.name + '.d')
+    dropins = dropins or unit.with_name(unit.name + '.d')
     for path in [unit, *sorted(dropins.glob('*.conf'))]:
         for line in path.read_text().splitlines():
             if line.startswith('ExecStart='):
@@ -59,33 +60,45 @@ def install(release: Path, options: tuple[str, ...] = ()) -> None:
         selected.append('workbench-claude-observer.service')
     if '--with-opencode' in options:
         selected.append('workbench-opencode-observer.service')
-    for name in selected:
-        shutil.copyfile(release / 'deploy' / name, units / name)
-        subprocess.run(['systemd-analyze', '--user', 'verify', str(units / name)], check=True)
-    check_manifest(unit_manifest(units / 'workbench-collector.service', home))
-    if next_link.is_symlink():
-        next_link.unlink()
-    elif next_link.exists():
-        raise SystemExit(f'Refusing to replace non-symlink staging path: {next_link}')
+    staged = []
+    try:
+        for name in selected:
+            fd, path = tempfile.mkstemp(prefix=f'.{name}.', suffix='.service', dir=units)
+            os.close(fd)
+            candidate = Path(path)
+            staged.append((candidate, units / name))
+            shutil.copyfile(release / 'deploy' / name, candidate)
+            subprocess.run(['systemd-analyze', '--user', 'verify', str(candidate)], check=True)
+        check_manifest(unit_manifest(staged[0][0], home,
+                                     dropins=units / 'workbench-collector.service.d'))
+        if next_link.is_symlink():
+            next_link.unlink()
+        elif next_link.exists():
+            raise SystemExit(f'Refusing to replace non-symlink staging path: {next_link}')
 
-    subprocess.run([str(home / '.local/bin/uv'), 'sync', '--frozen', '--no-dev',
-                    '--no-editable', '--python', '3.12'], cwd=release, check=True)
-    source = config / 'client.json'
-    if source.is_symlink() or source.stat().st_uid != os.getuid() or source.stat().st_mode & 0o077:
-        raise SystemExit('Client source must be private and owned by you')
-    dest = config / 'collector.json'
-    if not dest.exists():
-        data = json.loads(source.read_text())
-        if data.get('auth_type') != 'cloudflare':
-            raise SystemExit('Expected Cloudflare credentials')
-        fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, 'w') as out:
-            json.dump({k: data[k] for k in ('url', 'auth_type', 'collector')}, out)
-    if dest.is_symlink() or dest.stat().st_uid != os.getuid() or dest.stat().st_mode & 0o077:
-        raise SystemExit('Collector credential file must be private and owned by you')
+        subprocess.run([str(home / '.local/bin/uv'), 'sync', '--frozen', '--no-dev',
+                        '--no-editable', '--python', '3.12'], cwd=release, check=True)
+        source = config / 'client.json'
+        if source.is_symlink() or source.stat().st_uid != os.getuid() or source.stat().st_mode & 0o077:
+            raise SystemExit('Client source must be private and owned by you')
+        dest = config / 'collector.json'
+        if not dest.exists():
+            data = json.loads(source.read_text())
+            if data.get('auth_type') != 'cloudflare':
+                raise SystemExit('Expected Cloudflare credentials')
+            fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, 'w') as out:
+                json.dump({k: data[k] for k in ('url', 'auth_type', 'collector')}, out)
+        if dest.is_symlink() or dest.stat().st_uid != os.getuid() or dest.stat().st_mode & 0o077:
+            raise SystemExit('Collector credential file must be private and owned by you')
 
-    next_link.symlink_to(release)
-    next_link.replace(base / 'collector-current')
+        for candidate, target in staged:
+            candidate.replace(target)
+        next_link.symlink_to(release)
+        next_link.replace(base / 'collector-current')
+    finally:
+        for candidate, _ in staged:
+            candidate.unlink(missing_ok=True)
     subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
     for name in selected:
         subprocess.run(['systemctl', '--user', 'enable', '--now', name], check=True)
