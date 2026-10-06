@@ -254,8 +254,17 @@ def test_browser_workspace_api_rejects_unsafe_stored_config(api, monkeypatch, tm
             'name': 'Docs', 'url': 'https://example.com/'}).status_code == 503
     finally:
         tmp_path.chmod(0o700)
-    config.write_text('version: 1\nworkspaces:\n  BAD: []\n')
-    assert api.get(route).json()['error']['code'] == 'browser_workspace_unavailable'
+    malformed = [
+        'version: 1\nworkspaces:\n  BAD: []\n',
+        'version: 1\nworkspaces:\n  123: []\n',
+        'version: 1\nworkspaces:\n  default:\n    - {name: Mail, url: "https://example.com/", match: []}\n',
+        'version: 1\nworkspaces:\n  default:\n    - {name: Mail, url: "https://[bad"}\n',
+    ]
+    for document in malformed:
+        config.write_text(document)
+        response = api.get(route)
+        assert response.status_code == 503
+        assert response.json()['error']['code'] == 'browser_workspace_unavailable'
     config.write_text('version: 1\nworkspaces:\n  default: []\n')
     desktop_link = tmp_path / 'desktop-workspaces.yaml'
     os.link(config, desktop_link)

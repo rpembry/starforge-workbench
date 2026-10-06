@@ -65,14 +65,17 @@ def _config_path(path: Path | str | None = None) -> Path:
 
 
 def _validate_url(url: str) -> str:
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        raise BrowserInputError('Workspace URLs must be valid HTTP(S) URLs') from exc
     if parsed.scheme not in {'http', 'https'} or not parsed.netloc or parsed.username or parsed.password:
         raise BrowserInputError('Workspace URLs must be HTTP(S) URLs without embedded credentials')
     return url
 
 
 def _validate_workspace(name: str) -> str:
-    if not WORKSPACE_RE.fullmatch(name):
+    if not isinstance(name, str) or not WORKSPACE_RE.fullmatch(name):
         raise BrowserInputError('Workspace names must use lowercase letters, numbers, hyphens, or underscores')
     return name
 
@@ -86,7 +89,7 @@ def _validate_entry(entry: object) -> dict[str, str]:
     if not isinstance(url, str):
         raise BrowserInputError('Browser entry URL must be text')
     match = entry.get('match', 'origin')
-    if match not in {'origin', 'url'}:
+    if not isinstance(match, str) or match not in {'origin', 'url'}:
         raise BrowserInputError("Browser entry match must be 'origin' or 'url'")
     return {'name': name, 'url': _validate_url(url), 'match': match}
 
@@ -132,7 +135,7 @@ def load_config(path: Path | str | None = None) -> dict[str, object]:
         raise BrowserConfigError('Unable to read browser workspace config') from None
     try:
         return validate_document(document)
-    except BrowserInputError as exc:
+    except (ValueError, TypeError) as exc:
         raise BrowserConfigError('Invalid stored browser workspace config') from exc
 
 
