@@ -103,6 +103,27 @@ def test_roles_are_separated_and_worker_reads_only_by_claim(api):
     assert api.post('/api/instructions/claim', json={'registered_session_id': SESSION_ID}).status_code == 401
 
 
+def test_received_response_window_ends_as_uncertain_and_revokes_lease(api, repo):
+    register_session(api)
+    item = create_instruction(api)
+    claimed = claim(api).json()
+    result = api.post(f"/api/instructions/{item['id']}/results", json={
+        'lease_token': claimed['lease_token'], 'outcome': 'received',
+        'reason_code': 'provider_accepted'})
+    assert result.status_code == 200 and result.json()['state'] == 'received'
+    with repo.connection() as db:
+        db.execute('UPDATE instructions SET received_at=? WHERE id=?', (stamp(-2 * 60 * 60 - 1), item['id']))
+        db.commit()
+    api.headers['Authorization'] = 'Bearer ' + OPERATOR
+    terminal = api.get(f"/api/instructions/{item['id']}").json()
+    assert terminal['state'] == 'uncertain'
+    assert terminal['reason_code'] == 'response_unobserved'
+    assert terminal['history'][-1]['reason_code'] == 'response_unobserved'
+    with repo.connection() as db:
+        row = db.execute('SELECT lease_token_hash,claim_owner FROM instructions WHERE id=?', (item['id'],)).fetchone()
+    assert row['lease_token_hash'] is None and row['claim_owner'] is None
+
+
 @pytest.mark.parametrize('change,code', [
     ({'evidence_state': 'unknown'}, 'target_uncontrollable'),
     ({'evidence_state': 'stopped'}, 'target_uncontrollable'),

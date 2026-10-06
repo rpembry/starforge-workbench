@@ -144,6 +144,31 @@ def test_claim_only_exact_registration_then_report_admission(tmp_path):
     assert 'SYNTHETIC INSTRUCTION' not in json.dumps(api.calls[-1][1])
 
 
+def test_degraded_receipt_does_not_block_another_claim(tmp_path):
+    api, adapter = FakeAPI(), FakeAdapter()
+    adapter.degraded_receipts = 1
+    result = cycle(api, config(tmp_path), adapter, lambda *args: SESSION)
+    assert result['ambiguous'] == 1 and result['claimed'] == result['reported'] == 1
+
+
+def test_server_expired_response_receipt_is_not_retried_forever(tmp_path):
+    class MissingResult(FakeAPI):
+        def post(self, path, json):
+            if path.endswith('/results'):
+                self.calls.append((path, json))
+                return Response(404)
+            return super().post(path, json)
+
+    api, adapter = MissingResult(), FakeAdapter()
+    api.claim_status = 404
+    adapter.response_evidence = [ResponseEvidence(
+        INSTRUCTION, 'synthetic_lease_token', 'responded',
+        'provider_response_without_error')]
+    result = cycle(api, config(tmp_path), adapter, lambda *args: SESSION)
+    assert result['ambiguous'] == 1
+    assert adapter.marked == [(INSTRUCTION, 'unreportable')]
+
+
 def test_kill_switch_and_missing_local_evidence_prevent_claim(tmp_path):
     api, adapter = FakeAPI(), FakeAdapter()
     disabled = config(tmp_path, enabled=False)
