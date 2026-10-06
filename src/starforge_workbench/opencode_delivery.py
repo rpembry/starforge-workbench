@@ -212,6 +212,15 @@ class OpenCodeDelivery:
             return 'unavailable'
         return 'present' if status == 200 else 'absent' if status == 404 else 'unavailable'
 
+    def attempt_recorded(self, instruction_id):
+        """A durable marker means a POST may have begun; never infer no-send."""
+        if not isinstance(instruction_id, str) or not IDENTITY.fullmatch(instruction_id):
+            raise DeliveryError('Invalid instruction identity')
+        path = self.root / (hashlib.sha256(instruction_id.encode()).hexdigest() + '.json')
+        invalid = path.with_suffix('.invalid')
+        return (path.exists() or path.is_symlink() or
+                invalid.exists() or invalid.is_symlink())
+
     def deliver(self, instruction_id, session_id, text, lease_token=None):
         if not isinstance(instruction_id, str) or not IDENTITY.fullmatch(instruction_id):
             raise DeliveryError('Invalid instruction identity')

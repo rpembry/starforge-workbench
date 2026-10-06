@@ -49,6 +49,7 @@ def test_exact_session_and_typed_text_only(tmp_path):
     delivery = adapter(tmp_path, fake)
     text = '  Synthetic instruction: $(touch /tmp/never-run)\nline two  '
     result = delivery.deliver(INSTRUCTION, SESSION, text)
+    assert delivery.attempt_recorded(INSTRUCTION)
     assert result.state == 'received' and result.reason == 'api_admitted'
     post = [call for call in fake.calls if call[0] == 'POST']
     assert len(post) == 1
@@ -63,6 +64,14 @@ def test_exact_session_and_typed_text_only(tmp_path):
     assert '/tmp/never-run' not in receipt.read_text()
     assert delivery.deliver(INSTRUCTION, SESSION, text).reason == 'prior_admission'
     assert len([call for call in fake.calls if call[0] == 'POST']) == 1
+
+
+def test_attempt_boundary_is_absent_before_receipt(tmp_path):
+    delivery = adapter(tmp_path, FakeOpenCode())
+    assert not delivery.attempt_recorded(INSTRUCTION)
+    with pytest.raises(DeliveryError):
+        delivery.deliver(INSTRUCTION, SESSION, '')
+    assert not delivery.attempt_recorded(INSTRUCTION)
 
 
 @pytest.mark.parametrize('text', [

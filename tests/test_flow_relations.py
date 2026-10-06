@@ -175,11 +175,11 @@ def test_version_eight_upgrade_keeps_existing_actions(api, repo):
         db.execute('DROP TABLE flow_publication_ops')
         db.execute('DROP TABLE flow_action_links')
         db.execute('DROP TABLE flow_work_items')
-        db.execute('DELETE FROM schema_migrations WHERE version IN (9,10,11,12,13,14)')
+        db.execute('DELETE FROM schema_migrations WHERE version IN (9,10,11,12,13,14,15)')
         db.commit()
     upgraded = SQLiteRepository(repo.path)
     assert upgraded.get('actions', existing['id'])['status'] == 'accepted'
     assert upgraded.list_work_items() == []
     with upgraded.connection() as db:
         assert [row[0] for row in db.execute(
-                'SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 15))
+                'SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 16))

@@ -155,6 +155,11 @@ instruction.
   commands expire; they do not follow a display name.
 - Provider unavailable before transmission returns the claim to a bounded
   retryable condition while unexpired. Definite provider rejection is `failed`.
+- The worker never attempts a provider POST without a confirmed claim renewal.
+  An unrenewed lease expiry requeues the instruction if it has not expired;
+  a renewed claim's lease expiry remains uncertain. Local failures before a
+  durable provider-attempt marker are retryable; failures after that marker
+  remain uncertain unless positive provider evidence resolves them.
 - Connection loss after transmission begins is `uncertain` unless provider-side
   idempotency or lookup proves the outcome.
 - A kill switch stops new claims and delivery without deleting pending records.
