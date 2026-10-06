@@ -1,10 +1,38 @@
 """Install an extracted collector release as the current user; no provider control."""
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+
+def unit_manifest(unit: Path, home: Path) -> Path:
+    """Read the effective user unit command, including local drop-in overrides."""
+    command = None
+    dropins = unit.with_name(unit.name + '.d')
+    for path in [unit, *sorted(dropins.glob('*.conf'))]:
+        for line in path.read_text().splitlines():
+            if line.startswith('ExecStart='):
+                command = line.partition('=')[2].strip() or None
+    if not command:
+        raise SystemExit('Collector unit needs an ExecStart command with --manifest')
+    try:
+        args = shlex.split(command)
+        manifest = args[args.index('--manifest') + 1].replace('%h', str(home))
+    except (ValueError, IndexError):
+        raise SystemExit('Collector unit needs an ExecStart command with --manifest') from None
+    path = Path(manifest)
+    if not path.is_absolute():
+        raise SystemExit('Collector unit manifest must be an absolute path')
+    return path
+
+
+def check_manifest(manifest: Path) -> None:
+    if (manifest.is_symlink() or not manifest.is_file() or
+            manifest.stat().st_uid != os.getuid() or manifest.stat().st_mode & 0o077):
+        raise SystemExit(f'Collector manifest must be a private, owned regular file before enabling the unit: {manifest}')
 
 
 def install(release: Path, options: tuple[str, ...] = ()) -> None:
@@ -14,11 +42,27 @@ def install(release: Path, options: tuple[str, ...] = ()) -> None:
     if release.parent != base / 'collector-releases' or not (release / 'uv.lock').is_file():
         raise SystemExit('Use an extracted release under ~/.local/share/starforge-ai-workbench/collector-releases')
 
-    config = home / '.config/starforge-ai-workbench'
-    manifest = config / 'workbench.yaml'
-    if manifest.is_symlink() or not manifest.is_file():
-        raise SystemExit(f'Collector manifest must be a regular file before enabling the unit: {manifest}')
+    xdg_config = Path(os.environ.get('XDG_CONFIG_HOME') or home / '.config')
+    if not xdg_config.is_absolute():
+        raise SystemExit('XDG_CONFIG_HOME must be an absolute path')
+    config = xdg_config / 'starforge-ai-workbench'
     next_link = base / 'collector-current.next'
+
+    units = home / '.config/systemd/user'
+    units.mkdir(parents=True, exist_ok=True)
+    selected = ['workbench-collector.service']
+    if '--with-observer' in options:
+        if not (config / 'worklog-bootstrap.json').is_file():
+            raise SystemExit('Create protected Worklog bootstrap config before enabling the observer')
+        selected.append('workbench-observer.service')
+    if '--with-claude' in options:
+        selected.append('workbench-claude-observer.service')
+    if '--with-opencode' in options:
+        selected.append('workbench-opencode-observer.service')
+    for name in selected:
+        shutil.copyfile(release / 'deploy' / name, units / name)
+        subprocess.run(['systemd-analyze', '--user', 'verify', str(units / name)], check=True)
+    check_manifest(unit_manifest(units / 'workbench-collector.service', home))
     if next_link.is_symlink():
         next_link.unlink()
     elif next_link.exists():
@@ -42,31 +86,13 @@ def install(release: Path, options: tuple[str, ...] = ()) -> None:
 
     next_link.symlink_to(release)
     next_link.replace(base / 'collector-current')
-    units = home / '.config/systemd/user'
-    units.mkdir(parents=True, exist_ok=True)
-    restarted = {'workbench-collector.service'}
-
-    def enable_and_restart(name: str) -> None:
-        shutil.copyfile(release / 'deploy' / name, units / name)
-        subprocess.run(['systemd-analyze', '--user', 'verify', str(units / name)], check=True)
-        subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
+    subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
+    for name in selected:
         subprocess.run(['systemctl', '--user', 'enable', '--now', name], check=True)
         subprocess.run(['systemctl', '--user', 'restart', name], check=True)
-        restarted.add(name)
-
-    enable_and_restart('workbench-collector.service')
-
-    if '--with-observer' in options:
-        if not (config / 'worklog-bootstrap.json').is_file():
-            raise SystemExit('Create protected Worklog bootstrap config before enabling the observer')
-        enable_and_restart('workbench-observer.service')
-    if '--with-claude' in options:
-        enable_and_restart('workbench-claude-observer.service')
-    if '--with-opencode' in options:
-        enable_and_restart('workbench-opencode-observer.service')
 
     for unit in sorted(units.glob('*.service')):
-        if unit.name in restarted or 'collector-current' not in unit.read_text():
+        if unit.name in selected or 'collector-current' not in unit.read_text():
             continue
         enabled = subprocess.run(['systemctl', '--user', 'is-enabled', '--quiet', unit.name],
                                  check=False)

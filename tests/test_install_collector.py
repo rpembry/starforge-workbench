@@ -38,6 +38,7 @@ def setup_install(tmp_path, monkeypatch):
                                   'collector': {'client_id': 'synthetic', 'client_secret': 'synthetic'}}))
     source.chmod(0o600)
     monkeypatch.setattr(MODULE.Path, 'home', lambda: home)
+    monkeypatch.delenv('XDG_CONFIG_HOME', raising=False)
     calls = []
 
     def fake_run(args, **kwargs):
@@ -50,20 +51,21 @@ def setup_install(tmp_path, monkeypatch):
 
 def test_installer_preflight_prevents_enabling_without_manifest(tmp_path, monkeypatch):
     home, base, release, config, calls = setup_install(tmp_path, monkeypatch)
-    with pytest.raises(SystemExit, match='Collector manifest must be a regular file'):
+    with pytest.raises(SystemExit, match='Collector manifest must be a private, owned regular file'):
         MODULE.install(release)
-    assert calls == []
+    assert not any('enable' in call for call in calls)
     assert not (base / 'collector-current').exists()
     (config / 'workbench.yaml').symlink_to(release / 'uv.lock')
-    with pytest.raises(SystemExit, match='Collector manifest must be a regular file'):
+    with pytest.raises(SystemExit, match='Collector manifest must be a private, owned regular file'):
         MODULE.install(release)
-    assert calls == []
+    assert not any('enable' in call for call in calls)
 
 
 def test_installer_replaces_stale_staging_link_and_reports_other_enabled_units(
         tmp_path, monkeypatch, capsys):
     home, base, release, config, calls = setup_install(tmp_path, monkeypatch)
     (config / 'workbench.yaml').write_text('contexts: []\n')
+    (config / 'workbench.yaml').chmod(0o600)
     stale = base / 'collector-current.next'
     stale.symlink_to(base / 'collector-releases/old')
     units = home / '.config/systemd/user'
@@ -84,9 +86,53 @@ def test_installer_replaces_stale_staging_link_and_reports_other_enabled_units(
 def test_installer_refuses_regular_staging_file(tmp_path, monkeypatch):
     home, base, release, config, calls = setup_install(tmp_path, monkeypatch)
     (config / 'workbench.yaml').write_text('contexts: []\n')
+    (config / 'workbench.yaml').chmod(0o600)
     staging = base / 'collector-current.next'
     staging.write_text('do not replace')
     with pytest.raises(SystemExit, match='Refusing to replace non-symlink'):
         MODULE.install(release)
     assert staging.read_text() == 'do not replace'
-    assert calls == []
+    assert not any('enable' in call for call in calls)
+
+
+def test_installer_uses_xdg_manifest_named_by_dropin(tmp_path, monkeypatch):
+    home, base, release, config, calls = setup_install(tmp_path, monkeypatch)
+    xdg = tmp_path / 'custom-config'
+    xdg.mkdir()
+    custom = xdg / 'starforge-ai-workbench'
+    config.rename(custom)
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(xdg))
+    manifest = custom / 'workbench.yaml'
+    manifest.write_text('contexts: []\n')
+    manifest.chmod(0o600)
+    dropin = home / '.config/systemd/user/workbench-collector.service.d/override.conf'
+    dropin.parent.mkdir(parents=True)
+    dropin.write_text(f'[Service]\nExecStart=\nExecStart=/bin/wb-collect --manifest {manifest}\n')
+    MODULE.install(release)
+    assert (base / 'collector-current').resolve() == release
+    assert any(call[-2:] == ('--now', 'workbench-collector.service') for call in calls)
+
+
+def test_installer_refuses_public_manifest_and_keeps_current_on_verify_failure(
+        tmp_path, monkeypatch):
+    home, base, release, config, calls = setup_install(tmp_path, monkeypatch)
+    manifest = config / 'workbench.yaml'
+    manifest.write_text('contexts: []\n')
+    current = base / 'collector-current'
+    current.symlink_to(base / 'collector-releases/old')
+    with pytest.raises(SystemExit, match='private, owned regular file'):
+        MODULE.install(release)
+    assert current.readlink() == base / 'collector-releases/old'
+    manifest.chmod(0o600)
+
+    def failed_verify(args, **kwargs):
+        calls.append(tuple(args))
+        if args[0] == 'systemd-analyze':
+            raise subprocess.CalledProcessError(1, args)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(MODULE.subprocess, 'run', failed_verify)
+    with pytest.raises(subprocess.CalledProcessError):
+        MODULE.install(release)
+    assert current.readlink() == base / 'collector-releases/old'
+    assert not any('enable' in call for call in calls)
