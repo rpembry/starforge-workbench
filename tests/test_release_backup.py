@@ -55,7 +55,7 @@ def _fake(bin_dir, name, script):
 
 def _run_installer(tmp_path, health_ok, backup_ok=True, first_install=False,
                    configured_db=None, env_body=None, db_present=True, default_decoy=False,
-                   dropin_override=False):
+                   dropin_override=False, shared_override=False, extra_override=False):
     opt = tmp_path / 'opt/workbench'
     release = opt / 'releases/new'
     old = opt / 'releases/old'
@@ -82,6 +82,15 @@ def _run_installer(tmp_path, health_ok, backup_ok=True, first_install=False,
         dropins = tmp_path / 'etc/systemd/system/workbench.service.d'
         dropins.mkdir()
         (dropins / 'override.conf').write_text('[Service]\nEnvironment=WB_DATABASE=/synthetic/other.sqlite\n')
+    if shared_override:
+        dropins = tmp_path / 'etc/systemd/system/service.d'
+        dropins.mkdir()
+        (dropins / 'override.conf').write_text('[Service]\nEnvironmentFile=/synthetic/other.env\n')
+    extra_unit_dir = tmp_path / 'local/systemd/system'
+    if extra_override:
+        dropins = extra_unit_dir / 'workbench.service.d'
+        dropins.mkdir(parents=True)
+        (dropins / 'override.conf').write_text('[Service]\nEnvironment=WB_DATABASE=/synthetic/other.sqlite\n')
     state = tmp_path / 'var/lib/workbench'
     state.mkdir(parents=True)
     database = configured_db or state / 'workbench.sqlite'
@@ -100,6 +109,9 @@ def _run_installer(tmp_path, health_ok, backup_ok=True, first_install=False,
     _fake(bin_dir, 'getent', 'echo "workbench:x:1001:1001"\n')
     _fake(bin_dir, 'chown', 'exit 0\n')
     _fake(bin_dir, 'install', 'for arg do previous=${last-}; last=$arg; done\ncp "$previous" "$last"\n')
+    _fake(bin_dir, 'systemd-analyze', '''[ "$1" = unit-paths ] && [ "$2" = --system ]
+printf '%s\n' "$UNIT_PATHS"
+''')
     _fake(bin_dir, 'systemctl', '''printf 'systemctl %s current=%s rollback=%s\n' "$1" "$(readlink "$CURRENT_LINK")" "$(cat "$ROLLBACK_RECORD" 2>/dev/null || echo missing)" >> "$EVENTS"
 if [ "$FIRST_INSTALL" = yes ] && [ "$1" = stop ]; then exit 5; fi
 exit 0
@@ -134,6 +146,11 @@ printf '%s\n' "$BACKUP_DIR/synthetic-backup.sqlite"
                                  'BACKUP_DIR': str(state / 'backups'),
                                  'BACKUP_OK': 'yes' if backup_ok else 'no',
                                  'FIRST_INSTALL': 'yes' if first_install else 'no',
+                                 'UNIT_PATHS': '\n'.join((str(tmp_path / 'etc/systemd/system'),
+                                                          str(tmp_path / 'run/systemd/system'),
+                                                          str(tmp_path / 'usr/lib/systemd/system'),
+                                                          str(tmp_path / 'lib/systemd/system'),
+                                                          str(extra_unit_dir))),
                                  'HEALTH_OK': 'yes' if health_ok else 'no'}, check=False)
     return result, events.read_text().splitlines() if events.exists() else [], opt, old, release
 
@@ -212,6 +229,17 @@ def test_installer_fails_before_stop_on_unparseable_database_config(tmp_path, en
 def test_installer_rejects_effective_unit_override_before_stop(tmp_path):
     result, events, opt, old, _ = _run_installer(
         tmp_path, health_ok=True, dropin_override=True)
+    assert result.returncode != 0
+    assert not events
+    assert (opt / 'current').resolve() == old
+    assert 'Unsupported workbench.service override' in result.stderr
+
+
+@pytest.mark.parametrize('kind', ['shared', 'extra'])
+def test_installer_rejects_shared_or_additional_path_override_before_stop(tmp_path, kind):
+    result, events, opt, old, _ = _run_installer(
+        tmp_path, health_ok=True, shared_override=kind == 'shared',
+        extra_override=kind == 'extra')
     assert result.returncode != 0
     assert not events
     assert (opt / 'current').resolve() == old
