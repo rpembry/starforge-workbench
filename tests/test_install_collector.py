@@ -1,0 +1,92 @@
+"""Synthetic checks for the collector deployment recipe; never run systemd."""
+import importlib.util
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location('install_collector', ROOT / 'deploy/install-collector.py')
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+MANIFEST = '%h/.config/starforge-ai-workbench/workbench.yaml'
+
+
+def test_shipped_collector_units_use_private_manifest():
+    paths = list((ROOT / 'deploy').glob('*.service')) + list((ROOT / 'deploy').glob('*.conf.example'))
+    manifest_flags = [line.split('--manifest ', 1)[1].split()[0]
+                      for path in paths for line in path.read_text().splitlines()
+                      if '--manifest ' in line]
+    assert len(manifest_flags) >= 3
+    assert set(manifest_flags) == {MANIFEST}
+
+
+def setup_install(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    base = home / '.local/share/starforge-ai-workbench'
+    release = base / 'collector-releases/v1'
+    (release / 'deploy').mkdir(parents=True)
+    (release / 'uv.lock').write_text('synthetic')
+    (release / 'deploy/workbench-collector.service').write_text(
+        (ROOT / 'deploy/workbench-collector.service').read_text())
+    config = home / '.config/starforge-ai-workbench'
+    config.mkdir(parents=True)
+    source = config / 'client.json'
+    source.write_text(json.dumps({'url': 'https://example.invalid', 'auth_type': 'cloudflare',
+                                  'collector': {'client_id': 'synthetic', 'client_secret': 'synthetic'}}))
+    source.chmod(0o600)
+    monkeypatch.setattr(MODULE.Path, 'home', lambda: home)
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(tuple(args))
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(MODULE.subprocess, 'run', fake_run)
+    return home, base, release, config, calls
+
+
+def test_installer_preflight_prevents_enabling_without_manifest(tmp_path, monkeypatch):
+    home, base, release, config, calls = setup_install(tmp_path, monkeypatch)
+    with pytest.raises(SystemExit, match='Collector manifest must be a regular file'):
+        MODULE.install(release)
+    assert calls == []
+    assert not (base / 'collector-current').exists()
+    (config / 'workbench.yaml').symlink_to(release / 'uv.lock')
+    with pytest.raises(SystemExit, match='Collector manifest must be a regular file'):
+        MODULE.install(release)
+    assert calls == []
+
+
+def test_installer_replaces_stale_staging_link_and_reports_other_enabled_units(
+        tmp_path, monkeypatch, capsys):
+    home, base, release, config, calls = setup_install(tmp_path, monkeypatch)
+    (config / 'workbench.yaml').write_text('contexts: []\n')
+    stale = base / 'collector-current.next'
+    stale.symlink_to(base / 'collector-releases/old')
+    units = home / '.config/systemd/user'
+    units.mkdir(parents=True)
+    (units / 'workbench-opencode-publisher.service').write_text('ExecStart=collector-current/bin/wb-collect\n')
+    (units / 'unrelated.service').write_text('ExecStart=/bin/true\n')
+    MODULE.install(release)
+    assert (base / 'collector-current').resolve() == release
+    assert not stale.exists() and not stale.is_symlink()
+    assert any(call[-2:] == ('--now', 'workbench-collector.service') for call in calls)
+    assert ('systemctl', '--user', 'is-enabled', '--quiet',
+            'workbench-opencode-publisher.service') in calls
+    assert 'workbench-opencode-publisher.service' in capsys.readouterr().out
+    assert not any(call[-1] == 'workbench-opencode-publisher.service' and
+                   'restart' in call for call in calls)
+
+
+def test_installer_refuses_regular_staging_file(tmp_path, monkeypatch):
+    home, base, release, config, calls = setup_install(tmp_path, monkeypatch)
+    (config / 'workbench.yaml').write_text('contexts: []\n')
+    staging = base / 'collector-current.next'
+    staging.write_text('do not replace')
+    with pytest.raises(SystemExit, match='Refusing to replace non-symlink'):
+        MODULE.install(release)
+    assert staging.read_text() == 'do not replace'
+    assert calls == []
