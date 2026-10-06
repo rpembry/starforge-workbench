@@ -4,7 +4,7 @@ import json
 import sqlite3
 import uuid
 
-from .models import now
+from .models import now, utc_instant
 from .repository import Problem
 
 
@@ -61,6 +61,7 @@ def _apply_batch(repo, data, principal):
                     if target_resource == 'events':
                         if not item['occurred_at']:
                             raise Problem(422, 'legacy_timestamp_required', 'Historical event needs its original time')
+                        item['occurred_at'] = utc_instant(item['occurred_at'])
                         item.update(recorded_at=now(), recorded_by=principal)
                     else:
                         # Preserve explicitly sourced old commitments, not inferred proposals.

@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol
 
-from .models import now
+from .models import now, utc_instant
 
 
 class Problem(Exception):
@@ -53,6 +53,44 @@ INSTRUCTION_SESSION_RATE_LIMIT = 5
 INSTRUCTION_RATE_WINDOW_SECONDS = 60
 CONTROLLABLE_SESSION_PROVIDERS = {'opencode'}
 
+UTC_COLUMNS = {
+    'events': ('occurred_at', 'recorded_at'),
+    'runs': ('started_at', 'last_activity_at', 'heartbeat_at'),
+    'registered_sessions': ('observed_at', 'last_activity_at', 'heartbeat_at', 'created_at'),
+    'instructions': ('expires_at', 'created_at', 'updated_at', 'claimed_at', 'lease_until',
+                     'received_at', 'responded_at', 'terminal_at'),
+    'instruction_audit': ('occurred_at',),
+}
+
+
+def _migrate_utc_instants(db):
+    # The two audit tables are ordinarily immutable. Rewrite only the textual
+    # timezone representation while preserving each recorded instant and identity.
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        for trigger in ('events_immutable_update', 'instruction_audit_immutable_update'):
+            db.execute(f'DROP TRIGGER {trigger}')
+        for table, columns in UTC_COLUMNS.items():
+            for row in db.execute(f'SELECT rowid,{",".join(columns)} FROM {table}').fetchall():
+                changed = {}
+                for column in columns:
+                    if row[column] is not None:
+                        normalized = utc_instant(row[column])
+                        if normalized != row[column]:
+                            changed[column] = normalized
+                if changed:
+                    db.execute(f'UPDATE {table} SET {",".join(column+"=?" for column in changed)} WHERE rowid=?',
+                               (*changed.values(), row['rowid']))
+        db.execute("""CREATE TRIGGER events_immutable_update BEFORE UPDATE ON events
+                    BEGIN SELECT RAISE(ABORT, 'Events are immutable'); END""")
+        db.execute("""CREATE TRIGGER instruction_audit_immutable_update BEFORE UPDATE ON instruction_audit
+                    BEGIN SELECT RAISE(ABORT, 'Instruction audit records are immutable'); END""")
+        db.execute('INSERT INTO schema_migrations VALUES (?, ?)', (13, now()))
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+
 
 class SQLiteRepository:
     def __init__(self, path: Path):
@@ -75,7 +113,7 @@ class SQLiteRepository:
                 db.execute('INSERT INTO schema_migrations VALUES (?, ?)', (1, now()))
                 db.commit()
             versions = [r[0] for r in db.execute('SELECT version FROM schema_migrations ORDER BY version')]
-            supported = [list(range(1, version + 1)) for version in range(1, 13)]
+            supported = [list(range(1, version + 1)) for version in range(1, 14)]
             if versions not in supported:
                 raise RuntimeError('Unsupported database schema version')
             for version, filename in [(2, '002_collectors.sql'), (3, '003_imports.sql'),
@@ -89,6 +127,8 @@ class SQLiteRepository:
                     db.executescript('BEGIN IMMEDIATE;\n'+migration.read_text())
                     db.execute('INSERT INTO schema_migrations VALUES (?, ?)', (version, now()))
                     db.commit()
+            if 13 not in versions:
+                _migrate_utc_instants(db)
 
     @contextmanager
     def connection(self):
@@ -135,6 +175,12 @@ class SQLiteRepository:
     def create(self, resource, data, principal):
         table = self.table(resource)
         data = dict(data)
+        if table == 'events' and data.get('occurred_at'):
+            data['occurred_at'] = utc_instant(data['occurred_at'])
+        elif table == 'runs':
+            for field in ('started_at', 'last_activity_at'):
+                if data.get(field):
+                    data[field] = utc_instant(data[field])
         with self.connection() as db:
             try:
                 db.execute('BEGIN IMMEDIATE')
@@ -298,6 +344,9 @@ class SQLiteRepository:
         """Create/update only the same collector-owned opaque registration."""
         from datetime import datetime, timedelta, timezone
         data = dict(data)
+        for field in ('observed_at', 'last_activity_at'):
+            if data.get(field):
+                data[field] = utc_instant(data[field])
         observed = datetime.fromisoformat(data['observed_at'])
         if observed > datetime.now(timezone.utc) + timedelta(seconds=SESSION_MAX_FUTURE_SKEW_SECONDS):
             raise Problem(422, 'future_observation', 'Observation time is too far in the future')
@@ -443,8 +492,8 @@ class SQLiteRepository:
                 raise Problem(409, 'idempotency_conflict', 'Idempotency key is already in use')
             self._controllable_session(db, data['registered_session_id'])
             current = datetime.now(timezone.utc)
-            stamp = current.isoformat()
-            cutoff = (current - timedelta(seconds=INSTRUCTION_RATE_WINDOW_SECONDS)).isoformat()
+            stamp = current.isoformat(timespec='microseconds')
+            cutoff = (current - timedelta(seconds=INSTRUCTION_RATE_WINDOW_SECONDS)).isoformat(timespec='microseconds')
             principal_count = db.execute('SELECT count(*) FROM instructions WHERE operator_principal=? AND created_at>?',
                                          (principal, cutoff)).fetchone()[0]
             session_count = db.execute('SELECT count(*) FROM instructions WHERE registered_session_id=? AND created_at>?',
@@ -457,7 +506,7 @@ class SQLiteRepository:
                        idempotency_key=data['idempotency_key'],
                        registered_session_id=data['registered_session_id'], instruction_text=text,
                        expiry_minutes=data['expiry_minutes'], state='queued',
-                       expires_at=(current + timedelta(minutes=data['expiry_minutes'])).isoformat(),
+                       expires_at=(current + timedelta(minutes=data['expiry_minutes'])).isoformat(timespec='microseconds'),
                        created_at=stamp, updated_at=stamp, claimed_at=None, lease_until=None,
                        lease_token_hash=None, claim_owner=None, attempt_count=0, received_at=None,
                        responded_at=None, terminal_at=None, reason_code=None)
@@ -515,7 +564,7 @@ class SQLiteRepository:
                 raise Problem(503, 'instruction_claims_disabled', 'Instruction claims are disabled')
             self._controllable_session(db, session_id, principal)
             current = datetime.now(timezone.utc)
-            stamp = current.isoformat()
+            stamp = current.isoformat(timespec='microseconds')
             self._expire_instruction_leases(db, stamp)
             row = db.execute('''SELECT * FROM instructions
                 WHERE registered_session_id=? AND state='queued' AND expires_at>?
@@ -524,7 +573,7 @@ class SQLiteRepository:
                 raise Problem(404, 'no_instruction', 'No queued instruction is available')
             token = secrets.token_urlsafe(32)
             lease_until = min(current + timedelta(seconds=INSTRUCTION_LEASE_SECONDS),
-                              datetime.fromisoformat(row['expires_at'])).isoformat()
+                              datetime.fromisoformat(row['expires_at'])).isoformat(timespec='microseconds')
             changed = db.execute('''UPDATE instructions SET state='claimed',claimed_at=?,lease_until=?,
                 lease_token_hash=?,claim_owner=?,attempt_count=attempt_count+1,updated_at=?,reason_code='worker_claimed'
                 WHERE id=? AND state='queued' ''',
@@ -567,13 +616,13 @@ class SQLiteRepository:
             if not claims_enabled:
                 raise Problem(503, 'instruction_claims_disabled', 'Instruction claims are disabled')
             current = datetime.now(timezone.utc)
-            stamp = current.isoformat()
+            stamp = current.isoformat(timespec='microseconds')
             self._expire_instruction_leases(db, stamp)
             row = self._verify_instruction_lease(db, identity, token, principal)
             if row['state'] != 'claimed' or row['lease_until'] <= stamp:
                 raise Problem(409, 'invalid_transition', 'Only an active claim can be renewed')
             lease_until = min(current + timedelta(seconds=INSTRUCTION_LEASE_SECONDS),
-                              datetime.fromisoformat(row['expires_at'])).isoformat()
+                              datetime.fromisoformat(row['expires_at'])).isoformat(timespec='microseconds')
             db.execute('UPDATE instructions SET lease_until=?,updated_at=? WHERE id=?',
                        (lease_until, stamp, identity))
             renewed = db.execute('SELECT * FROM instructions WHERE id=?', (identity,)).fetchone()
@@ -750,7 +799,7 @@ class SQLiteRepository:
             from .attention import derive
             from .recent import present
             from .analytics import traffic_summary
-            stamp = current.isoformat()
+            stamp = current.isoformat(timespec='microseconds')
             analytics_events = [dict(r) for r in db.execute(
                 "SELECT * FROM events WHERE source=? ORDER BY occurred_at DESC", ("ga4-daily-collector",)
             )]
