@@ -60,17 +60,21 @@ def install(release: Path, options: tuple[str, ...] = ()) -> None:
         selected.append('workbench-claude-observer.service')
     if '--with-opencode' in options:
         selected.append('workbench-opencode-observer.service')
-    staged = []
-    try:
+    with tempfile.TemporaryDirectory(prefix='.collector-units-', dir=units) as staging:
+        stage = Path(staging)
         for name in selected:
-            fd, path = tempfile.mkstemp(prefix=f'.{name}.', suffix='.service', dir=units)
-            os.close(fd)
-            candidate = Path(path)
-            staged.append((candidate, units / name))
+            candidate = stage / name
             shutil.copyfile(release / 'deploy' / name, candidate)
-            subprocess.run(['systemd-analyze', '--user', 'verify', str(candidate)], check=True)
-        check_manifest(unit_manifest(staged[0][0], home,
-                                     dropins=units / 'workbench-collector.service.d'))
+            dropins = units / (name + '.d')
+            if dropins.is_dir():
+                shutil.copytree(dropins, stage / dropins.name)
+        # Verify the canonical unit names with their drop-ins in an isolated
+        # search path. Verifying a differently named staging file omits them.
+        verify_env = {**os.environ, 'SYSTEMD_UNIT_PATH': str(stage) + ':'}
+        for name in selected:
+            subprocess.run(['systemd-analyze', '--user', 'verify', name],
+                           check=True, env=verify_env)
+        check_manifest(unit_manifest(stage / 'workbench-collector.service', home))
         if next_link.is_symlink():
             next_link.unlink()
         elif next_link.exists():
@@ -92,13 +96,10 @@ def install(release: Path, options: tuple[str, ...] = ()) -> None:
         if dest.is_symlink() or dest.stat().st_uid != os.getuid() or dest.stat().st_mode & 0o077:
             raise SystemExit('Collector credential file must be private and owned by you')
 
-        for candidate, target in staged:
-            candidate.replace(target)
+        for name in selected:
+            (stage / name).replace(units / name)
         next_link.symlink_to(release)
         next_link.replace(base / 'collector-current')
-    finally:
-        for candidate, _ in staged:
-            candidate.unlink(missing_ok=True)
     subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
     for name in selected:
         subprocess.run(['systemctl', '--user', 'enable', '--now', name], check=True)

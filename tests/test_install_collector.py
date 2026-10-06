@@ -1,6 +1,7 @@
 """Synthetic checks for the collector deployment recipe; never run systemd."""
 import importlib.util
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -147,4 +148,38 @@ def test_installer_refuses_public_manifest_and_keeps_current_on_verify_failure(
         MODULE.install(release)
     assert current.readlink() == base / 'collector-releases/old'
     assert installed.read_bytes() == original
+    assert not any('enable' in call for call in calls)
+
+
+def test_real_systemd_verifier_rejects_invalid_dropin_executable(tmp_path, monkeypatch):
+    if not shutil.which('systemd-analyze'):
+        pytest.skip('systemd-analyze unavailable')
+    real_run = subprocess.run
+    home, base, release, config, calls = setup_install(tmp_path, monkeypatch)
+    manifest = config / 'workbench.yaml'
+    manifest.write_text('contexts: []\n')
+    manifest.chmod(0o600)
+    (release / 'deploy/workbench-collector.service').write_text(
+        f'[Service]\nExecStart=/bin/true --manifest {manifest}\n')
+    dropin = home / '.config/systemd/user/workbench-collector.service.d/override.conf'
+    dropin.parent.mkdir(parents=True)
+    dropin.write_text(f'[Service]\nExecStart=\n'
+                      f'ExecStart=/nonexistent/collector-fixture --manifest {manifest}\n')
+    installed = dropin.parent.parent / 'workbench-collector.service'
+    installed.write_bytes(b'[Service]\nExecStart=/bin/old-collector\n')
+
+    def verify_with_systemd(args, **kwargs):
+        calls.append(tuple(args))
+        if args[0] == 'systemd-analyze':
+            return real_run(args, capture_output=True, text=True, **kwargs)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(MODULE.subprocess, 'run', verify_with_systemd)
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        MODULE.install(release)
+    if 'Operation not permitted' in (error.value.stderr or ''):
+        pytest.skip('systemd verifier unavailable in this sandbox')
+    assert '/nonexistent/collector-fixture' in (error.value.stderr or '')
+    assert installed.read_bytes() == b'[Service]\nExecStart=/bin/old-collector\n'
+    assert not (base / 'collector-current').exists()
     assert not any('enable' in call for call in calls)
