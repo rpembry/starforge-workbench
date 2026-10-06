@@ -107,7 +107,7 @@ In Cloudflare mode, set `WB_AUTH_MODE=cloudflare`, `WB_ACCESS_CONFIG` to a file 
 
 ## Collectors and deployment
 
-Read each observer's CLI help and tests before enabling it. The process collector can be tried with `wb-collect --manifest PATH --context CONTEXT --dry-run`; it requires the host's process namespace and existing Workbench tmux sessions. Service units select contexts explicitly; adapt those selections to your manifest.
+Read each observer's CLI help and tests before enabling it. The process collector can be tried with `wb-collect --manifest PATH --context CONTEXT --dry-run`; it requires the host's process namespace and existing Workbench tmux sessions. Shipped collector units read `%h/.config/starforge-ai-workbench/workbench.yaml` and select contexts explicitly; adapt those selections to your manifest. A systemd drop-in can override `ExecStart` for a different manifest, including one under a custom `XDG_CONFIG_HOME`. The installer checks the manifest named by the effective user unit and requires an owned, nonsymlink regular file with no group or world permissions before enabling it. Omitting `--context` collects every enabled context.
 
 Registered-session publishing by the launcher collector is opt-in. Pass
 `--registration-state` (or `WB_REGISTERED_SESSION_STATE`) with an absolute path
