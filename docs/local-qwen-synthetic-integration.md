@@ -79,3 +79,25 @@ production human authentication, real VM transport and confidential-data integra
 remain absent. Trusted owner code and same-user attacks outside namespaces are
 outside this boundary. Metadata and status/timing covert channels remain review
 concerns. No production-readiness or whole-host DLP claim is made.
+# Stopped synthetic guest numeric composition
+
+`synthetic_guest_capacity.consume_capacity` is an owner-local consumer for the
+fixed one-CPU, 768 MiB synthetic-console registration. It copies only the exact
+successful capacity envelope into a frozen numeric value. Extra logs, model
+instructions, tools, paths, and targets fail closed. The required stopped/reaped
+booleans are trusted VM-owner evidence, not independently authenticated lifecycle
+or freshness attestations. No cloud entry point accepts this envelope.
+
+`GuestCapacityQwenAdapter` inherits the installed-model sandbox, durable inference
+slot, and resource limits. Its fixed prompt compares two synthetic planning CPU
+slots with the guest's one CPU under an explicit one-logical-CPU-per-slot
+assumption. CPU count does not establish production worker capacity; memory
+numbers are observation metadata. The detailed result and numeric provenance
+remain local. No model result grants release approval.
+
+The serial composition test uses mocked inference and a simulated authenticated
+verifier with a fake local inbox. It proves no preapproval disclosure, rejects a
+model-supplied approval, and sends only immutable reviewed bytes. It does not
+record actual human authorization. A real guest trial is held pending independent
+acceptance of the console transport fixes; that guest must be stopped and reaped
+before the one isolated model invocation. No production readiness is claimed.

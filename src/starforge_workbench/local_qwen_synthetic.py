@@ -177,6 +177,10 @@ class LocalQwen8BAdapter(MockQwenAdapter):
                 raise LocalModelError()
         self.evidence = None
 
+    def _prompt(self):
+        """Trusted registered synthetic adapters may specialize typed fixture data."""
+        return PROMPT
+
     def analyze(self, fixture):
         self.evidence = None
         if fixture != SYNTHETIC_FIXTURE:
@@ -226,7 +230,7 @@ class LocalQwen8BAdapter(MockQwenAdapter):
                 if remaining <= 0:
                     raise LocalModelError()
                 response = unix_request(path, '/completion', {
-                    'prompt': PROMPT, 'n_predict': 256, 'temperature': 0, 'stream': False,
+                    'prompt': self._prompt(), 'n_predict': 256, 'temperature': 0, 'stream': False,
                     'json_schema': {'type': 'object', 'properties': {
                         'summary': {'type': 'string'},
                         'findings': {'type': 'array', 'items': {'type': 'string'}}},
