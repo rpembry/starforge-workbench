@@ -1,8 +1,12 @@
 """Synthetic console/cgroup contracts without booting a VM in normal pytest."""
 import io
+import fcntl
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import time
+import subprocess
+import sys
 
 import pytest
 
@@ -115,6 +119,7 @@ def test_fixed_console_command_uses_domain_result_release_validation(tmp_path, m
     sink=io.BytesIO()
     selected._process=SimpleNamespace(stdin=sink,poll=lambda:None)
     selected._start=time.monotonic()
+    monkeypatch.setattr(selected,'_write',lambda payload,deadline:sink.write(payload))
     monkeypatch.setattr(selected,'_read',lambda *args:b'{"reachable":true}')
     result=DiagnosticService(registrations=(GUEST,),transport=selected).execute(GUEST.guest_id,'connectivity')
     assert result['data']=={'reachable':True}
@@ -122,3 +127,94 @@ def test_fixed_console_command_uses_domain_result_release_validation(tmp_path, m
     monkeypatch.setattr(selected,'_read',lambda *args:b'{"reachable":true,"secret":"SYNTHETIC_CANARY"}')
     result=DiagnosticService(registrations=(GUEST,),transport=selected).execute(GUEST.guest_id,'connectivity')
     assert result['reason']=='diagnostic_failed' and 'SYNTHETIC_CANARY' not in str(result)
+
+
+@pytest.mark.parametrize('filled_pipe', [True, False])
+def test_stalled_console_obeys_submission_and_collection_deadline(tmp_path, capfd, filled_pipe):
+    selected = adapter(tmp_path)
+    # Harmless child owns a pipe and never consumes it. Fill the actual kernel
+    # pipe rather than mocking select readiness or relying on an external timer.
+    process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, start_new_session=True, bufsize=0)
+    selected._process = process
+    selected._start = time.monotonic()
+    try:
+        if filled_pipe:
+            capacity = fcntl.fcntl(process.stdin.fileno(), fcntl.F_GETPIPE_SZ)
+            assert os.write(process.stdin.fileno(), b'x' * capacity) == capacity
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match='^Synthetic diagnostic failed$'):
+            selected.run(GUEST, Diagnostic.CONNECTIVITY, timeout_seconds=1, max_output_bytes=4096)
+        assert time.monotonic() - started < 1.6
+        assert selected.reaped
+        assert all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))
+        assert capfd.readouterr().err == ''
+    finally:
+        selected.close()
+
+
+def test_submission_handles_partial_writes_and_backpressure(tmp_path, monkeypatch):
+    import workbench.vm_synthetic as module
+    selected = adapter(tmp_path)
+    selected._process = SimpleNamespace(stdin=SimpleNamespace(fileno=lambda:11), poll=lambda:None)
+    received = bytearray()
+    attempts = 0
+    def write(fd, payload):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise BlockingIOError
+        received.extend(payload[:3])
+        return min(3, len(payload))
+    monkeypatch.setattr(module.os, 'set_blocking', lambda fd, value:None)
+    monkeypatch.setattr(module.os, 'write', write)
+    monkeypatch.setattr(module.select, 'select', lambda *args:([], [11], []))
+    selected._write(b'fixed command\n', time.monotonic()+1)
+    assert received == b'fixed command\n' and attempts > 2
+    with pytest.raises(RuntimeError, match='^Synthetic console unavailable$'):
+        selected._write(b'next', time.monotonic()-1)
+
+
+def test_cleanup_closes_every_stream_despite_broken_pipe(tmp_path, capfd):
+    import threading
+    selected = adapter(tmp_path)
+    closed = []
+    class BrokenStream:
+        def close(self):
+            closed.append(self)
+            raise BrokenPipeError('SYNTHETIC_PRIVATE_PATH')
+    streams = [BrokenStream() for _ in range(3)]
+    selected._process = SimpleNamespace(stdin=streams[0], stdout=streams[1], stderr=streams[2],
+                                        poll=lambda:0)
+    selected.close()
+    assert closed == streams
+    closed.clear()
+    timer = threading.Timer(0, selected._close_quietly)
+    timer.start()
+    timer.join(1)
+    assert not timer.is_alive() and closed == streams
+    assert capfd.readouterr().err == ''
+
+
+def test_cleanup_failure_is_fixed_and_does_not_replace_diagnostic_error(tmp_path, monkeypatch, capfd):
+    import workbench.vm_synthetic as module
+    selected = adapter(tmp_path)
+    selected._start = time.monotonic()
+    closed = []
+    streams = [SimpleNamespace(close=lambda:closed.append(True)) for _ in range(3)]
+    def wait(**kwargs):
+        raise OSError('SYNTHETIC_PRIVATE_PATH')
+    selected._process = SimpleNamespace(pid=123, stdin=streams[0], stdout=streams[1],
+                                        stderr=streams[2], poll=lambda:None, wait=wait)
+    monkeypatch.setattr(module.os, 'killpg', lambda *args:None)
+    with pytest.raises(RuntimeError, match='^Synthetic guest cleanup failed$'):
+        selected.close()
+    assert len(closed) == 3
+    def broken_write(*args):
+        raise BrokenPipeError('SYNTHETIC_PRIVATE_PATH')
+    monkeypatch.setattr(selected, '_write', broken_write)
+    with pytest.raises(RuntimeError, match='^Synthetic diagnostic failed$'):
+        selected.run(GUEST, Diagnostic.CONNECTIVITY, timeout_seconds=1, max_output_bytes=4096)
+    selected._close_quietly()
+    assert capfd.readouterr().err == ''

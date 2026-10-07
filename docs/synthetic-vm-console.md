@@ -94,7 +94,12 @@ diagnostic console, not network reachability.
 
 Direct calls recheck exact registration, operation permission and timeout/cap
 bounds. Command collection gets at most five seconds and 4096 payload bytes;
-small fixed framing overhead is separately bounded. Whole-line random markers
+nonblocking command submission and response collection share the same deadline.
+The boot login write shares the overall guest lifetime deadline. Cleanup closes
+each owned stream even after individual close failures; timer/failure paths emit
+no exception tracebacks. Direct cleanup reports only a fixed error if reaping
+cannot be confirmed. Termination/reaping has its own bounded shutdown waits.
+Small fixed framing overhead is separately bounded. Whole-line random markers
 prevent echoed shell command text or terminal control prefixes from becoming a
 result. Stderr counts toward collection bounds but cannot supply a result frame.
 Raw boot/serial/error bytes are discarded, not logged or published by the adapter.
