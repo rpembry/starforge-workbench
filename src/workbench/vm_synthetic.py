@@ -83,6 +83,26 @@ class SyntheticConsoleTransport:
     def reaped(self):
         return self._process is not None and self._process.poll() is not None
 
+    def _write(self, payload, deadline):
+        """Submit through the pipe without buffered writes or an unbounded flush."""
+        fd = self._process.stdin.fileno()
+        os.set_blocking(fd, False)
+        remaining = memoryview(payload)
+        while remaining:
+            budget = deadline - time.monotonic()
+            if budget <= 0 or self._process.poll() is not None:
+                raise RuntimeError('Synthetic console unavailable')
+            _, writable, _ = select.select([], [fd], [], min(0.25, budget))
+            if not writable:
+                continue
+            try:
+                written = os.write(fd, remaining)
+            except BlockingIOError:
+                continue
+            if written <= 0:
+                raise RuntimeError('Synthetic console unavailable')
+            remaining = remaining[written:]
+
     def _read(self, deadline, maximum, predicate):
         collected = bytearray()
         total_bytes = 0
@@ -114,15 +134,14 @@ class SyntheticConsoleTransport:
                 self._process = subprocess.Popen(plan.argv, pass_fds=plan.pass_fds, close_fds=True,
                                                 env={}, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                                 stderr=subprocess.PIPE, start_new_session=True,
-                                                preexec_fn=_process_limits)
-            self._timer = threading.Timer(self._policy.lifetime_seconds, self.close)
+                                                preexec_fn=_process_limits, bufsize=0)
+            self._timer = threading.Timer(self._policy.lifetime_seconds, self._close_quietly)
             self._timer.start()
             sent_login = False
             def boot(raw):
                 nonlocal sent_login
                 if b'login:' in raw and not sent_login:
-                    self._process.stdin.write(b'root\n')
-                    self._process.stdin.flush()
+                    self._write(b'root\n', self._start + self._policy.lifetime_seconds)
                     sent_login = True
                 if sent_login and b'Password:' in raw:
                     raise RuntimeError('Synthetic guest authentication unavailable')
@@ -132,7 +151,7 @@ class SyntheticConsoleTransport:
             self._read(self._start + self._policy.lifetime_seconds, 512 * 1024, boot)
             return self
         except Exception:
-            self.close()
+            self._close_quietly()
             raise RuntimeError('Synthetic guest boot failed') from None
 
     def run(self, guest, operation, *, timeout_seconds, max_output_bytes):
@@ -151,15 +170,14 @@ class SyntheticConsoleTransport:
             command = ("stty -echo; printf '\\nSF_BEGIN_" + token + "\\n'; "
                        + diagnostic_script(operation.value)
                        + "; printf 'SF_END_" + token + "\\n'\n")
-            self._process.stdin.write(command.encode())
-            self._process.stdin.flush()
+            self._write(command.encode(), min(deadline, self._start + self._policy.lifetime_seconds))
             # Framing and the first echoed fixed command need a small fixed
             # overhead; payload itself is independently capped at requested size.
             return self._read(min(deadline, self._start + self._policy.lifetime_seconds),
                               max_output_bytes + 2048,
                               lambda raw: framed_result(raw, token, max_output_bytes))
         except Exception:
-            self.close()
+            self._close_quietly()
             raise RuntimeError('Synthetic diagnostic failed') from None
         finally:
             self._lock.release()
@@ -168,27 +186,50 @@ class SyntheticConsoleTransport:
         with self._cleanup_lock:
             self._close()
 
+    def _close_quietly(self):
+        # Timer and failure paths must never emit a traceback or replace the
+        # fixed diagnostic error. Reaping remains observable via `reaped`.
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def _close(self):
         if self._timer is not None:
             self._timer.cancel()
         process = self._process
-        if process is not None and process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
+        if process is None:
+            return
+        try:
+            if process.poll() is None:
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except OSError:
                     pass
-                process.wait(timeout=3)
-        if process is not None:
+                try:
+                    process.wait(timeout=3)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    try:
+                        process.wait(timeout=3)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+            if process.poll() is None:
+                raise RuntimeError('Synthetic guest cleanup failed')
+        except Exception:
+            raise RuntimeError('Synthetic guest cleanup failed') from None
+        finally:
             for stream in (process.stdin, process.stdout, process.stderr):
                 if stream is not None:
-                    stream.close()
+                    try:
+                        stream.close()
+                    except Exception:
+                        # A close failure must not prevent other streams from
+                        # closing or disclose raw exception text to stderr.
+                        pass
 
     def __exit__(self, *args):
         self.close()
