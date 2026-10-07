@@ -49,6 +49,19 @@ caches containing guest data. The MCP facade also rejects unknown tools and
 extra/non-string arguments before SDK error formatting, without echoing caller
 data. Only three tools are registered; no resources or prompts export data.
 
+An outer protocol middleware rejects every unclassified request surface before
+SDK handlers format or log peer-controlled values. Resource reads, prompt gets,
+completion, subscriptions and logging controls are unsupported even when called
+directly; empty discovery alone is not the boundary. Direct resource/prompt
+Python entrypoints also produce fixed errors. Supported request validation
+failures use fixed messages and no input-bearing error data. Wire tests exercise
+both profiles, malformed tool requests and unknown method/notification names.
+The stdio framing guard also suppresses raw parser exceptions and replaces
+JSON-RPC error messages/data before delivery, including modern protocol
+classification failures that precede middleware. Protocol correlation IDs remain
+echoed as required; no peer-provided error details are retained. The stream guard
+closes and drains its response channel when stdin reaches EOF.
+
 Confidential mode explicitly denies screenshot, OCR, screen text, clipboard,
 download, file read/export, video and shell/SSH/QMP passthrough requests at the
 domain boundary. Unknown/unclassified operations deny in both modes. Content
