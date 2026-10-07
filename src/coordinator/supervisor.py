@@ -65,13 +65,8 @@ def _serialized(method):
     """Serialize authority changes and runtime mutations across service processes."""
     @wraps(method)
     def guarded(self, *args, **kwargs):
-        fd = os.open(self.root / ".supervisor.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+        with self.ownership_scope():
             return method(self, *args, **kwargs)
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
     return guarded
 
 
@@ -184,6 +179,67 @@ class Supervisor:
                     db.execute("UPDATE meta SET recovery_required=1")
         except sqlite3.Error as exc:
             raise Unavailable("supervisor journal unavailable") from exc
+
+    @contextmanager
+    def ownership_scope(self):
+        """Canonical cross-process fence shared with cancellation and takeover.
+
+        Not reentrant. Only short trusted local operations may hold this scope;
+        do not hold it around future real model inference or network transports.
+        """
+        fd = os.open(self.root / ".supervisor.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def _diagnostic_owner(self, db, *, job_id, attempt_id, incarnation, controller, generation):
+        if (any(type(value) is not str or not value for value in
+                (job_id, attempt_id, incarnation, controller))
+                or type(generation) is not int or generation < 1):
+            raise Fenced("invalid diagnostic binding")
+        now, meta = self._clock_check(db)
+        self._authority(meta, controller, generation, now)
+        if meta["recovery_required"]:
+            raise Fenced("diagnostic ownership recovery required")
+        row = db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+        if (not row or row["job_id"] != job_id or row["incarnation"] != incarnation
+                or row["generation"] != generation):
+            raise Fenced("diagnostic attempt identity mismatch")
+        if row["cancel"]:
+            return "cancelled"
+        if row["state"] != "running" or not row["runtime_id"] or row["deadline"] <= now:
+            raise Fenced("diagnostic attempt is not active")
+        return "active"
+
+    def diagnostic_ownership(self, **binding):
+        """Local probe for a worker/broker already inside diagnostic_scope.
+
+        Probe does not acquire the process fence; the composition root must use
+        diagnostic_scope for serialized operations. Missing authority is unknown.
+        """
+        try:
+            with self._tx() as db:
+                return self._diagnostic_owner(db, **binding)
+        except Exception:
+            return "unknown"
+
+    @contextmanager
+    def diagnostic_scope(self, **binding):
+        """Check exact accepted attempt under the same fence as cancellation.
+
+        Cancellation accepted before entry denies the operation. Cancellation
+        waiting behind this short scope applies after it; it cannot retroactively
+        revoke bytes already delivered while this controller was authorized.
+        Ownership must also be probed immediately before any release side effect.
+        """
+        with self.ownership_scope():
+            with self._tx() as db:
+                if self._diagnostic_owner(db, **binding) != "active":
+                    raise Fenced("diagnostic attempt cancelled")
+            yield
 
     @contextmanager
     def _db(self):

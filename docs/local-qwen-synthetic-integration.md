@@ -1,57 +1,81 @@
-# Next local Qwen integration slice (proposed)
+# Combined synthetic VM policy, release and local Qwen smoke
 
-This branch is separate from draft PR #284. Its starting point is reviewed head
-`e034aea6c94f4441c0c245323c89e322ac7f3eff`; combined review and operator acceptance
-remain pending. No inference or guest operation is enabled by this plan.
+This branch combines frozen PR284 head
+`e034aea6c94f4441c0c245323c89e322ac7f3eff` with fixed PR280 head
+`ad8884d80ae302095d4ad9dad4e79056e67b175a`. PR280 has scoped independent synthetic
+acceptance; PR284 has independent scoped review. Neither public branch is changed,
+merged or deployed by this integration. Combined acceptance needs its own review.
 
-## Owner agreement before execution
+## Canonical cancellation and release
 
-The designated VM owner controls the one synthetic guest. This worker must not
-create another guest, inspect/mount a guest disk, change the VM owner's transport,
-or compete with mining or existing inference jobs. The coordinator must agree one
-inference slot and resource ownership with the VM owner before synthetic inputs
-are submitted. Host capacity observations are not a reservation.
+`SupervisorDiagnosticFence` uses existing supervisor authority and its shared
+serialization lock. The supervisor validates job, attempt, incarnation, controller,
+generation, lease, recovery, cancellation and execution deadline. `SyntheticVmBridge`
+requires worker and broker to use this exact ownership callback and attempt
+identity. Only fixed confidential VM capacity is registered through the mock
+transport. Numeric VM results and synthetic source/log/screenshot canaries remain
+local. No MCP resource/artifact/log path receives them.
 
-## Bounded first inference proposal
+Prepare and dispatch share the canonical fence with supervisor cancellation and
+controller replacement, then the existing attempt lock. Cancellation recorded
+first denies dispatch; an already-dispatching release cannot be recalled. Human
+authentication and immutable approval still belong to the separate broker. No
+lease, queue, retry scheduler or acceptance ledger is added. The fast mock bridge
+may fence a diagnostic; never hold this global fence around long real inference.
 
-- Use an already installed small local Qwen model via the existing public loopback
-  Ollama endpoint. No downloads, model/settings edits, credential changes, remote
-  inference, endpoint discovery scan or internal runner reuse.
-- Prefer an 8B Q4 model, with approximately 5 GiB weight storage; provision an
-  initial 8 GiB resident-memory budget including overhead, subject measured use.
-  Larger 14B/30B models need a separate budget and are outside the first call.
-- One active call, two CPU threads, CPU-only offload request, context 2048 tokens,
-  output at most 256 tokens, request/response byte limits, 60-second client deadline.
-  No GPU allocation is proposed. These are proposed admission/request limits,
-  not proof of OS-enforced service-wide bounds.
-- A client deadline alone cannot prove cancellation of inference inside a shared
-  server. Verify the server's admission/abort/resource semantics read-only first;
-  fail closed if existing ownership cannot enforce the agreed budget. Do not
-  reconfigure or restart an existing service to satisfy this slice.
+## Owned installed-model adapter
 
-## Implementation boundary
+`LocalQwen8BAdapter` accepts only the fixed synthetic fixture. Trusted local code
+provides an installed runner and public Qwen3 8B Q4_K_M GGUF matching fixed size
+and SHA256. There is no download, cloud-controlled model/path/prompt/endpoint,
+shared Ollama request, or service/model/settings edit. The prompt contains six
+synthetic configured workers and four units of capacity, with no real guest data.
+Model text is strictly parsed untrusted data, never a tool or approval.
 
-Keep `capacity.v1` and its known synthetic inconsistency as the only job type.
-The cloud still supplies no prompts, endpoints, paths, model names or commands.
-The trusted local adapter constructs a fixed synthetic prompt from the registered
-fixture, never proprietary VM output. Treat model text/tool requests as untrusted
-data; parse a strict bounded schema with no tool execution. Return fixed failure
-codes and retain detailed output locally. Request failure or crash must preserve
-the existing operation/attempt identity and become uncertain without blind retry.
+Every adapter in the composition must reuse one owner-supplied private inference
+slot, admitted by the existing attempt lock. Preflight requires 24 GiB available
+RAM: 8 GiB for this workload plus 16 GiB margin for existing jobs and the separately
+owned guest. This is snapshot admission; unrelated processes are not reserved.
 
-Do not widen the mock-only gate implicitly: introduce an explicitly reviewed
-local adapter/config capability and test opt-in/disabled behavior. Use the same
-human release broker and owner lock/fence. No model can access operator credentials,
-approval receipts, broker storage or a release tool. Existing general report-AI,
-collector and worker socket paths must not receive these outputs.
+Each call creates a UUID transient user service with MemoryMax=8 GiB,
+MemorySwapMax=0, CPUQuota=200%, TasksMax=64, Nice=10, RuntimeMaxSec=60 and
+KillMode=control-group. Before generation, manager properties and live kernel
+cgroup memory/swap/CPU limits are checked. Generation and prompt processing use
+two threads, context 2048, output at most 256 tokens and one parallel slot.
+Bubblewrap supplies private PID/network/mount namespaces, drops capabilities,
+and exposes only read-only installed runtime/model files, system runtime, private
+scratch, proc and synthetic dev. No host home, broker state, guest disks, GPU/DRM
+devices or credentials are mounted. IPC uses the owned scratch Unix socket, with
+response-size and total-deadline bounds. No GPU allocation is requested.
 
-## Evidence needed
+Cleanup stops only the created UUID unit and reaps its helper, with a bounded
+owned-unit kill fallback. Unconfirmed cleanup denies success/evidence; the service
+runtime limit bounds remaining lifetime. Shared servers, mining, guests and
+unrelated jobs are untouched. No new privileges or persistent security/auth/network
+settings are installed. Durable slot intent precedes launch; a crash or unconfirmed
+cleanup blocks future admission across attempts. Intent/uncertain receipts require
+trusted owner reconciliation; there is no automatic inference retry or reset.
 
-Before the single live synthetic call, agree the exact local model identity and
-version, endpoint owner, resource budget and cancellation semantics. On a new
-exact head, independently test no remote endpoint acceptance, bounded parsing,
-fixed errors, timeout uncertainty, crash/retry identity, cancellation and no
-preapproval canary disclosure. Then measure one synthetic call against the known
-capacity finding and one local review; distinguish actual operator effort from
-simulated approval. VM guest integration remains with its owner and requires
-combined acceptance. Production/private-data readiness is not implied.
+## Evidence and limits
+
+Control tests are mocks and invoke no model. They cover canonical fencing,
+cancellation, identity/lease changes, local canaries, exact approved release,
+concurrent admission, live-limit rejection, kernel checks, malformed/tool-injected
+model results, bounded IPC and cleanup failure. Real-model evidence is separate:
+installed model, synthetic input, expected capacity deficit of two, and zero
+outbound content release. Elapsed time is a smoke observation, not a benchmark
+or measured human review effort.
+
+The explicit local CLI is `examples/local_qwen_smoke.py`; pass existing `--runner`,
+`--model` and the designated durable private `--inference-slot`. It uses synthetic
+supervisor allocation with canonical ownership probes before/after inference,
+holds no global fence during the long call and prints aggregate evidence only.
+It never approves or sends a report. Do not run it without coordinated resource
+ownership or use a temporary slot to bypass a retained uncertain receipt.
+
+The VM owner alone operates the one guest. This slice's VM transport remains fake;
+the real-model smoke consumes no live guest result. Separate OS identities,
+production human authentication, real VM transport and confidential-data integration
+remain absent. Trusted owner code and same-user attacks outside namespaces are
+outside this boundary. Metadata and status/timing covert channels remain review
+concerns. No production-readiness or whole-host DLP claim is made.
