@@ -25,6 +25,19 @@ excerpts, idempotency keys, leases, and credentials. API failure is a tool
 error, not evidence that a session is offline. These tools do not queue or
 retry instructions, attach to a provider, or alter delivery state.
 
+`agent_handoff_preview` resolves one configured context through the protected
+collector registration state and current operator API evidence. Configure
+`WB_MCP_REGISTRATION_STATE` and `WB_MCP_LAUNCHER_STATE` privately to enable
+generation verification. It returns an exact opaque registration ID only for a
+fresh, verified OpenCode session. `agent_handoff_send` also requires
+`WB_MCP_ALLOW_HANDOFF=1`, an explicit operator request, that exact ID, bounded
+plain text, and a stable caller-generated idempotency key. It uses the existing
+instruction queue; `accepted` means queued, not provider receipt or completed
+work. After an uncertain result, retry with the **same key and text** to inspect
+the original attempt. A changed target or unsupported provider returns a
+copyable handoff instead of sending. Codex sessions have no supported queue
+adapter. These tools never start, resume, or rebind a provider.
+
 The server instructions tell connected agents to treat an unsupported Workbench
 (`aiw`) operation as a possible MCP capability gap. An agent should consider
 creating a GitHub feature request for future support; if it lacks GitHub access,

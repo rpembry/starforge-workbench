@@ -18,6 +18,7 @@ import uuid
 
 import jsonschema
 import yaml
+from starforge_workbench.role_policy import instructions
 
 ROOT = Path(__file__).resolve().parents[2]
 SELF = ROOT / 'bin/ai-workbench'
@@ -63,6 +64,9 @@ def load(path):
             raise ValueError('Enabled context requires cwd')
         if c['risk'] == 'production' and c['enabled'] and c['provider'] != 'codex':
             raise ValueError('Enabled production contexts require the Codex adapter')
+        if c.get('role') and (c['provider'] != 'codex' or c.get('codex_mode') == 'agents' or
+                              c['resume_policy'] != 'explicit-session'):
+            raise ValueError('Daily interface role requires an exact-resume Codex conversation context')
     return data
 
 def cwd(c):
@@ -312,7 +316,8 @@ def retry_start(c, operation):
 
 
 def fingerprint(c):
-    return hashlib.sha256(json.dumps(c, sort_keys=True).encode()).hexdigest()
+    # Role affects the next provider invocation, not the existing tmux binding.
+    return hashlib.sha256(json.dumps({k: v for k, v in c.items() if k != 'role'}, sort_keys=True).encode()).hexdigest()
 
 def validate_context(c):
     if not c['enabled']:
@@ -679,15 +684,21 @@ def provider_argv(c, choice):
         raise ValueError('This context does not permit conversation resume')
     if c['provider'] == 'codex':
         base = [exe, '-c', 'check_for_update_on_startup=false', '-C', str(cwd(c)), '-s', 'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write', '-a', 'on-request']
+        if c.get('role'):
+            base += ['-c', 'developer_instructions='+json.dumps(instructions(c['role']), ensure_ascii=False)]
         for directory in directories(c)[1:]:
             base += ['--add-dir', str(directory)]
         if choice == 'picker':
+            if c.get('role'):
+                raise ValueError('Role-bound context cannot use a global conversation picker')
             return base+['resume', '--all']
         if choice == 'resume':
             if c['resume_policy'] == 'last-in-directory':
                 return base+['resume', '--last']
             data = saved_session(c)
             if not data:
+                if c.get('role'):
+                    raise ValueError('Role-bound context requires an exact saved conversation before reconnect')
                 return base+['resume', '--all']
             return base+['resume', data['id']]
         return base

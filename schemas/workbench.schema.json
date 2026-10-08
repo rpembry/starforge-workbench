@@ -58,6 +58,9 @@
               "opencode"
             ]
           },
+          "role": {
+            "enum": ["daily-interface"]
+          },
           "resume_policy": {
             "enum": [
               "never",

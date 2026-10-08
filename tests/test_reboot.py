@@ -20,6 +20,9 @@ class RebootTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.state = Path(self.temp.name)
         self.contexts = cli.load(ROOT/'config/workbench.example.yaml')['contexts']
+        manifest = patch.object(cli, 'default_manifest', return_value=ROOT/'config/workbench.example.yaml')
+        manifest.start()
+        self.addCleanup(manifest.stop)
 
     def test_stale_binding_fails_before_respawn_or_tab_request(self):
         c = self.contexts[0]
