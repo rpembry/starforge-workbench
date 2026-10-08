@@ -18,6 +18,9 @@ Responses are no-store with same-origin referrers and a restrictive CSP. Central
 status is only the approved protocol/status schema; errors never echo submitted
 data, report detail or paths. The fixture emits no application logs or console
 report. Deployment access/proxy logging must still be explicitly excluded.
+Query-bearing requests and trailing-slash redirects are disabled; unmatched
+routes/methods return the same content-free failed-status schema. A status claims
+report readiness only after verifying the current unchanged local report.
 
 Decisions submit only a short-lived, single-use server-held snapshot handle,
 decision and CSRF value. The server rechecks immutable bytes/destination/revision
@@ -25,6 +28,9 @@ and current worker/supervisor ownership before recording approve/reject/defer or
 revoking. A stale edit, takeover, cancellation, expired session/view or restart
 denies. There is no browser dispatch route. Explicit fake dispatch still uses the
 broker and canonical fence; no network content release is added.
+Session validity is rechecked inside the canonical fence after body/lock waits,
+including before revocation and local detail/status reads. All cooperating local
+draft edits, decisions, revocations and dispatch must use that same fence.
 
 The synthetic authority accepts only capabilities issued by its own instance for
 trusted synthetic-human session fixtures. Machine/service fixtures and caller

@@ -41,12 +41,13 @@ def _valid_origin(origin):
 def create_synthetic_review_app(*, broker=None, authority=None, worker=None, fence=None,
                                 origin=None, enabled=False, clock=time.time):
     """Disabled unless explicitly composed with synthetic owner fixtures only."""
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, redirect_slashes=False)
     if enabled is not True:
         return app
     if (type(broker) is not ReleaseBroker or type(authority) is not SyntheticHumanAuthority
             or type(worker) is not DiagnosticWorker or type(fence) is not SupervisorDiagnosticFence
             or type(broker.endpoint) is not FakeReleaseEndpoint or broker.authority is not authority
+            or not {'failed', 'report_ready'} <= broker.policy.automatic_statuses
             or broker.ownership is not fence.ownership or worker.ownership is not fence.ownership
             or broker.path != worker.path or broker.job_id != worker.job_id
             or broker.attempt_id != worker.attempt_id
@@ -61,11 +62,17 @@ def create_synthetic_review_app(*, broker=None, authority=None, worker=None, fen
     def denied(code=403):
         return JSONResponse(automatic_status('failed'), status_code=code)
 
+    from starlette.exceptions import HTTPException
+
+    @app.exception_handler(HTTPException)
+    async def http_error(request, exc):
+        return denied(exc.status_code)
+
     @app.middleware('http')
     async def boundary(request, call_next):
         forwarded = any(name in request.headers for name in
                         ('forwarded', 'x-forwarded-for', 'x-forwarded-host', 'cf-connecting-ip'))
-        if (str(request.base_url).rstrip('/') != origin or not request.client
+        if (str(request.base_url).rstrip('/') != origin or request.url.query or not request.client
                 or request.client.host not in {'127.0.0.1', '::1', 'testclient'} or forwarded
                 or any(name in request.headers for name in
                        ('authorization', 'cf-access-jwt-assertion', 'cf-access-client-id', 'cf-access-client-secret'))):
@@ -112,10 +119,19 @@ def create_synthetic_review_app(*, broker=None, authority=None, worker=None, fen
             "base-uri 'none'; frame-ancestors 'none'")
         return response
 
+    def current_session(request):
+        # Revalidate after body parsing/lock waits, including revocation, which
+        # does not otherwise call authenticate. Never refresh the fixture expiry.
+        current = authority.resolve(request.cookies.get(COOKIE))
+        if current.credential is not request.state.review_session.credential:
+            raise ValueError('Synthetic session unavailable')
+        return current
+
     @app.get('/review', response_class=HTMLResponse)
     def review(request: Request):
         session = request.state.review_session
         with fence.scope():
+            session = current_session(request)
             detail = worker.local_report()
             snapshot = broker.review()
         with lock:
@@ -141,7 +157,11 @@ def create_synthetic_review_app(*, broker=None, authority=None, worker=None, fen
                                     ('defer', 'Defer'), ('revoke', 'Revoke current approval')))
         return HTMLResponse(
             '<!doctype html><html lang="en"><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
             '<title>Offline synthetic release review · Workbench</title>'
+            '<style>pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%;overflow-x:auto;'
+            'border:1px solid #536073;padding:.75rem}form{display:inline-block;margin:.4rem .4rem .4rem 0}'
+            'button{min-height:44px;padding:.65rem 1rem;font:inherit}details{margin-top:1rem}</style>'
             '<body style="font:16px system-ui;max-width:60rem;margin:2rem auto;padding:1rem;'
             'background:#101722;color:#e5ebf3"><h1>Offline synthetic release review</h1>'
             '<p>No actual human verification or outbound network delivery. This unmounted '
@@ -168,6 +188,7 @@ def create_synthetic_review_app(*, broker=None, authority=None, worker=None, fen
         if view is None or view[0] is not session.credential or clock() >= view[2]:
             return denied(409)
         with fence.scope():
+            session = current_session(request)
             worker.local_report()
             if broker.review() != view[1]:
                 return denied(409)
@@ -179,8 +200,10 @@ def create_synthetic_review_app(*, broker=None, authority=None, worker=None, fen
         return RedirectResponse('/review', status_code=303)
 
     @app.get('/status')
-    def status():
+    def status(request: Request):
         with fence.scope():
+            current_session(request)
+            worker.local_report()  # Missing, changed or non-ready evidence cannot claim readiness.
             return broker.status('report_ready')
 
     return app

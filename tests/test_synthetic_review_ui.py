@@ -109,6 +109,43 @@ def test_snapshot_only_approval_no_ui_dispatch_and_exact_fake_send(setup):
     assert ledger == {snap.operation_id: snap.binding()}
 
 
+@pytest.mark.parametrize('change', ['missing', 'changed', 'failed', 'cancelled'])
+def test_status_requires_positive_unchanged_local_report_evidence(setup, change):
+    client, _, _, _, _, _, paths, _, _ = setup
+    from starforge_workbench.docker_worker import atomic
+    if change == 'missing':
+        (paths['attempt']/'local-report.json').unlink()
+    elif change == 'changed':
+        atomic(paths['attempt']/'local-report.json', {'summary': 'PRIVATE_REPORT_CANARY', 'findings': []})
+    else:
+        receipt = json.loads((paths['attempt']/'diagnostic.json').read_text())
+        receipt['state'] = change
+        atomic(paths['attempt']/'diagnostic.json', receipt)
+    response = client.get('/status')
+    assert response.status_code == 403
+    assert response.json() == {'protocol': 'diagnostic.status.v1', 'status': 'failed'}
+    assert 'CANARY' not in response.text
+
+
+@pytest.mark.parametrize('path', ['/review/', '/review/?q=PRIVATE_CANARY',
+                                 '/review?q=PRIVATE_CANARY', '/PRIVATE_PATH_CANARY'])
+def test_unmatched_and_query_requests_have_no_redirect_or_echo(setup, path):
+    client, _, _, _, _, _, _, _, _ = setup
+    response = client.get(path, follow_redirects=False)
+    assert response.status_code in {403, 404}
+    assert response.json() == {'protocol': 'diagnostic.status.v1', 'status': 'failed'}
+    assert 'location' not in response.headers and 'PRIVATE' not in response.text
+    assert response.headers['cache-control'].startswith('no-store')
+
+
+def test_wrong_method_has_canonical_content_free_http_error(setup):
+    client, _, _, _, _, _, _, _, _ = setup
+    response = client.put('/review', data=form(client), headers={'Origin': ORIGIN})
+    assert response.status_code == 405
+    assert response.json() == {'protocol': 'diagnostic.status.v1', 'status': 'failed'}
+    assert 'location' not in response.headers and 'detail' not in response.text
+
+
 @pytest.mark.parametrize('headers', [
     {'Authorization': 'Bearer synthetic-operator-token'},
     {'Cf-Access-Jwt-Assertion': 'synthetic-browser-or-service-assertion'},
@@ -190,6 +227,24 @@ def test_ui_restart_invalidates_view_and_approval_expiry_denies(setup):
     assert post(client, data).status_code == 303
     now[0] += 301
     with pytest.raises(ReleaseError): broker.dispatch()
+
+
+@pytest.mark.parametrize('operation', ['approve', 'revoke', 'preview', 'status'])
+def test_session_expiring_during_fence_wait_is_rechecked(setup, monkeypatch, operation):
+    from contextlib import contextmanager
+    client, broker, _, _, fence, now, _, _, snapshot = setup
+    data = form(client, 'revoke' if operation == 'revoke' else 'approve')
+    original = fence.scope
+    @contextmanager
+    def delayed_fence():
+        with original():
+            now[0] = 2001
+            yield
+    monkeypatch.setattr(fence, 'scope', delayed_fence)
+    response = client.get('/review' if operation == 'preview' else '/status') if operation in {'preview', 'status'} else post(client, data)
+    assert response.status_code == 403
+    assert response.json() == {'protocol': 'diagnostic.status.v1', 'status': 'failed'}
+    assert broker.review() == snapshot
 
 
 @pytest.mark.parametrize('kind', ['large', 'json', 'missing_origin', 'invalid_ascii'])
