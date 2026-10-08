@@ -137,10 +137,60 @@ class LauncherTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'daemon start failed'):
                 cli.start_codex_agents(self.c)
             self.assertEqual(run.call_count, 1)
+
+    def test_daemon_backed_codex_conversation_is_opt_in_and_preserves_binding(self):
+        original = cli.fingerprint(self.c)
+        self.c['codex_remote_daemon'] = True
+        self.c['resume_policy'] = 'explicit-session'
+        self.assertEqual(cli.fingerprint(self.c), original)
+        with self.assertRaisesRegex(ValueError, 'through Workbench'):
+            cli.provider_argv(self.c, 'new')
+        with patch.object(cli, 'saved_session', return_value={'id': 'synthetic'}):
+            args = cli.provider_argv(self.c, 'resume')
+        self.assertEqual(args[args.index('--remote')+1], 'unix://')
+        self.assertEqual(args[-2:], ['resume', 'synthetic'])
+        with patch.object(cli, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+            cli.ensure_codex_daemon(self.c)
+            self.assertEqual(run.call_args.args[0], [cli.PROVIDERS['codex'], 'app-server', 'daemon', 'start'])
+            self.assertEqual(run.call_args.kwargs['timeout'], 30)
+        self.data['contexts'][0]['codex_remote_daemon'] = True
+        self.data['contexts'][0]['resume_policy'] = 'explicit-session'
+        self.load()
+        self.data['contexts'][0]['resume_policy'] = 'picker'
+        with self.assertRaisesRegex(ValueError, 'exact-session resume'):
+            self.load()
+        self.data['contexts'][0]['resume_policy'] = 'explicit-session'
+        self.data['contexts'][0]['provider'] = 'claude'
+        with self.assertRaisesRegex(ValueError, 'requires a Codex conversation context'):
+            self.load()
+        self.data['contexts'][0]['provider'] = 'codex'
+        self.data['contexts'][0].update(codex_mode='agents', resume_policy='never')
+        with self.assertRaisesRegex(ValueError, 'requires a Codex conversation context'):
+            self.load()
         with patch.object(cli, 'run', side_effect=subprocess.TimeoutExpired('synthetic', 30)) as run:
             with self.assertRaises(subprocess.TimeoutExpired):
                 cli.start_codex_agents(self.c)
             self.assertEqual(run.call_count, 1)
+
+    def test_daemon_thread_creation_crash_does_not_retry_or_replace_binding(self):
+        self.c.update(codex_remote_daemon=True, resume_policy='explicit-session')
+        from starforge_workbench import codex_daemon
+        with patch.object(cli, 'STATE', self.path), \
+                patch.object(cli, 'external_session', return_value=None), \
+                patch.object(cli, 'validate_context'), \
+                patch.object(cli, 'checkout_keys', return_value=[]), \
+                patch.object(cli, 'reject_external_agents'), \
+                patch.object(cli, 'ensure_codex_daemon'), \
+                patch.object(cli, 'codex_instructions', return_value='Synthetic role'), \
+                patch.object(codex_daemon, 'create_thread', side_effect=SystemExit('synthetic crash')) as create:
+            with self.assertRaises(SystemExit):
+                cli.start_codex(self.c)
+            intent = self.path/'daemon-start'/(self.c['id']+'.json')
+            self.assertTrue(intent.exists())
+            self.assertFalse((self.path/'sessions'/(self.c['id']+'.json')).exists())
+            with self.assertRaisesRegex(ValueError, 'creation is uncertain'):
+                cli.start_codex(self.c)
+            self.assertEqual(create.call_count, 1)
 
     def test_agents_menu_skips_conversation_binding_and_checkout_locks(self):
         self.c.update(codex_mode='agents', resume_policy='never')

@@ -67,6 +67,10 @@ def load(path):
         if c.get('codex_mode') == 'agents' and (c['provider'] != 'codex' or
                 c['resume_policy'] != 'never' or c['risk'] != 'local' or c['additional_cwds']):
             raise ValueError('Codex Agents requires a local Codex context with never resume and no additional directories')
+        if c.get('codex_remote_daemon') and (c['provider'] != 'codex' or c.get('codex_mode') == 'agents'):
+            raise ValueError('Codex daemon mode requires a Codex conversation context')
+        if c.get('codex_remote_daemon') and (c['resume_policy'] != 'explicit-session' or c['additional_cwds']):
+            raise ValueError('Codex daemon mode requires exact-session resume and no additional directories')
         if c.get('codex_instructions_file') and (c['provider'] != 'codex' or c.get('codex_mode') == 'agents'):
             raise ValueError('Codex instructions file requires a bindable Codex conversation context')
     return data
@@ -318,7 +322,7 @@ def retry_start(c, operation):
 
 
 def fingerprint(c):
-    binding = {key: value for key, value in c.items() if key != 'codex_instructions_file'}
+    binding = {key: value for key, value in c.items() if key not in {'codex_instructions_file', 'codex_remote_daemon'}}
     return hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
 
 def validate_context(c):
@@ -577,16 +581,21 @@ def reject_external_agents(keys):
             continue
 
 
-def codex_sessions():
+def codex_sessions(remote=False):
     sessions = {}
     for db in (HOME/'.codex').glob('state*.sqlite'):
         with sqlite3.connect('file:'+str(db)+'?mode=ro', uri=True) as conn:
-            for identity, directory in conn.execute("select id,cwd from threads where archived=0 and source='cli'"):
+            sources = ('cli', 'vscode', 'appServer') if remote else ('cli',)
+            for identity, directory in conn.execute(
+                    'select id,cwd from threads where archived=0 and source in ('+
+                    ','.join('?' for _ in sources)+')', sources):
                 sessions[identity] = str(Path(directory).resolve())
     return sessions
 
 def provider_sessions(c):
     if c['provider'] == 'codex':
+        if c.get('codex_remote_daemon'):
+            return codex_sessions(remote=True)
         return codex_sessions()
     if c['provider'] != 'opencode':
         raise ValueError('Provider has no verified local session catalog')
@@ -608,11 +617,15 @@ def bind_session(c, identity):
         if source is None:
             raise ValueError('Provider session does not exist or is archived')
     data = {'id':identity, 'provider':c['provider'], 'cwd':str(cwd(c)), 'source_cwd':source}
+    if c.get('codex_remote_daemon'):
+        data['transport'] = 'daemon'
     atomic(STATE/'sessions'/(c['id']+'.json'), data)
     return data
 
 def saved_session(c):
     data = read_state(STATE/'sessions'/(c['id']+'.json'))
+    if data and c['provider'] == 'codex' and (data.get('transport') == 'daemon') != bool(c.get('codex_remote_daemon')):
+        raise ValueError(c['id']+': saved Codex transport differs; migrate or restore the exact binding deliberately')
     if data and (data.get('provider') != c['provider'] or data.get('cwd') != str(cwd(c))):
         raise ValueError(c['id']+': saved session provider/cwd mismatch; review the directory change and rebind the existing ID with bind')
     if data and c['provider'] in {'codex', 'opencode'}:
@@ -654,7 +667,22 @@ def start_codex(c):
         reject_external_agents(keys)
         for key in keys:
             stack.enter_context(lock('checkout-'+hashlib.sha256(key.encode()).hexdigest(), blocking=False))
-        before = provider_sessions(c) if not data else None
+        before = provider_sessions(c) if not data and not c.get('codex_remote_daemon') else None
+        if c.get('codex_remote_daemon'):
+            ensure_codex_daemon(c)
+            intent = STATE/'daemon-start'/(c['id']+'.json')
+            if not data:
+                if intent.exists():
+                    raise ValueError(c['id']+': prior daemon thread creation is uncertain; inspect and bind an exact ID before retrying')
+                atomic(intent, {'context_id': c['id'], 'cwd': str(cwd(c))})
+                from starforge_workbench.codex_daemon import create_thread
+                identity = create_thread(cwd(c), c['title'], codex_instructions(c),
+                                         'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write')
+                bind_session(c, identity)
+                intent.unlink()
+                data = saved_session(c)
+            elif intent.exists():
+                intent.unlink()
         stop = threading.Event()
         errors = []
         def remember():
@@ -715,9 +743,15 @@ def provider_argv(c, choice):
         if c.get('codex_mode') == 'agents':
             return [exe, 'agents', '-C', str(cwd(c))]
         base = [exe, '-c', 'check_for_update_on_startup=false', '-C', str(cwd(c)), '-s', 'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write', '-a', 'on-request']
-        instructions = codex_instructions(c)
-        if instructions is not None:
-            base += ['-c', 'developer_instructions='+json.dumps(instructions, ensure_ascii=False)]
+        if c.get('codex_remote_daemon'):
+            base += ['--remote', 'unix://']
+        if c.get('codex_remote_daemon'):
+            if choice == 'new':
+                raise ValueError('Create daemon-backed Codex threads through Workbench before opening the TUI')
+        else:
+            instructions = codex_instructions(c)
+            if instructions is not None:
+                base += ['-c', 'developer_instructions='+json.dumps(instructions, ensure_ascii=False)]
         for directory in directories(c)[1:]:
             base += ['--add-dir', str(directory)]
         if choice == 'picker':
@@ -758,12 +792,16 @@ def provider_argv(c, choice):
         return [exe, 'run', 'qwen3:8b']
     raise ValueError('Unsupported provider operation')
 
-def start_codex_agents(c):
+def ensure_codex_daemon(c):
     """Ensure the shared daemon exists without restarting any running work."""
     result = run([PROVIDERS['codex'], 'app-server', 'daemon', 'start'],
                  cwd=cwd(c), timeout=30)
     if result.returncode:
-        raise ValueError(c['id']+': Codex daemon start failed; command center was not opened')
+        raise ValueError(c['id']+': Codex daemon start failed; conversation was not opened')
+
+
+def start_codex_agents(c):
+    ensure_codex_daemon(c)
     return run(provider_argv(c, 'new'), cwd=cwd(c)).returncode
 
 

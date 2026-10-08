@@ -14,6 +14,7 @@ dependencies = [
     "PyJWT[crypto]>=2.10,<3",
     "python-multipart>=0.0.20,<1",
     "mcp>=2,<3",
+    "websockets>=15,<16",
 ]
 
 [dependency-groups]
