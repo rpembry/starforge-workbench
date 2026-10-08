@@ -61,8 +61,8 @@ def framed_result(raw: bytes, token: str, maximum: int) -> bytes | None:
 
 
 @dataclass(frozen=True, slots=True)
-class BootPrompts:
-    """Operator-selected grammar for the controlled image, never autodetected."""
+class BootProtocol:
+    """Operator-selected framed producer contract; no prompt autodetection."""
     hostname: str
 
     def __post_init__(self):
@@ -71,43 +71,47 @@ class BootPrompts:
 
 
 class BootDetector:
-    """Current-line state machine over append-only, bounded console bytes.
+    """Completed LF records over append-only, bounded console bytes.
 
-    This recognizes prompt syntax, not authenticated guest identity. Exact
-    prompt impersonation by a malicious guest remains outside this fixture.
+    The reserved protocol prefix is emitted only by the controlled producer,
+    not historical logs. This is not authenticated guest identity.
     """
-    def __init__(self, prompts):
-        if type(prompts) is not BootPrompts:
+    def __init__(self, protocol):
+        if type(protocol) is not BootProtocol:
             raise ValueError('Invalid synthetic boot configuration')
-        host = prompts.hostname.encode('ascii')
-        self._login = host + b' login: '
-        self._shell = b'root@' + host + b':~# '
+        prefix = b'SF_BOOT_V1 ' + protocol.hostname.encode('ascii') + b' '
+        self._login = prefix + b'login_ready'
+        self._shell = prefix + b'shell_ready'
+        self._password = prefix + b'auth_required'
         self._state = 'login'
         self._length = 0
+        self._cursor = 0
 
     def observe(self, raw):
+        """Yield ordered events only after complete records; no timing heuristic."""
         if type(raw) is not bytes or len(raw) < self._length:
             raise RuntimeError('Synthetic guest console invalid')
-        if self._state == 'ready':
-            return 'ready'
-        if len(raw) == self._length:
-            return None
         self._length = len(raw)
-        # CR and LF both delimit the current terminal line. Only one known
-        # bracketed-paste enable prefix is accepted for the root shell prompt;
-        # arbitrary ANSI rewriting/control sequences are not interpreted.
-        line = raw.rsplit(b'\n', 1)[-1].rsplit(b'\r', 1)[-1]
-        if self._state == 'login':
-            if line == self._login:
+        while self._state != 'ready':
+            end = raw.find(b'\n', self._cursor)
+            if end < 0:
+                return
+            line = raw[self._cursor:end]
+            if line.endswith(b'\r'):
+                line = line[:-1]
+            self._cursor = end + 1
+            if not line.startswith(b'SF_BOOT_V1 '):
+                continue
+            if self._state == 'login' and line == self._login:
                 self._state = 'shell'
-                return 'login'
-            return None
-        if line in (self._shell, b'\x1b[?2004h' + self._shell):
-            self._state = 'ready'
-            return 'ready'
-        if line == b'Password: ' or line == self._login:
-            raise RuntimeError('Synthetic guest authentication unavailable')
-        return None
+                yield 'login'
+            elif self._state == 'shell' and line == self._shell:
+                self._state = 'ready'
+                yield 'ready'
+            elif line == self._password or (self._state == 'shell' and line == self._login):
+                raise RuntimeError('Synthetic guest authentication unavailable')
+            else:
+                raise RuntimeError('Synthetic guest console invalid')
 
 
 class SyntheticConsoleTransport:
@@ -118,14 +122,14 @@ class SyntheticConsoleTransport:
     fresh overlay before another attempt. It is deliberately unsuitable for
     existing/private guests and supplies no live registration to wb-vm-mcp.
     """
-    def __init__(self, guest: GuestRegistration, policy: SyntheticVMPolicy, *, prompts=None):
+    def __init__(self, guest: GuestRegistration, policy: SyntheticVMPolicy, *, boot_protocol=None):
         if (type(guest) is not GuestRegistration or guest.transport_ref != 'synthetic-console'
                 or type(policy) is not SyntheticVMPolicy
-                or (prompts is not None and type(prompts) is not BootPrompts)):
+                or (boot_protocol is not None and type(boot_protocol) is not BootProtocol)):
             raise ValueError('Invalid synthetic guest configuration')
         self._guest = guest
         self._policy = policy
-        self._prompts = prompts
+        self._boot_protocol = boot_protocol
         self._process = None
         self._timer = None
         self._start = None
@@ -180,7 +184,7 @@ class SyntheticConsoleTransport:
     def __enter__(self):
         if self._process is not None:
             raise RuntimeError('Synthetic guest already used')
-        if self._prompts is None:
+        if self._boot_protocol is None:
             raise RuntimeError('Synthetic guest boot configuration unavailable')
         require_cgroup_bounds()
         self._start = time.monotonic()
@@ -192,13 +196,13 @@ class SyntheticConsoleTransport:
                                                 preexec_fn=_process_limits, bufsize=0)
             self._timer = threading.Timer(self._policy.lifetime_seconds, self._close_quietly)
             self._timer.start()
-            detector = BootDetector(self._prompts)
+            detector = BootDetector(self._boot_protocol)
             def boot(raw):
-                event = detector.observe(raw)
-                if event == 'login':
-                    self._write(b'root\n', self._start + self._policy.lifetime_seconds)
-                if event == 'ready':
-                    return True
+                for event in detector.observe(raw):
+                    if event == 'login':
+                        self._write(b'root\n', self._start + self._policy.lifetime_seconds)
+                    if event == 'ready':
+                        return True
                 return None
             self._read(self._start + self._policy.lifetime_seconds, 512 * 1024, boot)
             return self

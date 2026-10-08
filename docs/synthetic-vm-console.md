@@ -76,7 +76,7 @@ The adapter implements the same interface from #280:
 from pathlib import Path
 from workbench.vm_diagnostics import Diagnostic, DiagnosticService, GuestRegistration
 from workbench.vm_sandbox import SyntheticVMPolicy
-from workbench.vm_synthetic import BootPrompts, SyntheticConsoleTransport
+from workbench.vm_synthetic import BootProtocol, SyntheticConsoleTransport
 
 guest = GuestRegistration('g_' + '3' * 32, 'synthetic-console', frozenset(Diagnostic))
 policy = SyntheticVMPolicy(
@@ -84,7 +84,7 @@ policy = SyntheticVMPolicy(
     protected_directories=(Path('/home'), Path('/etc')),
 )
 # Execute only in the operator-created, verified bounded transient unit.
-with SyntheticConsoleTransport(guest, policy, prompts=BootPrompts('synthetic-guest')) as transport:
+with SyntheticConsoleTransport(guest, policy, boot_protocol=BootProtocol('synthetic-guest')) as transport:
     service = DiagnosticService(registrations=(guest,), transport=transport)
     local_result = service.execute(guest.guest_id, 'os_runtime')
 ```
@@ -97,22 +97,35 @@ console is suitable only for a disposable synthetic guest; it is no approval or
 authentication scheme for a real machine. Connectivity means a functioning
 diagnostic console, not network reachability.
 
-The operator must now supply `BootPrompts` with the exact hostname for the
-controlled image. The example hostname is synthetic and must not be guessed as
-the official image default. Missing configuration refuses boot before launch.
-This is an intentional bootstrap migration, not a new caller/MCP option. No real
-guest boot or migrated-image compatibility was exercised for this follow-up.
+The operator must now supply `BootProtocol` with the exact hostname for an
+explicit controlled producer. It must reserve the `SF_BOOT_V1 ` line prefix for
+protocol events, never historical logs, and emit these LF-terminated records
+(CRLF is also accepted):
 
-Boot recognition checks only the current CR/LF-delimited line: exact
-`hostname login: `, followed by exact `root@hostname:~# ` (optionally prefixed by
-the one known bracketed-paste enable sequence). Split chunks are recognized only
-when the full prompt arrives. Historical log/MOTD/password text and lookalikes
-such as `Last failed login:` do not request login or override a current shell.
-After root submission, a new exact password challenge or repeated getty prompt
-fails with fixed errors and cleanup. Other terminal rewriting/hosts/working
-directories are unsupported and time out through the existing lifetime bound.
-This syntax is not authenticated guest identity; a malicious guest can impersonate
-the exact prompt. The controlled image/operator provenance remains trusted.
+```text
+SF_BOOT_V1 synthetic-guest login_ready
+SF_BOOT_V1 synthetic-guest shell_ready
+```
+
+The first record means the producer is ready to accept the fixed `root\n`
+submission. The producer must wait for that input before the shell-ready event,
+then yield console ownership for the existing fixed diagnostics. Authentication
+requirements use `SF_BOOT_V1 synthetic-guest auth_required`, which refuses boot.
+The parser processes complete records in order; raw getty/root/password text is
+never a readiness signal. Repeated login, wrong-host/unknown/malformed protocol
+records refuse boot. Historical text including every split of `Password: ` or
+`hostname login: ` cannot generate protocol events. An incomplete record waits
+through the existing lifetime bound; no quiescence/timing heuristic classifies it.
+
+This is an intentional bootstrap migration, not a caller/MCP option. The example
+hostname is synthetic and not a guessed official image default. Missing protocol
+configuration refuses before launch. The prior official Debian fixture emits
+ordinary getty prompts, not this protocol: it is **not compatible** with this
+follow-up without a separately reviewed controlled producer. No guest producer
+is installed or implemented here, and no real boot/migrated-image compatibility
+has been exercised. That is a remaining integration gate, not a deployment claim.
+Completed protocol syntax is not authenticated identity: a malicious producer can
+impersonate exact records. Controlled image/operator provenance remains trusted.
 
 Direct calls recheck exact registration, operation permission and timeout/cap
 bounds. Command collection gets at most five seconds and 4096 payload bytes;
