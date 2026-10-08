@@ -30,7 +30,8 @@ TIMEOUT_SECONDS = 5
 ALIASES = MappingProxyType({'status': Diagnostic.CONNECTIVITY})
 EXPORTS = frozenset({'screenshot', 'capture', 'ocr', 'screen_text',
                      'clipboard_read', 'download', 'file_read', 'export',
-                     'video', 'shell', 'ssh', 'qmp'})
+                     'video', 'shell', 'ssh', 'qmp', 'search', 'web_search',
+                     'retrieve', 'fetch', 'http', 'search_with_approval'})
 
 
 @dataclass(frozen=True, slots=True)

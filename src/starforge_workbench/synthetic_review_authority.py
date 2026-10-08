@@ -24,7 +24,7 @@ import stat
 import time
 import uuid
 
-from .diagnostic_release import Approval, DESTINATION, MAX_PAYLOAD, ReleaseError
+from .diagnostic_release import Approval, DESTINATION, MAX_PAYLOAD, ReleaseError, SYNTHETIC_DESTINATIONS
 from .docker_worker import attempt_lock, private_directory
 
 MAX_RECEIPTS = 128
@@ -68,7 +68,7 @@ def _canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8')
 
 
-def _binding(value):
+def _binding(value, destinations=frozenset({DESTINATION})):
     """Copy only the exact versioned release contract; instructions stay data."""
     try:
         if type(value) is not dict or value.keys() != _BINDING_KEYS:
@@ -76,7 +76,7 @@ def _binding(value):
         if (value['protocol'] != 'diagnostic.release.v1'
                 or not _identifier(value['job_id']) or not _identifier(value['attempt_id'])
                 or not _receipt_id(value['operation_id']) or type(value['revision']) is not int
-                or value['revision'] < 1 or value['destination'] != DESTINATION
+                or value['revision'] < 1 or value['destination'] not in destinations
                 or type(value['payload']) is not str or len(value['payload']) > 10924
                 or type(value['sha256']) is not str or not _number(value['expires_at'])
                 or type(value['decision']) is not str or value['decision'] not in {'approve', 'reject', 'defer'}):
@@ -153,11 +153,15 @@ class SyntheticHumanAuthority:
     rollback of a broker journal or issuance record. Whole-authority rollback is
     excluded by the explicit trusted-directory boundary above.
     """
-    def __init__(self, authority_path: Path, seeds: tuple[SyntheticSessionSeed, ...], clock=time.time):
+    def __init__(self, authority_path: Path, seeds: tuple[SyntheticSessionSeed, ...], clock=time.time,
+                 *, destinations=frozenset({DESTINATION})):
         try:
             self.path = private_directory(authority_path)
-            if type(seeds) is not tuple or len(seeds) > 32 or not callable(clock):
+            if (type(seeds) is not tuple or len(seeds) > 32 or not callable(clock)
+                    or type(destinations) is not frozenset or not destinations
+                    or not destinations <= SYNTHETIC_DESTINATIONS):
                 raise ReleaseError()
+            self.destinations = destinations
             self.clock = clock
             self._sessions = {}
             self._capabilities = []
@@ -210,7 +214,7 @@ class SyntheticHumanAuthority:
     def authenticate(self, credential: object, binding: dict) -> Approval:
         with self._locked():
             seed = self._human(credential)
-            binding = _binding(binding)
+            binding = _binding(binding, self.destinations)
             now = self._now()
             if not now < binding['expires_at'] <= now + 300:
                 raise ReleaseError()
@@ -226,7 +230,7 @@ class SyntheticHumanAuthority:
     def _record(self, approval, binding):
         if type(approval) is not Approval or not _receipt_id(approval.receipt) or not _identifier(approval.principal):
             raise ReleaseError()
-        binding = _binding(binding)
+        binding = _binding(binding, self.destinations)
         record = _read(self.path/f'receipt-{approval.receipt}.json')
         if record.keys() != {'version', 'receipt', 'principal', 'binding', 'session_expires_at', 'checksum'}:
             raise ReleaseError()
