@@ -38,18 +38,24 @@ def _connect():
                         close_timeout=1)
 
 
-def _initialize(connection):
-    _request(connection, 1, 'initialize',
-             {'clientInfo': {'name': 'starforge-workbench', 'version': '0.2.0'}})
+def _initialize(connection, *, experimental=False):
+    params = {'clientInfo': {'name': 'starforge-workbench', 'version': '0.2.0'}}
+    if experimental:
+        params['capabilities'] = {'experimentalApi': True}
+    _request(connection, 1, 'initialize', params)
     connection.send(json.dumps({'jsonrpc': '2.0', 'method': 'initialized', 'params': {}}))
 
 
-def create_thread(directory: Path, title: str, instructions: str | None, sandbox: str):
+def create_thread(directory: Path, title: str, instructions: str | None, sandbox: str,
+                  additional_directories: list[Path] | None = None):
     """Create one named thread; caller journals uncertainty before this call."""
     with _connect() as connection:
-        _initialize(connection)
+        _initialize(connection, experimental=bool(additional_directories))
         params = {'cwd': str(directory), 'approvalPolicy': 'on-request',
                   'sandbox': sandbox, 'serviceName': 'starforge-workbench'}
+        if additional_directories:
+            params['runtimeWorkspaceRoots'] = [str(directory),
+                                                *(str(path) for path in additional_directories)]
         if instructions is not None:
             params['developerInstructions'] = instructions
         thread = _request(connection, 2, 'thread/start', params)['thread']
