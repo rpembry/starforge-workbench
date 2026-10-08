@@ -36,7 +36,11 @@ live identity implementation or a production readiness claim.
 The core switches one existing attached client between two existing sessions on
 one server. The source must be an active shell pane; the destination must match
 the owner's registered pane exactly. It rechecks client, pane, process, server,
-and conversation before and after focus. The adapter offers only the fixed
+and conversation before and after focus. A final recheck follows the durable intent write. Tmux metadata checking and
+client switching are not atomic: a human focus change can still race the final
+check/switch. A live owner would need client/lifecycle serialization as well as
+the conversation fence before making a stronger guarantee.
+The adapter offers only the fixed
 `switch-client` operation. It captures no terminal content, sends no keystrokes,
 runs no shell commands, and changes no layout, mouse setting, or binding.
 

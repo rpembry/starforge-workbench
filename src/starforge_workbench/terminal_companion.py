@@ -194,6 +194,11 @@ class Companion:
                     state['phase'] = 'return_intent' if returning else 'intent'
                     self._save(state)  # durable metadata intent before focus, no payload
                     try:
+                        # Durable write may yield while the human changes focus.
+                        if self._client() != current or self._witness() != witness:
+                            raise CompanionError()
+                        self._same_pane(source)
+                        self._same_pane(self.target)
                         self.port.focus(current.client, destination.session)
                         after = self._client()
                         if (after != ClientView(current.client, current.incarnation, destination)

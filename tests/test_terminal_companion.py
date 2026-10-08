@@ -122,7 +122,7 @@ def test_changes_while_away_do_not_silently_return_or_redirect(setup, change):
     assert len(port.calls) == 1 and (path/'focus.json').read_bytes() == prior
 
 
-@pytest.mark.parametrize('when', [2, 3])
+@pytest.mark.parametrize('when', [2, 3, 4])
 def test_identity_changes_around_focus_deny_and_preserve_uncertainty(setup, when):
     companion, port, identity, path, reopen = setup
     identity.change_at = when
@@ -130,10 +130,10 @@ def test_identity_changes_around_focus_deny_and_preserve_uncertainty(setup, when
     if when == 2:
         assert not port.calls and not (path/'focus.json').exists()
     else:
-        assert len(port.calls) == 1
+        assert len(port.calls) == (1 if when == 4 else 0)
         assert json.loads((path/'focus.json').read_text())['phase'] == 'uncertain'
         with pytest.raises(CompanionError): reopen().toggle()
-        assert len(port.calls) == 1
+        assert len(port.calls) == (1 if when == 4 else 0)
 
 
 def test_failed_ack_and_crash_intent_are_never_blindly_replayed(setup, capsys, caplog):
@@ -183,3 +183,19 @@ def test_unsupported_identity_refuses_before_creating_state(tmp_path):
     with pytest.raises(CompanionError):
         Companion(tmp_path/'not-created', port=None, identity=None, target=TARGET, thread_id=THREAD)
     assert not (tmp_path/'not-created').exists()
+
+
+def test_human_focus_change_during_intent_write_is_not_overwritten(setup):
+    owner, port, identity, path, reopen = setup
+    original = owner._save
+    third = replace(SOURCE, session='$3', window='@3', pane='%3', pid=303)
+    def interrupted_save(state):
+        original(state)
+        if state['phase'] == 'intent':
+            port.view = replace(port.view, pane=third)
+    owner._save = interrupted_save
+    with pytest.raises(CompanionError): owner.toggle()
+    assert port.calls == [] and port.view.pane == third
+    assert json.loads((path/'focus.json').read_text())['phase'] == 'uncertain'
+    with pytest.raises(CompanionError): reopen().toggle()
+    assert port.calls == []
