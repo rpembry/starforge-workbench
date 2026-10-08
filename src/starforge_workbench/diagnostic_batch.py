@@ -2,8 +2,9 @@
 
 The supervisor owns allocation, cancellation and resource admission. Its trusted
 local driver supplies an existing private attempt directory and an ownership
-probe. This fake in-process adapter cannot enforce a real model's CPU, memory or
-wall deadline: no production model or executable adapter is accepted here.
+probe. The default fake adapter cannot enforce real model resources. The separate
+explicit installed-model smoke adapter accepts only this fixed synthetic fixture
+and owns its resource confinement; production/private-data integration is absent.
 """
 import hashlib
 import json

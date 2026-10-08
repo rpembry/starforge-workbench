@@ -1,8 +1,10 @@
 # Synthetic confidential diagnostic batches
 
-This opt-in library slice addresses #281 and #282 and supplies the fake trial
+The PR284 opt-in library slice addresses #281 and #282 and supplies the fake trial
 for #283. It is infrastructure preparation, not a production release or a live
-Qwen/VM integration. Ordinary Workbench startup is unchanged. No model downloads,
+Qwen/VM integration. A separate integration branch adds an explicitly owned
+installed-model synthetic smoke described in local-qwen-synthetic-integration.md;
+the default adapters remain fake. Ordinary Workbench startup is unchanged. No model downloads,
 provider connections, VM boot/mount, identity provisioning, permission changes,
 or private-system inspection are involved.
 
