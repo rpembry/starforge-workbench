@@ -47,6 +47,39 @@ manual reconciliation. MCP exposes `codex_title_undo` under the same local
 apply opt-in. Practical undo likewise requires `--mode practical
 --confirm-non-atomic` and has the same race after its fresh check.
 
+## Opt-in synchronization on launcher use
+
+Set `codex_title_sync: practical` on a bindable Codex conversation context in
+the private manifest to synchronize its saved name after a successful `up` or
+exact `bind`. `ai-workbench titles sync CONTEXT` is a manual refresh using the
+same policy. This setting is off by default and does not apply to a Codex
+Agents command-center context. It is persistent authorization for the practical
+non-atomic mode described above; a concurrent manual edit can still race the
+fresh check and provider write. Title sync runs after the launcher operation,
+and a sync problem does not restart or stop a healthy provider.
+
+An unnamed exact-bound thread is named automatically. For a thread with an
+existing name, automation requires a prior Workbench rename whose written
+name still matches the current provider name and whose exact thread ID still
+matches the binding. `titles apply` establishes this private ownership record
+after verified readback. A custom or later manually changed name reports
+`needs_review` and is never silently overwritten. Review such a row with
+`titles preview CONTEXT`, then use an explicit selected apply if the configured
+label should own the thread name. A new or changed binding, absent provider,
+ambiguous alias, or unresolved write remains a conflict or deferred result.
+An uncertain provider acknowledgement never auto-retries. Repeated `up` calls
+with a matching title perform no rename.
+
+On a successful `up`, the launcher saves the verified context configuration in
+private state. A later `up` accepts a title-only manifest change only when the
+old configuration still matches the exact managed pane's fingerprint. It
+updates tmux's title and binding fingerprint without restarting the provider,
+then runs title sync. A change to cwd, provider, permissions, or other binding
+fields remains blocked. Existing panes need one `up` with their unchanged
+manifest to establish the private baseline before a title edit. A missing
+baseline cannot be inferred from a similar name or directory. The initial
+opt-in and review are local host configuration steps, not public defaults.
+
 ## Provider write limitation
 
 On 2026-10-03, installed `codex-cli 0.155.1` generated an app-server schema

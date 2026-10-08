@@ -218,6 +218,55 @@ def test_practical_mode_requires_confirmation_and_reports_verified_write(fixture
     assert result['verified_writes']['alpha']['mode'] == 'practical'
 
 
+def test_opted_in_sync_names_blank_then_tracks_configured_label(fixture):
+    service, cat, contexts, *_ = fixture
+    assert service.sync('alpha')['status'] == 'applied'
+    assert service.sync('alpha')['status'] == 'already_matched'
+    contexts[0]['title'] = 'Reconfigured'
+    assert service.sync('alpha')['status'] == 'applied'
+    assert cat.rows[A]['title'] == 'Reconfigured'
+    assert len(cat.writes) == 2
+    assert (service.state / 'managed' / 'alpha.json').stat().st_mode & 0o777 == 0o600
+
+
+def test_sync_preserves_unreviewed_and_manually_edited_names(fixture):
+    service, cat, contexts, *_ = fixture
+    cat.rows[A]['title'] = 'Personal name'
+    assert service.sync('alpha')['status'] == 'needs_review'
+    assert cat.writes == []
+    plan = service.preview(['alpha'])
+    assert service.apply(plan['plan_id'], selected=['alpha'], mode='practical',
+                         confirm_non_atomic=True)['results']['alpha']['status'] == 'applied'
+    cat.rows[A]['title'] = 'Manual change'
+    contexts[0]['title'] = 'Reconfigured'
+    assert service.sync('alpha')['status'] == 'needs_review'
+    assert len(cat.writes) == 1
+
+
+def test_sync_does_not_transfer_title_ownership_to_another_thread(fixture):
+    service, cat, contexts, bindings, _ = fixture
+    assert service.sync('alpha')['status'] == 'applied'
+    contexts.pop()
+    bindings.pop('beta')
+    cat.rows[B]['cwd'] = '/synthetic/a'
+    bindings['alpha']['id'] = B
+    cat.rows[B]['title'] = 'Another name'
+    contexts[0]['title'] = 'Reconfigured'
+    assert service.sync('alpha')['status'] == 'needs_review'
+    assert cat.writes == [(A, None, 'Alpha ✨')]
+
+
+def test_sync_keeps_uncertain_write_blocked(fixture):
+    service, cat, *_ = fixture
+    def unknown(identity, desired):
+        cat.writes.append((identity, None, desired))
+        raise TimeoutError()
+    cat.rename_practical = unknown
+    assert service.sync('alpha')['status'] == 'unknown'
+    assert service.sync('alpha')['reason'] == 'unresolved_provider_outcome'
+    assert len(cat.writes) == 1
+
+
 def test_delayed_unknown_request_blocks_retry_and_undo(fixture):
     service, cat, *_ = fixture
     cat.rows[A]['title'] = 'Prior'

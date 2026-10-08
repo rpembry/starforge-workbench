@@ -61,6 +61,9 @@
           "codex_mode": {
             "enum": ["conversation", "agents"]
           },
+          "codex_title_sync": {
+            "enum": ["off", "practical"]
+          },
           "resume_policy": {
             "enum": [
               "never",

@@ -66,6 +66,8 @@ def load(path):
         if c.get('codex_mode') == 'agents' and (c['provider'] != 'codex' or
                 c['resume_policy'] != 'never' or c['risk'] != 'local' or c['additional_cwds']):
             raise ValueError('Codex Agents requires a local Codex context with never resume and no additional directories')
+        if c.get('codex_title_sync', 'off') != 'off' and (c['provider'] != 'codex' or c.get('codex_mode') == 'agents'):
+            raise ValueError('Codex title sync requires a bindable Codex conversation context')
     return data
 
 def cwd(c):
@@ -312,7 +314,31 @@ def retry_start(c, operation):
 
 
 def fingerprint(c):
-    return hashlib.sha256(json.dumps(c, sort_keys=True).encode()).hexdigest()
+    binding = {key: value for key, value in c.items() if key != 'codex_title_sync'}
+    return hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+
+
+def remember_context_config(c):
+    atomic(STATE/'context-config'/(c['id']+'.json'), c)
+
+
+def retitle_verified_context(c):
+    """Accept only a title-only manifest change for an exact managed pane."""
+    prior = read_state(STATE/'context-config'/(c['id']+'.json'))
+    if not isinstance(prior, dict) or prior.get('id') != c['id']:
+        raise ValueError(c['id']+': title change needs a verified prior configuration; restore the old label and run up once')
+    without_display = lambda value: {key: item for key, item in value.items()
+                                     if key not in {'title', 'codex_title_sync'}}
+    if without_display(prior) != without_display(c):
+        raise ValueError(c['id']+': context changed beyond its title; preserve and inspect the live session')
+    state = live(prior)
+    if not state:
+        raise ValueError(c['id']+': exact managed pane is absent; retry normal startup')
+    identity = state['identity']
+    tmux('set-option', '-t', identity, 'set-titles-string', c['title'].replace('#', '##'))
+    tmux('set-option', '-t', identity, '@sfwb_binding', fingerprint(c))
+    live(c)
+    remember_context_config(c)
 
 def validate_context(c):
     if not c['enabled']:
@@ -443,7 +469,13 @@ def reuse_external(c, existing, headless=False):
 
 def up(c, manifest, headless=False):
     with lock('launch'):
-        state = live(c)
+        try:
+            state = live(c)
+        except ValueError as exc:
+            if str(exc) != 'Existing session binding changed; do not reattach: '+c['id']:
+                raise
+            retitle_verified_context(c)
+            state = live(c)
         # A live managed pane is authoritative, even when its terminal window closed.
         if not state or state['dead']:
             existing = external_session(c)
@@ -473,6 +505,7 @@ def up(c, manifest, headless=False):
             state = live(c)
         if not state:
             raise ValueError(c['id']+': tmux pane disappeared during startup; inspect launcher/provider errors before retrying')
+        remember_context_config(c)
         if state['attached'] or headless:
             wait_provider(c)
             print(c['id']+': provider process present; '+('reused' if state['attached'] else 'detached'))
@@ -774,6 +807,18 @@ def title_reconciler(manifest, catalog=None, state=None):
     return Reconciler(contexts, binding, catalog or CodexCatalog(), state or STATE / 'title-reconcile')
 
 
+def sync_codex_title(c, manifest):
+    if c.get('codex_title_sync', 'off') != 'practical' or c.get('codex_mode') == 'agents':
+        return None
+    try:
+        state = live(c)
+        if not state or state['dead']:
+            return {'context': c['id'], 'status': 'deferred', 'reason': 'managed_pane_unavailable'}
+        return title_reconciler(manifest).sync(c['id'])
+    except (ValueError, OSError, sqlite3.Error, ConnectionError, TimeoutError) as exc:
+        return {'context': c['id'], 'status': 'deferred', 'reason': type(exc).__name__}
+
+
 def titles_main(argv=None):
     p = argparse.ArgumentParser(description='Preview exact Codex title mappings; guarded apply is provider gated')
     p.add_argument('--manifest', type=Path, default=default_manifest())
@@ -794,7 +839,18 @@ def titles_main(argv=None):
     undo.add_argument('context')
     undo.add_argument('--mode', choices=['strict', 'practical'], default='strict')
     undo.add_argument('--confirm-non-atomic', action='store_true')
+    sync = commands.add_parser('sync', help='Refresh an opted-in managed Codex title')
+    sync.add_argument('context')
     args = p.parse_args(argv)
+    if args.command == 'sync':
+        manifest = args.manifest.resolve()
+        contexts = {c['id']: c for c in load(manifest)['contexts']}
+        c = contexts.get(args.context)
+        if not c or c.get('codex_title_sync', 'off') != 'practical':
+            raise ValueError('Select an opted-in Codex context')
+        result = sync_codex_title(c, manifest)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
     service = title_reconciler(args.manifest.resolve())
     if args.command == 'preview':
         result = service.preview(args.contexts)
@@ -884,14 +940,20 @@ def main(argv=None):
             raise ValueError('Contexts need attention: '+', '.join(failures))
     elif args.command == 'up':
         failures = []
+        opened = []
         for c in selected:
             try:
                 if not c['enabled'] and not args.contexts and not external_session(c):
                     print(c['id']+': skipped (disabled)')
                     continue
                 up(c, manifest, args.headless)
+                opened.append(c)
             except (ValueError, OSError) as exc:
                 failures.append(str(exc)); print(str(exc), file=sys.stderr)
+        for c in opened:
+            outcome = sync_codex_title(c, manifest)
+            if outcome and outcome['status'] not in ('already_matched', 'applied'):
+                print(c['id']+': Codex title '+outcome['status']+' ('+str(outcome.get('reason'))+')', file=sys.stderr)
         if failures:
             raise ValueError('Some contexts could not open; see errors above')
     elif args.command in ['attach','_attach']:
@@ -905,6 +967,9 @@ def main(argv=None):
             raise ValueError('Provide an explicit session ID via --session-id')
         bind_session(c, args.session_id)
         print('Saved verified conversation binding')
+        outcome = sync_codex_title(c, manifest)
+        if outcome:
+            print('Codex title '+outcome['status']+' ('+str(outcome.get('reason'))+')')
 
 if __name__ == '__main__':
     try:
