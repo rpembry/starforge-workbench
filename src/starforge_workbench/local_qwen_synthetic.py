@@ -74,7 +74,8 @@ def launch_command(runner, model, scratch, unit):
 def _response_json(response):
     """Bounded non-streaming HTTP/1.x JSON; transfer encodings are unsupported.
 
-    Only connection-close or one exact Content-Length frame is accepted. This
+    Connection close is required; an optional single Content-Length must match.
+    Keep-alive response framing is deliberately unsupported, even with a length. This
     deliberately does not implement a general HTTP/chunked/compression client.
     Header/body parse failures never return server-controlled exception text.
     """
@@ -106,16 +107,18 @@ def _response_json(response):
                     raise LocalModelError()
         if length is not None and len(data) != length:
             raise LocalModelError()
-        return json.loads(data)
+        def reject_constant(_):
+            raise LocalModelError()
+        return json.loads(data, parse_constant=reject_constant)
     except Exception:
         raise LocalModelError() from None
 
 
 def unix_request(path, route, body=None, timeout=1):
-    """Owned-socket IPC only; bounded close/fixed-length framing, no chunked support."""
+    """Owned-socket IPC only; bounded close-required framing, no chunked/keep-alive."""
     payload = b'' if body is None else json.dumps(body).encode()
     method = 'GET' if body is None else 'POST'
-    request = (f'{method} {route} HTTP/1.0\r\nHost: localhost\r\n'
+    request = (f'{method} {route} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n'
                f'Content-Type: application/json\r\nContent-Length: {len(payload)}\r\n\r\n').encode()+payload
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:

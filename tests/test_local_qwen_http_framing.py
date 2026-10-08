@@ -47,12 +47,13 @@ def install(monkeypatch, response, step=4096, error=None):
     fixed(headers=b'Content-Encoding: identity\r\n'),
     fixed(headers=b'X-Synthetic: bounded observation\r\n')])
 @pytest.mark.parametrize('step', [1, 7, 4096])
-def test_supported_close_or_exact_length_framing(monkeypatch, response, step):
+def test_closed_responses_with_optional_exact_length(monkeypatch, response, step):
     stream = install(monkeypatch, response, step)
     assert m.unix_request(Path('/synthetic-owned.sock'), '/health') == {'status': 'ok'}
     assert stream.closed
     assert stream.request.startswith(b'GET /health HTTP/1.0\r\n')
     assert b'Content-Length: 0\r\n' in stream.request
+    assert b'Connection: close\r\n' in stream.request
 
 
 @pytest.mark.parametrize('response', [
@@ -77,6 +78,8 @@ def test_supported_close_or_exact_length_framing(monkeypatch, response, step):
     b'HTTP/1.1 503 PRIVATE_HTTP_CANARY\r\n\r\n'+BODY,
     b'HTTP/1.1 200 OK\n\n'+BODY,
     fixed(body=CANARY), fixed(body=b'\xff'+CANARY),
+    fixed(body=b'{"number":NaN}'), fixed(body=b'{"number":Infinity}'),
+    fixed(body=b'{"number":-Infinity}'),
 ])
 def test_unsupported_ambiguous_or_malformed_response_is_fixed_failure(monkeypatch, response, capsys, caplog):
     stream = install(monkeypatch, response, 3)
@@ -105,6 +108,20 @@ def test_socket_failures_are_fixed_and_closed(monkeypatch, error, capsys):
     stream = install(monkeypatch, b'', error=error)
     with pytest.raises(m.LocalModelError, match='^Synthetic local inference unavailable$'):
         m.unix_request(Path('/synthetic-owned.sock'), '/health')
+    assert stream.closed and capsys.readouterr() == ('', '')
+
+
+def test_ignored_close_request_keepalive_is_explicitly_unsupported(monkeypatch, capsys):
+    stream = install(monkeypatch, fixed())
+    original = stream.recv
+    def keepalive(limit):
+        if not stream.response:
+            raise TimeoutError('PRIVATE_KEEPALIVE_CANARY')
+        return original(limit)
+    monkeypatch.setattr(stream, 'recv', keepalive)
+    with pytest.raises(m.LocalModelError, match='^Synthetic local inference unavailable$'):
+        m.unix_request(Path('/synthetic-owned.sock'), '/health')
+    assert b'Connection: close\r\n' in stream.request
     assert stream.closed and capsys.readouterr() == ('', '')
 
 
