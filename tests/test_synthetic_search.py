@@ -1,5 +1,6 @@
 """Synthetic queries, fake inbox/context and fixture consent only; no search engine."""
 import asyncio
+from contextlib import contextmanager
 from dataclasses import replace
 import json
 import logging
@@ -366,3 +367,28 @@ def test_mcp_default_has_no_search_and_opt_in_has_only_proposal_status(setup, ca
     assert not inbox(transport)
     assert capsys.readouterr() == ('', '') and 'CANARY' not in caplog.text
     assert startup_policy([]).profile.value == 'confidential'
+
+
+def test_unknown_tool_query_text_is_rejected_before_sdk_span_label(setup, monkeypatch):
+    import mcp.server._otel as telemetry
+    broker, _, transport, *_ = setup
+    spans = []
+    class Span:
+        def set_attributes(self, *args): pass
+        def set_attribute(self, *args): pass
+        def set_status(self, *args): pass
+        def record_exception(self, *args): pytest.fail('No exception telemetry')
+    @contextmanager
+    def captured(**kwargs):
+        spans.append(kwargs)
+        yield Span()
+    monkeypatch.setattr(telemetry, 'otel_span', captured)
+    async def run():
+        async with Client(build_server(search_tool=SyntheticSearchTool(broker))) as client:
+            invalid = await client.call_tool(QUERY, {'query': QUERY})
+            assert invalid.is_error and 'CANARY' not in invalid.model_dump_json()
+            held = await client.call_tool('search_with_approval', {'query': QUERY})
+            assert held.structured_content == search_status('pending')
+    asyncio.run(run())
+    assert spans and 'CANARY' not in str(spans)
+    assert not inbox(transport)

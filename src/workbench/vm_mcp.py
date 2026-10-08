@@ -122,9 +122,21 @@ class DiagnosticMCPServer(MCPServer):
             raise ValueError('Invalid synthetic search configuration')
         self.tool_arguments = MappingProxyType({**TOOL_ARGUMENTS,
             **({'search_with_approval': frozenset({'query'})} if search_tool is not None else {})})
+        async def safe_boundary(ctx, call_next):
+            # SDK spans label calls with the peer-supplied tool name. Reject
+            # unclassified names/arguments before that instrumentation runs.
+            if ctx.method == 'tools/call':
+                params = ctx.params if type(ctx.params) is dict else {}
+                name, arguments = params.get('name'), params.get('arguments', {})
+                if (type(name) is not str or name not in self.tool_arguments
+                        or type(arguments) is not dict or set(arguments) != self.tool_arguments[name]
+                        or any(type(value) is not str for value in arguments.values())):
+                    return CallToolResult(content=[TextContent(type='text', text='Invalid VM tool request')],
+                                          is_error=True)
+            return await protocol_boundary(ctx, call_next)
         # Public middleware list is outermost first. Reject before built-in
         # tracing/request-state handlers as well as resource/prompt handlers.
-        self.middleware.insert(0, protocol_boundary)
+        self.middleware.insert(0, safe_boundary)
 
     async def run_stdio_async(self):
         await guarded_stdio_run(self)

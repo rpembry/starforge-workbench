@@ -35,6 +35,8 @@ The proposal-only `SyntheticSearchTool` returns a fixed
 only a query argument. The ordinary server and installed CLI do not construct
 or register it; there is no new startup mode or setting. Direct search/retrieval
 aliases are denied by the VM policy and MCP's exact tool/argument allowlist.
+Tool names and argument shapes are checked before SDK instrumentation, so an
+unclassified tool name carrying query text cannot become a tool span label.
 This synthetic facade must remain on a local fixture channel: sending a query
 as arguments through a remote MCP client would itself disclose the query.
 No query, receipt, review credential, result, audit count or operation ID is
