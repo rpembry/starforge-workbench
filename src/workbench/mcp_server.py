@@ -132,7 +132,7 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
             'tool_families': ['configured-contexts', 'browser-desired-state',
                               'bounded-worklog', 'standup', 'registered-session-status',
                               'session-restore-preview', 'codex-title-preview-status',
-                              'agent-handoff-preview',
+                              'agent-handoff-preview', 'private-agent-roster',
                               *(['opt-in-agent-handoff-send'] if os.environ.get('WB_MCP_ALLOW_HANDOFF') == '1' else []),
                               *(['opt-in-codex-title-apply'] if os.environ.get('WB_MCP_ALLOW_TITLE_APPLY') == '1' else []),
                               *(['opt-in-session-restore'] if os.environ.get('WB_MCP_ALLOW_RESTORE') == '1' else [])],
@@ -167,17 +167,51 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
                 raise
         return Handoff(context_loader(manifest_path()), state, handoff_request, verify)
 
+    def codex_handoff(context_id):
+        from starforge_workbench import agent_roster, cli
+        listed = [item for item in context_loader(manifest_path())
+                  if item.get('id') == context_id and item.get('enabled')]
+        if len(listed) != 1 or listed[0].get('provider') != 'codex':
+            return None
+        configured = [item for item in cli.load(manifest_path())['contexts']
+                      if item['id'] == context_id and item['enabled']]
+        if (len(configured) != 1 or configured[0]['provider'] != 'codex'
+                or not configured[0].get('codex_remote_daemon')):
+            return None
+        path = Path(os.environ.get('WB_MCP_AGENT_ROSTER') or
+                    Path.home()/'.config/starforge-ai-workbench/agent-roster.yaml')
+        if context_id not in agent_roster.roster(path):
+            return None
+        return agent_roster, path
+
+    @server.tool(name='list_agent_roster', structured_output=True)
+    def list_agent_roster() -> list[dict[str, object]]:
+        """List private specialist role descriptions without exposing prompts or paths."""
+        from starforge_workbench.agent_roster import list_agents
+        path = Path(os.environ.get('WB_MCP_AGENT_ROSTER') or
+                    Path.home()/'.config/starforge-ai-workbench/agent-roster.yaml')
+        return list_agents(manifest_path(), path)
+
     @server.tool(name='agent_handoff_preview', structured_output=True)
     def agent_handoff_preview(context_id: str) -> dict[str, object]:
         """Resolve one configured context to a current exact registered session, or explain why delivery is unavailable."""
+        target = codex_handoff(context_id)
+        if target:
+            module, path = target
+            return module.preview(manifest_path(), path, context_id)
         return handoff().target(context_id)
 
     @server.tool(name='agent_handoff_send', structured_output=True)
     def agent_handoff_send(context_id: str, expected_session_id: str, text: str,
                            idempotency_key: str) -> dict[str, object]:
-        """After explicit operator handoff, submit once to the verified OpenCode queue; otherwise return copyable text."""
+        """After explicit operator handoff, submit once to one verified exact target."""
         if os.environ.get('WB_MCP_ALLOW_HANDOFF') != '1':
             return {'outcome': 'denied', 'reason': 'handoff_send_disabled'}
+        target = codex_handoff(context_id)
+        if target:
+            module, path = target
+            return module.send(manifest_path(), path, context_id, expected_session_id,
+                               text, idempotency_key)
         return handoff().send(context_id, expected_session_id, text, idempotency_key)
 
     def reconcile():

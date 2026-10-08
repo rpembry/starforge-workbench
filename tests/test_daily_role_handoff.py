@@ -176,3 +176,37 @@ def test_mcp_handoff_is_opt_in_and_uses_exact_queue(tmp_path, monkeypatch):
     monkeypatch.setenv('WB_MCP_ALLOW_HANDOFF', '1')
     assert asyncio.run(invoke('agent_handoff_send', args))['outcome'] == 'accepted'
     assert sum(path == '/api/instructions' for _, path in calls) == 1
+
+
+def test_mcp_codex_handoff_uses_private_roster_and_exact_daemon_thread(tmp_path, monkeypatch):
+    from starforge_workbench import codex_daemon
+    manifest = yaml.safe_load((ROOT/'config/workbench.example.yaml').read_text())
+    entry = context(tmp_path)
+    entry.update(id='synthetic-support', enabled=True, codex_remote_daemon=True,
+                 resume_policy='explicit-session')
+    manifest['contexts'] = [entry]
+    manifest_path = tmp_path/'manifest.yaml'
+    manifest_path.write_text(yaml.safe_dump(manifest))
+    roster = tmp_path/'roster.yaml'
+    roster.write_text(yaml.safe_dump({'version': 1, 'agents': [
+        {'context_id': 'synthetic-support', 'description': 'Synthetic host diagnostics.'}]}))
+    roster.chmod(0o600)
+    monkeypatch.setenv('WB_MCP_AGENT_ROSTER', str(roster))
+    monkeypatch.setenv('WB_MCP_ALLOW_HANDOFF', '1')
+    identity = '11111111-2222-3333-4444-555555555555'
+    server = build_server(manifest_path=lambda: manifest_path)
+    async def invoke(name, args):
+        async with Client(server) as connected:
+            return (await connected.call_tool(name, args)).structured_content
+    with patch.object(cli, 'STATE', tmp_path/'state'), \
+            patch.object(cli, 'saved_session', return_value={'id': identity}), \
+            patch.object(codex_daemon, 'thread_status', return_value='idle'), \
+            patch.object(codex_daemon, 'start_turn', return_value='turn-synthetic') as start:
+        rows = asyncio.run(invoke('list_agent_roster', {}))
+        assert rows['result'][0]['context_id'] == 'synthetic-support'
+        assert asyncio.run(invoke('agent_handoff_preview', {'context_id': 'synthetic-support'}))['session_id'] == identity
+        request = {'context_id': 'synthetic-support', 'expected_session_id': identity,
+                   'text': 'Synthetic reply only.', 'idempotency_key': KEY}
+        assert asyncio.run(invoke('agent_handoff_send', request))['outcome'] == 'accepted'
+        assert asyncio.run(invoke('agent_handoff_send', request))['outcome'] == 'accepted'
+        start.assert_called_once_with(identity, 'Synthetic reply only.')

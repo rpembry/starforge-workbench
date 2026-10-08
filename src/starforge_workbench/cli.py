@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -67,6 +68,15 @@ def load(path):
         if c.get('role') and (c['provider'] != 'codex' or c.get('codex_mode') == 'agents' or
                               c['resume_policy'] != 'explicit-session'):
             raise ValueError('Daily interface role requires an exact-resume Codex conversation context')
+        if c.get('codex_mode') == 'agents' and (c['provider'] != 'codex' or
+                c['resume_policy'] != 'never' or c['risk'] != 'local' or c['additional_cwds']):
+            raise ValueError('Codex Agents requires a local Codex context with never resume and no additional directories')
+        if c.get('codex_remote_daemon') and (c['provider'] != 'codex' or c.get('codex_mode') == 'agents'):
+            raise ValueError('Codex daemon mode requires a Codex conversation context')
+        if c.get('codex_remote_daemon') and (c['resume_policy'] != 'explicit-session' or c['additional_cwds']):
+            raise ValueError('Codex daemon mode requires exact-session resume and no additional directories')
+        if c.get('codex_instructions_file') and (c['provider'] != 'codex' or c.get('codex_mode') == 'agents'):
+            raise ValueError('Codex instructions file requires a bindable Codex conversation context')
     return data
 
 def cwd(c):
@@ -316,8 +326,8 @@ def retry_start(c, operation):
 
 
 def fingerprint(c):
-    # Role affects the next provider invocation, not the existing tmux binding.
-    return hashlib.sha256(json.dumps({k: v for k, v in c.items() if k != 'role'}, sort_keys=True).encode()).hexdigest()
+    binding = {key: value for key, value in c.items() if key not in {'role', 'codex_instructions_file', 'codex_remote_daemon'}}
+    return hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
 
 def validate_context(c):
     if not c['enabled']:
@@ -575,16 +585,21 @@ def reject_external_agents(keys):
             continue
 
 
-def codex_sessions():
+def codex_sessions(remote=False):
     sessions = {}
     for db in (HOME/'.codex').glob('state*.sqlite'):
         with sqlite3.connect('file:'+str(db)+'?mode=ro', uri=True) as conn:
-            for identity, directory in conn.execute("select id,cwd from threads where archived=0 and source='cli'"):
+            sources = ('cli', 'vscode', 'appServer') if remote else ('cli',)
+            for identity, directory in conn.execute(
+                    'select id,cwd from threads where archived=0 and source in ('+
+                    ','.join('?' for _ in sources)+')', sources):
                 sessions[identity] = str(Path(directory).resolve())
     return sessions
 
 def provider_sessions(c):
     if c['provider'] == 'codex':
+        if c.get('codex_remote_daemon'):
+            return codex_sessions(remote=True)
         return codex_sessions()
     if c['provider'] != 'opencode':
         raise ValueError('Provider has no verified local session catalog')
@@ -597,6 +612,8 @@ def provider_sessions(c):
 
 
 def bind_session(c, identity):
+    if c.get('codex_mode') == 'agents':
+        raise ValueError('Codex Agents is a command center, not a bindable conversation')
     live(c)  # Catalog validation alone cannot establish tmux safety.
     source = str(cwd(c))
     if c['provider'] in {'codex', 'opencode'}:
@@ -604,11 +621,15 @@ def bind_session(c, identity):
         if source is None:
             raise ValueError('Provider session does not exist or is archived')
     data = {'id':identity, 'provider':c['provider'], 'cwd':str(cwd(c)), 'source_cwd':source}
+    if c.get('codex_remote_daemon'):
+        data['transport'] = 'daemon'
     atomic(STATE/'sessions'/(c['id']+'.json'), data)
     return data
 
 def saved_session(c):
     data = read_state(STATE/'sessions'/(c['id']+'.json'))
+    if data and c['provider'] == 'codex' and (data.get('transport') == 'daemon') != bool(c.get('codex_remote_daemon')):
+        raise ValueError(c['id']+': saved Codex transport differs; migrate or restore the exact binding deliberately')
     if data and (data.get('provider') != c['provider'] or data.get('cwd') != str(cwd(c))):
         raise ValueError(c['id']+': saved session provider/cwd mismatch; review the directory change and rebind the existing ID with bind')
     if data and c['provider'] in {'codex', 'opencode'}:
@@ -616,6 +637,54 @@ def saved_session(c):
         if actual not in {data.get('source_cwd', data['cwd']), data['cwd']}:
             raise ValueError('Saved provider session is missing or its directory changed unexpectedly')
     return data
+
+
+def codex_thread_running(identity):
+    for proc in Path('/proc').iterdir():
+        try:
+            if proc.name.isdigit() and (proc/'comm').read_text().strip() == 'codex':
+                if identity in (proc/'cmdline').read_bytes().decode().split('\0'):
+                    return True
+        except (OSError, UnicodeError):
+            continue
+    return False
+
+
+def migrate_codex_binding(c, expected_old_id):
+    """Deliberately replace an exited local thread with a seeded daemon thread."""
+    if c['provider'] != 'codex' or not c.get('codex_remote_daemon'):
+        raise ValueError('Codex daemon mode is required for migration')
+    with lock('provider-'+c['id'], blocking=False):
+        path = STATE/'sessions'/(c['id']+'.json')
+        old = read_state(path)
+        if (not old or old.get('transport') == 'daemon' or old.get('id') != expected_old_id
+                or old.get('provider') != 'codex' or old.get('cwd') != str(cwd(c))):
+            raise ValueError('Exact local Codex binding does not match migration request')
+        if codex_sessions().get(expected_old_id) not in {old.get('source_cwd'), old['cwd']}:
+            raise ValueError('Original local Codex thread is missing or moved')
+        state = live(c)
+        if (state and not state['dead'] and provider_pids(c, state['pane_pid'])) or codex_thread_running(expected_old_id):
+            raise ValueError('Original Codex provider is still running; save drafts and exit it first')
+        backup = STATE/'legacy-sessions'/(c['id']+'-'+expected_old_id+'.json')
+        if backup.exists():
+            if read_state(backup) != old:
+                raise ValueError('Legacy binding backup differs; inspect it before migration')
+        else:
+            atomic(backup, old)
+        intent = STATE/'daemon-start'/(c['id']+'.json')
+        if intent.exists():
+            raise ValueError('Prior daemon thread creation is uncertain; inspect before migration')
+        ensure_codex_daemon(c)
+        role_text = context_instructions(c)
+        atomic(intent, {'context_id': c['id'], 'old_id': expected_old_id,
+                        'cwd': str(cwd(c))})
+        from starforge_workbench.codex_daemon import create_thread
+        identity = create_thread(cwd(c), c['title'], role_text,
+                                 'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write')
+        bind_session(c, identity)
+        intent.unlink()
+        return {'old_id': expected_old_id, 'new_id': identity,
+                'legacy_backup': str(backup)}
 
 def remember_created(c, before):
     candidates = [identity for identity, directory in provider_sessions(c).items()
@@ -637,20 +706,29 @@ def start_codex(c):
         stack.enter_context(lock('provider-'+c['id'], blocking=False))
         data = saved_session(c)
         # The same UUID may still be running in a terminal with a different label.
-        if data:
-            for proc in Path('/proc').iterdir():
-                try:
-                    if proc.name.isdigit() and (proc/'comm').read_text().strip() == c['provider']:
-                        args = (proc/'cmdline').read_bytes().decode().split('\0')
-                        if data['id'] in args:
-                            raise ValueError('This conversation is already running; use its existing terminal')
-                except (OSError, UnicodeError):
-                    continue
+        if data and c['provider'] == 'codex' and codex_thread_running(data['id']):
+            raise ValueError('This conversation is already running; use its existing terminal')
         keys = checkout_keys(c)
         reject_external_agents(keys)
         for key in keys:
             stack.enter_context(lock('checkout-'+hashlib.sha256(key.encode()).hexdigest(), blocking=False))
-        before = provider_sessions(c) if not data else None
+        before = provider_sessions(c) if not data and not c.get('codex_remote_daemon') else None
+        if c.get('codex_remote_daemon'):
+            ensure_codex_daemon(c)
+            intent = STATE/'daemon-start'/(c['id']+'.json')
+            if not data:
+                if intent.exists():
+                    raise ValueError(c['id']+': prior daemon thread creation is uncertain; inspect and bind an exact ID before retrying')
+                role_text = context_instructions(c)
+                atomic(intent, {'context_id': c['id'], 'cwd': str(cwd(c))})
+                from starforge_workbench.codex_daemon import create_thread
+                identity = create_thread(cwd(c), c['title'], role_text,
+                                         'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write')
+                bind_session(c, identity)
+                intent.unlink()
+                data = saved_session(c)
+            elif intent.exists():
+                intent.unlink()
         stop = threading.Event()
         errors = []
         def remember():
@@ -678,14 +756,56 @@ def start_codex(c):
         return result.returncode
 
 
+def codex_instructions(c):
+    """Read a private regular file at every Codex launch and exact resume."""
+    name = c.get('codex_instructions_file')
+    if not name:
+        return None
+    path = Path(os.path.expandvars(name)).expanduser()
+    if not path.is_absolute():
+        raise ValueError('Codex instructions file must be absolute')
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > 16384:
+                raise ValueError('Codex instructions file must be owned by you, private, regular, and at most 16 KiB')
+            data = stream.read(16385)
+    except OSError as exc:
+        raise ValueError('Codex instructions file is unavailable or unsafe') from exc
+    if not data or len(data) > 16384:
+        raise ValueError('Codex instructions file must contain 1 to 16384 bytes')
+    try:
+        return data.decode('utf-8')
+    except UnicodeDecodeError as exc:
+        raise ValueError('Codex instructions file must be UTF-8') from exc
+
+
+def context_instructions(c):
+    role_text = instructions(c['role']) if c.get('role') else None
+    private_text = codex_instructions(c)
+    return '\n\n'.join(part for part in (role_text, private_text) if part) or None
+
+
 def provider_argv(c, choice):
     exe = PROVIDERS[c['provider']]
     if c['resume_policy'] == 'never' and choice != 'new':
         raise ValueError('This context does not permit conversation resume')
     if c['provider'] == 'codex':
-        base = [exe, '-c', 'check_for_update_on_startup=false', '-C', str(cwd(c)), '-s', 'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write', '-a', 'on-request']
-        if c.get('role'):
-            base += ['-c', 'developer_instructions='+json.dumps(instructions(c['role']), ensure_ascii=False)]
+        if c.get('codex_mode') == 'agents':
+            return [exe, 'agents', '-C', str(cwd(c))]
+        base = [exe, '-c', 'check_for_update_on_startup=false', '-C', str(cwd(c))]
+        if c.get('codex_remote_daemon'):
+            base += ['--remote', 'unix://']
+        else:
+            base += ['-s', 'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write', '-a', 'on-request']
+        if c.get('codex_remote_daemon'):
+            if choice == 'new':
+                raise ValueError('Create daemon-backed Codex threads through Workbench before opening the TUI')
+        else:
+            text = context_instructions(c)
+            if text:
+                base += ['-c', 'developer_instructions='+json.dumps(text, ensure_ascii=False)]
         for directory in directories(c)[1:]:
             base += ['--add-dir', str(directory)]
         if choice == 'picker':
@@ -730,6 +850,19 @@ def provider_argv(c, choice):
         return [exe, 'run', 'qwen3:8b']
     raise ValueError('Unsupported provider operation')
 
+def ensure_codex_daemon(c):
+    """Ensure the shared daemon exists without restarting any running work."""
+    result = run([PROVIDERS['codex'], 'app-server', 'daemon', 'start'],
+                 cwd=cwd(c), timeout=30)
+    if result.returncode:
+        raise ValueError(c['id']+': Codex daemon start failed; conversation was not opened')
+
+
+def start_codex_agents(c):
+    ensure_codex_daemon(c)
+    return run(provider_argv(c, 'new'), cwd=cwd(c)).returncode
+
+
 def menu(c):
     # Drop inherited shell credentials before displaying the menu or spawning any child.
     sanitized = clean_env()
@@ -743,6 +876,10 @@ def menu(c):
     if actual != cwd(c):
         raise ValueError(c['id']+': refusing provider launch from unexpected pane directory '+str(actual))
     set_title(c)
+    if c.get('codex_mode') == 'agents':
+        with lock('provider-'+c['id'], blocking=False):
+            retry_start(c, lambda: start_codex_agents(c))
+        return
     if c['provider'] in {'codex', 'opencode'}:
         retry_start(c, lambda: start_codex(c))
         return
@@ -835,10 +972,13 @@ def main(argv=None):
     if raw_argv and raw_argv[0] == 'skills':
         from starforge_workbench.skills_install import main as skills_main
         return skills_main(raw_argv[1:])
+    if raw_argv and raw_argv[0] == 'handoff':
+        from starforge_workbench.agent_roster import main as handoff_main
+        return handoff_main(raw_argv[1:])
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--manifest', type=Path, default=default_manifest())
     p.add_argument('--dry-run', action='store_true')
-    p.add_argument('command', choices=['doctor','list','plan','up','attach','c','connect','status','bind','_attach','_menu'])
+    p.add_argument('command', choices=['doctor','list','plan','up','attach','c','connect','status','bind','migrate-codex','_attach','_menu'])
     p.add_argument('contexts', nargs='*')
     p.add_argument('--headless', action='store_true', help='Create/reuse detached menu sessions without windows')
     p.add_argument('--session-id')
@@ -852,7 +992,7 @@ def main(argv=None):
         return
     byid = {c['id']: c for c in data['contexts']}
     selected = [byid[k] for k in args.contexts] if args.contexts else list(byid.values())
-    if args.command in ['attach','_attach','_menu','bind'] and len(args.contexts) != 1:
+    if args.command in ['attach','_attach','_menu','bind','migrate-codex'] and len(args.contexts) != 1:
         raise ValueError('Exactly one context ID required')
     if args.dry_run or args.command in ['list','plan']:
         print(json.dumps(launcher_plan(selected), indent=2))
@@ -912,6 +1052,10 @@ def main(argv=None):
             raise ValueError('Provide an explicit session ID via --session-id')
         bind_session(c, args.session_id)
         print('Saved verified conversation binding')
+    elif args.command == 'migrate-codex':
+        if not args.session_id:
+            raise ValueError('Pass the exact existing thread with --session-id')
+        print(json.dumps(migrate_codex_binding(selected[0], args.session_id)))
 
 if __name__ == '__main__':
     try:

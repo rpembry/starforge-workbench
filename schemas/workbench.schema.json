@@ -61,6 +61,16 @@
           "role": {
             "enum": ["daily-interface"]
           },
+          "codex_mode": {
+            "enum": ["conversation", "agents"]
+          },
+          "codex_remote_daemon": {
+            "type": "boolean"
+          },
+          "codex_instructions_file": {
+            "type": "string",
+            "minLength": 1
+          },
           "resume_policy": {
             "enum": [
               "never",

@@ -1,5 +1,8 @@
 # Working on Starforge Workbench
 
+Read `~/AGENTS.md` first for shared working agreements. The instructions below
+apply to this Workbench repository.
+
 Read README.md and docs/adapting.md, then inspect current source and tests; documentation can lag implementation. This repository is a public personal reference implementation.
 
 - Preserve unrelated changes. Keep edits focused and test the affected behavior.

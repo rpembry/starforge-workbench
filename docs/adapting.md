@@ -19,7 +19,84 @@ test coverage. Interactive attachment remains unbounded.
 
 Runtime state, locks, and exact conversation bindings live under `~/.local/state/starforge-ai-workbench`. The dedicated tmux server is also named `starforge-ai-workbench`. Do not run this copy alongside another installation using that same runtime namespace without first isolating it.
 
+## Codex Agents command center
+
+For an optional persistent command-center tab, add a local context with
+`provider: codex`, `codex_mode: agents`, `resume_policy: never`, and no
+additional directories. Give it its own context ID and title. Then use
+`ai-workbench up CONTEXT` as usual; repeated launches reuse the live tab.
+
+This mode runs `codex app-server daemon start` before `codex agents -C CWD`.
+Daemon startup is bounded and a failure prevents the command center from
+opening. It never restarts or updates a running daemon. The installed Codex
+must support these commands. The command center has no conversation binding
+and does not acquire a checkout lock. Existing conversation contexts retain
+their behavior. Workbench does not start tabs at login; if daemon availability
+at login is desired, configure a private user service to run the same
+idempotent daemon-start command.
+
+For a Codex conversation that starts in a directory outside its role-specific
+instructions, set `codex_instructions_file` in that context to an absolute
+path to a private UTF-8 file. Workbench reads it on each new local launch and
+resume and passes its content as Codex `developer_instructions`. A new
+daemon-backed thread receives the content through app-server when created.
+Missing, symlinked,
+nonregular, nonprivate, or oversized files prevent the provider from starting.
+Changing the file does not change an existing conversation binding; the next
+local launch or resume receives the updated text; an existing daemon-backed
+thread keeps the instructions it received when created. A currently running
+conversation does not reload it. Keep secrets out of this file: local-mode
+text is passed as a process argument and may be visible to other processes. Codex still
+discovers ordinary `AGENTS.md` files from the working directory as usual.
+
+For explicit specialist handoffs, keep a private mode-0600 YAML roster outside
+the repository, for example at
+`~/.config/starforge-ai-workbench/agent-roster.yaml`:
+
+```yaml
+version: 1
+agents:
+  - context_id: example-support
+    description: Handles local system diagnostics and maintenance.
+```
+
+Only listed, enabled, daemon-backed Codex contexts can receive a handoff.
+`ai-workbench handoff list` shows the roster; `ai-workbench handoff preview
+example-support` returns the exact current session ID and idle/busy status.
+After choosing one target, write the request to a private mode-0600 file and
+call `ai-workbench handoff send example-support --session-id ID
+--message-file FILE --key STABLE-UNIQUE-KEY`. The key prevents a retry from
+submitting the same request twice. A timeout or crash after submission begins
+is recorded as uncertain; inspect the target conversation before making a
+new request. The command returns acceptance by the daemon, not completion of
+the work. Remove the request file when it is no longer needed.
+
+For a conversation that must share the local Codex app-server daemon with the
+Agents command center, opt in with `codex_remote_daemon: true`,
+`resume_policy: explicit-session`, and no additional directories. Workbench
+starts the daemon if needed, creates a named thread through app-server with
+the private `codex_instructions_file` content, saves its exact binding, then
+opens it through `--remote unix://`. On restart it resumes that exact thread.
+Existing local bindings are not silently converted: a deliberate migration
+must preserve the old thread and select a new daemon-backed binding. If thread
+creation has an uncertain outcome, Workbench stops rather than creating a
+possible duplicate. Other contexts retain their current transport. The Codex
+CLI must support local Unix-socket remote mode. A remote conversation's turns
+are visible to other authorized clients of that daemon, so use this only when
+shared control is intended.
+
+To migrate one existing local context, save any draft and exit its Codex TUI,
+then enable daemon mode in the private manifest. Run
+`ai-workbench migrate-codex CONTEXT --session-id OLD-ID`. The command checks
+that the exact old provider process has exited, saves a private backup of its
+binding, creates a new named daemon thread with the context's current role
+instructions, and binds it. The old Codex conversation remains in Codex's
+history. Reopen the context with `ai-workbench up CONTEXT`. A failed or
+uncertain migration does not retry thread creation automatically; inspect the
+private creation intent and daemon thread list before resolving it.
+
 ## Mouse scrolling and terminal preferences
+
 
 Ask AIW to configure scrolling when a terminal app behaves differently:
 
@@ -64,8 +141,9 @@ synthetic manifest and inspect `ai-workbench --manifest PATH --dry-run up` plus
 the isolated tests; a real reconnect requires a separately planned idle window.
 
 The MCP preview/send path is described in [mcp-server.md](mcp-server.md).
-Delivery supports only a verified OpenCode registration and the existing
-instruction queue. Other providers, including Codex, need a copyable handoff.
+Delivery supports a verified OpenCode registration through its instruction
+queue or a private-roster Codex thread through the local shared daemon.
+Unsupported providers need a copyable handoff.
 Neither role selection nor a handoff authorizes the destination agent to start
 work, merge, deploy, or change bindings.
 

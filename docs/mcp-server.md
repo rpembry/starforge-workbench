@@ -25,18 +25,28 @@ excerpts, idempotency keys, leases, and credentials. API failure is a tool
 error, not evidence that a session is offline. These tools do not queue or
 retry instructions, attach to a provider, or alter delivery state.
 
-`agent_handoff_preview` resolves one configured context through the protected
+`list_agent_roster` reads the private mode-0600 specialist roster selected by
+`WB_MCP_AGENT_ROSTER` or the default local roster path; it returns role
+descriptions without prompts or configuration paths. `agent_handoff_preview`
+resolves an OpenCode context through the protected
 collector registration state and current operator API evidence. Configure
 `WB_MCP_REGISTRATION_STATE` and `WB_MCP_LAUNCHER_STATE` privately to enable
 generation verification. It returns an exact opaque registration ID only for a
-fresh, verified OpenCode session. `agent_handoff_send` also requires
+fresh, verified OpenCode session. A listed, enabled daemon-backed Codex context
+is resolved through its exact protected launcher binding and local app-server
+idle status instead. `agent_handoff_send` also requires
 `WB_MCP_ALLOW_HANDOFF=1`, an explicit operator request, that exact ID, bounded
-plain text, and a stable caller-generated idempotency key. It uses the existing
-instruction queue; `accepted` means queued, not provider receipt or completed
-work. After an uncertain result, retry with the **same key and text** to inspect
-the original attempt. A changed target or unsupported provider returns a
-copyable handoff instead of sending. Codex sessions have no supported queue
-adapter. These tools never start, resume, or rebind a provider.
+plain text, and a stable caller-generated idempotency key. OpenCode uses the
+existing instruction queue; `accepted` means queued, not provider receipt or
+completed work. After an uncertain OpenCode result, retry with the **same key
+and text** to inspect the original attempt. Codex uses a local private journal
+and app-server `turn/start`; `accepted` means the daemon acknowledged one turn,
+not that work finished. An uncertain Codex request is never automatically
+resent; inspect the exact target before making another request. A changed
+target or unsupported provider returns a copyable handoff instead of sending.
+These tools never start, resume, or rebind a provider. Enable the send tool
+only in the coordinator's private MCP configuration; read-only preview and
+roster listing do not authorize delivery.
 
 The server instructions tell connected agents to treat an unsupported Workbench
 (`aiw`) operation as a possible MCP capability gap. An agent should consider
