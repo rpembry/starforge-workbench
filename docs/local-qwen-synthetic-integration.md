@@ -118,3 +118,20 @@ The external harness calls this tracked boundary. Captured synthetic evidence
 was replayed through it without another guest or model invocation, with exact
 stdout and empty stderr assertions. Independent replay review is required;
 this bounded regression evidence is separate from production acceptance.
+
+The owned Unix-socket HTTP helper accepts bounded non-streaming HTTP/1.0 or
+HTTP/1.1 JSON responses framed by connection close or a single exact
+Content-Length. The existing 16 KiB total-response cap includes headers; the
+receive deadline applies across split reads. Duplicate/invalid/mismatched
+lengths, malformed headers/status, encoded bodies and every Transfer-Encoding
+(including chunked or identity) are explicitly unsupported and produce the fixed
+LocalModelError. Chunked decoding, compression, streaming and general HTTP
+transport are not added. JSON/body and socket failures tested here also produce
+the same fixed helper error rather than server-controlled exception text.
+
+Framing compatibility was checked only with synthetic response bytes and fake
+sockets/lifecycles. Rejected chunked completion clears success evidence and runs
+the existing owned stop/reap path in the fake lifecycle, without stdout/stderr
+or log canaries. No current installed-server framing convention was reverified,
+and no real model, guest or endpoint was invoked for this follow-up. These tests
+do not establish universal error sanitization or production readiness.
