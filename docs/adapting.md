@@ -85,6 +85,16 @@ CLI must support local Unix-socket remote mode. A remote conversation's turns
 are visible to other authorized clients of that daemon, so use this only when
 shared control is intended.
 
+To migrate one existing local context, save any draft and exit its Codex TUI,
+then enable daemon mode in the private manifest. Run
+`ai-workbench migrate-codex CONTEXT --session-id OLD-ID`. The command checks
+that the exact old provider process has exited, saves a private backup of its
+binding, creates a new named daemon thread with the context's current role
+instructions, and binds it. The old Codex conversation remains in Codex's
+history. Reopen the context with `ai-workbench up CONTEXT`. A failed or
+uncertain migration does not retry thread creation automatically; inspect the
+private creation intent and daemon thread list before resolving it.
+
 ## Mouse scrolling and terminal preferences
 
 
