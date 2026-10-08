@@ -12,6 +12,8 @@ import time
 import tempfile
 from typing import Literal
 import uuid
+import unicodedata
+from html import unescape
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -63,6 +65,8 @@ class Notes(BaseModel):
     def bounded_text(cls, value):
         if any(not text or len(text) > 250 or any(ord(c) < 32 for c in text) for text in value):
             raise ValueError('Invalid notes text')
+        if any(plain(text) != text for text in value):
+            raise ValueError('Highlights must already be sanitized plain text')
         return value
 
     @model_validator(mode='after')
@@ -250,12 +254,35 @@ def import_inbox(config, state):
 
 
 def plain(text):
-    # Remote notes are untrusted text, not Todoist Markdown instructions/links.
+    """Conservative display text, never a second source of clickable links.
+
+    Decode entities/compatibility characters before filtering. Drop complete
+    URI-like tokens (any scheme, case, relative URL, email or bare domain), then
+    apply a small punctuation allowlist and filter again so markup removal cannot
+    reconstruct a link. This may omit filenames and colon/path-bearing phrases;
+    the separately generated official source link remains available.
+    """
+    for _ in range(2):
+        text = unescape(text)
+    text = unicodedata.normalize('NFKC', text).replace('\u3002', '.').replace('\uff61', '.')
+    text = ''.join(c for c in text if not unicodedata.category(c).startswith('C'))
+    text = re.sub(r'(?m)^\s*\[[^\]\n]+\]:.*$', '', text)
     text = re.sub(r'\[([^]]+)\]\([^)]+\)', r'\1', text)
-    text = re.sub(r'https?://\S+', '', text)
-    text = ''.join(c if ord(c) >= 32 else ' ' for c in text)
-    text = re.sub(r'[`*_\[\]<>\\]', '', text)
-    return ' '.join(text.split())[:250]
+    text = re.sub(r'<[^>]*>', '', text)
+    domain = re.compile(r'\.(?:xn--)?[^\W\d_][\w-]{1,62}\b', re.IGNORECASE)
+
+    def safe_token(token):
+        return not (any(c in token for c in ':/@\\') or domain.search(token) or
+                    re.search(r'%[a-f0-9]{2}', token, re.IGNORECASE))
+
+    text = ' '.join(token for token in text.split() if safe_token(token))
+    punctuation = " .,!;?()-'+%"
+    text = ''.join(c for c in text if c.isalnum() or unicodedata.category(c).startswith('M') or c in punctuation)
+    text = ' '.join(token for token in text.split() if safe_token(token))
+    # Bound at a word boundary; truncation must not reconstruct a bare domain.
+    if len(text) > 250:
+        text = text[:251].rsplit(' ', 1)[0] if ' ' in text[:251] else ''
+    return text
 
 
 class AppChangelog(HTMLParser):

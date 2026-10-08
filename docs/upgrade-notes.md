@@ -24,7 +24,7 @@ the official Codex app changelog for desktop upgrades. Desktop matching requires
 the full installed version token, never a release-train substring. Official
 lookup results are `matched`, `not_found`, or `lookup_failed`; not_found only means
 no match in the checked source, not that notes were never published. Summaries
-have at most three 250-character highlights; untrusted links/Markdown are removed.
+have at most three 250-character highlights. Entity/compatibility normalization precedes conservative filtering of URI-like tokens across all schemes and cases, relative URLs, email addresses and bare domains. Markdown/HTML link syntax and control/format characters are removed, with a small display-punctuation allowlist and a second filter after normalization. Only the separately generated official source link is retained. This can omit filenames and path/colon-bearing phrases; it is a display-text policy, not general content attestation or DLP. The Notes boundary rejects unsanitized text; an unsafe pre-fix state fails closed without rewriting immutable receipts or resending.
 Missing highlights do not invalidate a matched official release. Sources and
 responses are size bounded; redirects and environment proxies are disabled.
 

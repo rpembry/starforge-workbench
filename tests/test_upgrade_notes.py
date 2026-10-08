@@ -444,3 +444,78 @@ def test_atomic_inbox_duplicate_import_race_acknowledged(config, monkeypatch):
     monkeypatch.setattr(n, 'protected_read', racing_read)
     assert u.record(config, event())['status'] == 'already_recorded'
     assert key in u.read_state(config).entries
+
+
+UNTRUSTED_LINK_FORMS = [
+    'HTTPS://evil.invalid/private', 'HtTp://evil.invalid/private',
+    'ftp://evil.invalid/private', 'sftp://evil.invalid/private',
+    'mailto:fixture@evil.invalid', 'tel:+15555550123',
+    'javascript:alert(1)', 'data:text/html,fixture', '//evil.invalid/private',
+    'www.evil.invalid', 'evil.invalid', 'fixture@evil.invalid',
+    '<HTTPS://evil.invalid/private>', '[details](HTTPS://evil.invalid/private)',
+    '[details][ref]\n[ref]: ftp://evil.invalid/private',
+    '<a href="HtTp://evil.invalid/private">details</a>',
+    'HTTPS&colon;&sol;&sol;evil.invalid/private',
+    'HTTPS&amp;colon;&amp;sol;&amp;sol;evil.invalid/private',
+    'ＨＴＴＰＳ：／／evil.invalid/private', 'evil。invalid',
+    'H\u200bt\x00Tp://evil.invalid/private', 'evil[.]invalid',
+    'evil\u202e.invalid', '%68%74%74%70%73%3A%2F%2Fevil.invalid',
+]
+
+
+@pytest.mark.parametrize('untrusted', UNTRUSTED_LINK_FORMS)
+def test_only_generated_official_link_survives_frozen_description(config, untrusted):
+    import re
+    body = {'tag_name': 'rust-v1.2.3', 'body': '- Useful change; '+untrusted}
+    notes = u.lookup_notes(event(), fixture_get(body))
+    assert notes.status == 'matched'
+    for text in notes.highlights:
+        assert u.plain(text) == text
+        assert len(text) <= 250
+        assert not any(ord(c) < 32 for c in text)
+    record(config)
+    sent = []
+    assert u.poll(config, lookup=lambda e: notes,
+                  sender=lambda c, r: sent.append(r.task_args.description) or 'fixture_task')['status'] == 'delivered'
+    description, = sent
+    assert 'evil' not in description.casefold()
+    assert 'javascript' not in description.casefold() and 'mailto' not in description.casefold()
+    assert re.findall(r'(?i)\b[a-z][a-z0-9+.-]*:[^\s]+', description) == [
+        'https://github.com/openai/codex/releases/tag/rust-v1.2.3']
+
+
+def test_plain_is_bounded_idempotent_and_preserves_ordinary_text():
+    assert u.plain('Improved UTF-8 support, 20% faster; version 1.2.3.') == 'Improved UTF-8 support, 20% faster; version 1.2.3.'
+    assert u.plain('Unicode café changes.') == 'Unicode café changes.'
+    for text in ['a'*300, 'Useful changes '*100, ' '.join(UNTRUSTED_LINK_FORMS)]:
+        safe = u.plain(text)
+        assert len(safe) <= 250 and safe == u.plain(safe)
+    assert u.plain('FTP://evil.invalid') == ''
+
+
+@pytest.mark.parametrize('untrusted', ['HTTPS://evil.invalid', 'evil.invalid', '[details](ftp://evil.invalid)', 'Unsafe\u200bformat'])
+def test_notes_boundary_rejects_unsanitized_highlights(untrusted):
+    with pytest.raises(ValueError, match='sanitized plain text'):
+        u.Notes(status='matched', highlights=[untrusted])
+
+
+def test_desktop_highlight_links_receive_same_filter():
+    html = '<li data-codex-topics="codex-app" id="fixture-entry"><h3>1.2.3</h3><p>Useful change; HtTp://evil.invalid/private</p></li>'
+    notes = u.lookup_notes(event(app='codex_desktop'), fixture_get(html))
+    assert notes.status == 'matched' and notes.highlights == ['Useful change;']
+
+
+def test_pre_fix_unsafe_snapshot_fails_closed_without_rewriting_or_sending(config):
+    record(config)
+    u.poll(config, lookup=lookup, sender=sender)
+    path = Path(config.state_dir, 'upgrades.json')
+    data = json.loads(path.read_text())
+    receipt = next(iter(data['entries'].values()))
+    receipt['notes']['highlights'] = ['Useful change; HTTPS://evil.invalid/private']
+    receipt['task_args']['description'] += '\nHTTPS://evil.invalid/private'
+    path.write_text(json.dumps(data))
+    path.chmod(0o600)
+    before = path.read_bytes()
+    with pytest.raises(n.NotificationError, match='invalid_upgrade_state'):
+        u.poll(config, sender=Mock(side_effect=AssertionError()))
+    assert path.read_bytes() == before
