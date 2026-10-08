@@ -139,7 +139,10 @@ class SearchApprovalBroker:
             with self._scope():
                 if (self.broker.path/'release.json').exists():
                     old = self.broker.review()
-                    if self.broker._load()['phase'] in {'review', 'deferred', 'approved'} and old.payload == payload:
+                    phase = self.broker._load()['phase']
+                    if phase == 'rejected' and old.payload == payload:
+                        return search_status('declined')  # identical retries cannot reopen a veto
+                    if phase in {'review', 'deferred', 'approved'} and old.payload == payload:
                         if not self._audited('presented', old):
                             self._audit('presented', old)  # recover a crash before local audit
                         return search_status('pending')  # idempotent proposal, no new approval

@@ -93,6 +93,20 @@ def test_decline_is_fixed_not_empty_results_and_cannot_dispatch(setup):
     assert broker.dispatch() == search_status('failed') and not inbox(transport)
 
 
+def test_identical_vetoed_model_retry_preserves_decline_without_new_revision(setup):
+    broker, auth, transport, *_ = setup
+    snap = approve(broker, auth, decision='reject')
+    audit = (broker.path/'audit.json').read_bytes()
+    tool = SyntheticSearchTool(broker)
+    for _ in range(12):
+        assert tool.propose(QUERY) == search_status('declined')
+        assert broker.review() == snap and (broker.path/'audit.json').read_bytes() == audit
+    assert not inbox(transport)
+    assert tool.propose(QUERY+' edited') == search_status('pending')
+    assert broker.review().revision == 2
+    assert broker.dispatch() == search_status('failed') and not inbox(transport)
+
+
 @pytest.mark.parametrize('value', [True, 'human-fixture', 'operator', {'approved': True}, object()])
 def test_model_sampling_bool_actor_or_token_cannot_approve(setup, value, capsys, caplog):
     broker, _, transport, *_ = setup

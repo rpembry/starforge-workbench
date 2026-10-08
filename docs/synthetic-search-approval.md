@@ -21,8 +21,10 @@ No caller chooses a URL, engine, redirect target or approval scope.
 attempt. The trusted fixture owner supplies existing private directories for
 the wrapper, its `query` child, authority, and fake inbox. Authority and inbox
 storage cannot overlap the wrapper. A query is at most 1,024 UTF-8 bytes and
-eight pre-send revisions. Identical pending proposals are idempotent. Changing
-bytes revokes prior approval and creates a fresh operation/revision; no
+eight pre-send revisions. Identical pending proposals are idempotent. Identical
+rejected-query retries return
+fixed `declined` without allocating another revision or adding audit records.
+Changing bytes revokes prior approval and creates a fresh operation/revision; no
 session-wide approval or model-driven allocation of more query slots exists.
 Future owner composition must bound any additional slots itself.
 
