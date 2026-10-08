@@ -914,6 +914,9 @@ def main(argv=None):
     if raw_argv and raw_argv[0] == 'skills':
         from starforge_workbench.skills_install import main as skills_main
         return skills_main(raw_argv[1:])
+    if raw_argv and raw_argv[0] == 'handoff':
+        from starforge_workbench.agent_roster import main as handoff_main
+        return handoff_main(raw_argv[1:])
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--manifest', type=Path, default=default_manifest())
     p.add_argument('--dry-run', action='store_true')
