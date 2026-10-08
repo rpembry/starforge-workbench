@@ -23,6 +23,8 @@ import uuid
 from .docker_worker import atomic, attempt_lock, private_directory
 
 DESTINATION = 'coordinator.synthetic'
+SEARCH_DESTINATION = 'search.synthetic'
+SYNTHETIC_DESTINATIONS = frozenset({DESTINATION, SEARCH_DESTINATION})
 MAX_PAYLOAD = 8192
 STATUSES = frozenset({'queued', 'running', 'report_ready', 'failed', 'cancelled', 'uncertain'})
 
@@ -45,7 +47,8 @@ class ReleasePolicy:
     automatic_statuses: frozenset[str]
 
     def __post_init__(self):
-        if (self.destination != DESTINATION or type(self.automatic_statuses) is not frozenset
+        if (type(self.destination) is not str or self.destination not in SYNTHETIC_DESTINATIONS
+                or type(self.automatic_statuses) is not frozenset
                 or not self.automatic_statuses <= STATUSES):
             raise ReleaseError()
 
@@ -114,13 +117,18 @@ def _read(path: Path) -> dict:
 
 class FakeReleaseEndpoint:
     """Durable synthetic inbox and exact-operation reconciliation, never networking."""
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, destination=DESTINATION):
+        if type(destination) is not str or destination not in SYNTHETIC_DESTINATIONS:
+            raise ReleaseError()
         self.path = private_directory(path)
+        self.destination = destination
         self.fail_after_accept = False
         self.unknown = False
 
     def reconcile(self, binding: dict) -> str:
         with attempt_lock(self.path):
+            if binding['destination'] != self.destination:
+                raise ReleaseError()
             if self.unknown:
                 return 'unknown'
             ledger = _read(self.path/'inbox.json') if (self.path/'inbox.json').exists() else {}
@@ -133,7 +141,7 @@ class FakeReleaseEndpoint:
 
     def send(self, binding: dict, payload: bytes) -> None:
         with attempt_lock(self.path):
-            if (binding['destination'] != DESTINATION or len(payload) > MAX_PAYLOAD
+            if (binding['destination'] != self.destination or len(payload) > MAX_PAYLOAD
                     or base64.b64encode(payload).decode('ascii') != binding['payload']):
                 raise ReleaseError()
             ledger = _read(self.path/'inbox.json') if (self.path/'inbox.json').exists() else {}
@@ -154,7 +162,8 @@ class ReleaseBroker:
                  policy: ReleasePolicy, ownership, clock=time.time):
         self.path = private_directory(attempt_path)
         if (type(endpoint) is not FakeReleaseEndpoint or endpoint.path == self.path
-                or type(policy) is not ReleasePolicy or not job_id or not attempt_id
+                or type(policy) is not ReleasePolicy or policy.destination != endpoint.destination
+                or not job_id or not attempt_id
                 or type(job_id) is not str or type(attempt_id) is not str
                 or len(job_id) > 128 or len(attempt_id) > 128 or not callable(ownership)):
             raise ReleaseError()
