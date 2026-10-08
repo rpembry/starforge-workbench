@@ -4,6 +4,7 @@ Operator creates a private verified base/overlay and a bounded transient user
 cgroup before entering this adapter. No host registration/auth is installed.
 """
 import os
+from dataclasses import dataclass
 from pathlib import Path
 import re
 import resource
@@ -59,6 +60,56 @@ def framed_result(raw: bytes, token: str, maximum: int) -> bytes | None:
     return result
 
 
+@dataclass(frozen=True, slots=True)
+class BootPrompts:
+    """Operator-selected grammar for the controlled image, never autodetected."""
+    hostname: str
+
+    def __post_init__(self):
+        if type(self.hostname) is not str or not re.fullmatch('[a-z][a-z0-9-]{0,62}', self.hostname):
+            raise ValueError('Invalid synthetic boot configuration')
+
+
+class BootDetector:
+    """Current-line state machine over append-only, bounded console bytes.
+
+    This recognizes prompt syntax, not authenticated guest identity. Exact
+    prompt impersonation by a malicious guest remains outside this fixture.
+    """
+    def __init__(self, prompts):
+        if type(prompts) is not BootPrompts:
+            raise ValueError('Invalid synthetic boot configuration')
+        host = prompts.hostname.encode('ascii')
+        self._login = host + b' login: '
+        self._shell = b'root@' + host + b':~# '
+        self._state = 'login'
+        self._length = 0
+
+    def observe(self, raw):
+        if type(raw) is not bytes or len(raw) < self._length:
+            raise RuntimeError('Synthetic guest console invalid')
+        if self._state == 'ready':
+            return 'ready'
+        if len(raw) == self._length:
+            return None
+        self._length = len(raw)
+        # CR and LF both delimit the current terminal line. Only one known
+        # bracketed-paste enable prefix is accepted for the root shell prompt;
+        # arbitrary ANSI rewriting/control sequences are not interpreted.
+        line = raw.rsplit(b'\n', 1)[-1].rsplit(b'\r', 1)[-1]
+        if self._state == 'login':
+            if line == self._login:
+                self._state = 'shell'
+                return 'login'
+            return None
+        if line in (self._shell, b'\x1b[?2004h' + self._shell):
+            self._state = 'ready'
+            return 'ready'
+        if line == b'Password: ' or line == self._login:
+            raise RuntimeError('Synthetic guest authentication unavailable')
+        return None
+
+
 class SyntheticConsoleTransport:
     """Fixed diagnostics for one freshly created operator-owned test guest.
 
@@ -67,12 +118,14 @@ class SyntheticConsoleTransport:
     fresh overlay before another attempt. It is deliberately unsuitable for
     existing/private guests and supplies no live registration to wb-vm-mcp.
     """
-    def __init__(self, guest: GuestRegistration, policy: SyntheticVMPolicy):
+    def __init__(self, guest: GuestRegistration, policy: SyntheticVMPolicy, *, prompts=None):
         if (type(guest) is not GuestRegistration or guest.transport_ref != 'synthetic-console'
-                or type(policy) is not SyntheticVMPolicy):
+                or type(policy) is not SyntheticVMPolicy
+                or (prompts is not None and type(prompts) is not BootPrompts)):
             raise ValueError('Invalid synthetic guest configuration')
         self._guest = guest
         self._policy = policy
+        self._prompts = prompts
         self._process = None
         self._timer = None
         self._start = None
@@ -127,6 +180,8 @@ class SyntheticConsoleTransport:
     def __enter__(self):
         if self._process is not None:
             raise RuntimeError('Synthetic guest already used')
+        if self._prompts is None:
+            raise RuntimeError('Synthetic guest boot configuration unavailable')
         require_cgroup_bounds()
         self._start = time.monotonic()
         try:
@@ -137,15 +192,12 @@ class SyntheticConsoleTransport:
                                                 preexec_fn=_process_limits, bufsize=0)
             self._timer = threading.Timer(self._policy.lifetime_seconds, self._close_quietly)
             self._timer.start()
-            sent_login = False
+            detector = BootDetector(self._prompts)
             def boot(raw):
-                nonlocal sent_login
-                if b'login:' in raw and not sent_login:
+                event = detector.observe(raw)
+                if event == 'login':
                     self._write(b'root\n', self._start + self._policy.lifetime_seconds)
-                    sent_login = True
-                if sent_login and b'Password:' in raw:
-                    raise RuntimeError('Synthetic guest authentication unavailable')
-                if re.search(rb'root@[^:\r\n]+:[^\r\n]*#\s*$', raw):
+                if event == 'ready':
                     return True
                 return None
             self._read(self._start + self._policy.lifetime_seconds, 512 * 1024, boot)
