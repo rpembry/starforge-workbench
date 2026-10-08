@@ -6,8 +6,10 @@ the shared Ollama service is never contacted or modified.
 """
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import re
 import socket
 import stat
 import subprocess
@@ -70,33 +72,86 @@ def launch_command(runner, model, scratch, unit):
     ]
 
 
+def _response_json(response):
+    """Bounded non-streaming HTTP/1.x JSON; transfer encodings are unsupported.
+
+    Connection close is required; an optional single Content-Length must match.
+    Keep-alive response framing is deliberately unsupported, even with a length. This
+    deliberately does not implement a general HTTP/chunked/compression client.
+    Header/body parse failures never return server-controlled exception text.
+    """
+    try:
+        if type(response) is not bytes or len(response) > MAX_RESPONSE:
+            raise LocalModelError()
+        headers, separator, data = response.partition(b'\r\n\r\n')
+        lines = headers.split(b'\r\n')
+        if not separator or not re.fullmatch(rb'HTTP/1\.[01] 200(?: [\x20-\x7e]*)?', lines[0]):
+            raise LocalModelError()
+        length = None
+        for line in lines[1:]:
+            name, colon, value = line.partition(b':')
+            if (not colon or not re.fullmatch(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name)
+                    or not re.fullmatch(rb'[\t\x20-\x7e]*', value)):
+                raise LocalModelError()
+            name, value = name.lower(), value.strip(b' \t')
+            if name == b'transfer-encoding':
+                # Includes chunked, identity, unknown and CL/TE ambiguity.
+                raise LocalModelError()
+            if name == b'content-encoding' and value.lower() != b'identity':
+                raise LocalModelError()
+            if name == b'content-length':
+                if (length is not None or len(value) > 5
+                        or not re.fullmatch(rb'[0-9]+', value)):
+                    raise LocalModelError()
+                length = int(value)
+                if length > MAX_RESPONSE:
+                    raise LocalModelError()
+        if length is not None and len(data) != length:
+            raise LocalModelError()
+        def reject_constant(_):
+            raise LocalModelError()
+        def finite_float(value):
+            number = float(value)
+            if not math.isfinite(number):
+                raise LocalModelError()
+            return number
+        return json.loads(data, parse_constant=reject_constant, parse_float=finite_float)
+    except Exception:
+        raise LocalModelError() from None
+
+
 def unix_request(path, route, body=None, timeout=1):
-    """Bounded IPC to this owned socket only, no DNS/proxy/TCP transport."""
+    """Owned-socket IPC only; bounded close-required framing, no chunked/keep-alive."""
     payload = b'' if body is None else json.dumps(body).encode()
     method = 'GET' if body is None else 'POST'
-    request = (f'{method} {route} HTTP/1.0\r\nHost: localhost\r\n'
+    request = (f'{method} {route} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n'
                f'Content-Type: application/json\r\nContent-Length: {len(payload)}\r\n\r\n').encode()+payload
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
-        deadline = time.monotonic()+timeout
-        stream.settimeout(timeout)
-        stream.connect(str(path))
-        stream.sendall(request)
-        response = bytearray()
-        while True:
-            remaining = deadline-time.monotonic()
-            if remaining <= 0:
-                raise LocalModelError()
-            stream.settimeout(remaining)
-            part = stream.recv(min(4096, MAX_RESPONSE+1-len(response)))
-            if not part:
-                break
-            response.extend(part)
-            if len(response) > MAX_RESPONSE:
-                raise LocalModelError()
-    headers, separator, data = bytes(response).partition(b'\r\n\r\n')
-    if not separator or headers.split(b'\r\n')[0].split()[1:2] != [b'200']:
-        raise LocalModelError()
-    return json.loads(data)
+    try:
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            raise LocalModelError()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
+            deadline = time.monotonic()+timeout
+            def refresh_timeout():
+                remaining = deadline-time.monotonic()
+                if remaining <= 0:
+                    raise LocalModelError()
+                stream.settimeout(remaining)
+            refresh_timeout()
+            stream.connect(str(path))
+            refresh_timeout()
+            stream.sendall(request)
+            response = bytearray()
+            while True:
+                refresh_timeout()
+                part = stream.recv(min(4096, MAX_RESPONSE+1-len(response)))
+                if not part:
+                    break
+                response.extend(part)
+                if len(response) > MAX_RESPONSE:
+                    raise LocalModelError()
+        return _response_json(bytes(response))
+    except Exception:
+        raise LocalModelError() from None
 
 
 def stop_owned(unit, process):
