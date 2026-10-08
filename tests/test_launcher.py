@@ -151,12 +151,17 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(args[-2:], ['resume', 'synthetic'])
         self.assertNotIn('-s', args)
         self.assertNotIn('-a', args)
+        self.c['additional_cwds'] = [str(self.path/'shared')]
+        with patch.object(cli, 'saved_session', return_value={'id': 'synthetic'}):
+            args = cli.provider_argv(self.c, 'resume')
+        self.assertNotIn('--add-dir', args)
         with patch.object(cli, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
             cli.ensure_codex_daemon(self.c)
             self.assertEqual(run.call_args.args[0], [cli.PROVIDERS['codex'], 'app-server', 'daemon', 'start'])
             self.assertEqual(run.call_args.kwargs['timeout'], 30)
         self.data['contexts'][0]['codex_remote_daemon'] = True
         self.data['contexts'][0]['resume_policy'] = 'explicit-session'
+        self.data['contexts'][0]['additional_cwds'] = [str(self.path/'shared')]
         self.load()
         self.data['contexts'][0]['resume_policy'] = 'picker'
         with self.assertRaisesRegex(ValueError, 'exact-session resume'):
@@ -166,6 +171,7 @@ class LauncherTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'requires a Codex conversation context'):
             self.load()
         self.data['contexts'][0]['provider'] = 'codex'
+        self.data['contexts'][0]['additional_cwds'] = []
         self.data['contexts'][0].update(codex_mode='agents', resume_policy='never')
         with self.assertRaisesRegex(ValueError, 'requires a Codex conversation context'):
             self.load()

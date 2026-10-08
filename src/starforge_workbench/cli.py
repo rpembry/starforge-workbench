@@ -73,8 +73,8 @@ def load(path):
             raise ValueError('Codex Agents requires a local Codex context with never resume and no additional directories')
         if c.get('codex_remote_daemon') and (c['provider'] != 'codex' or c.get('codex_mode') == 'agents'):
             raise ValueError('Codex daemon mode requires a Codex conversation context')
-        if c.get('codex_remote_daemon') and (c['resume_policy'] != 'explicit-session' or c['additional_cwds']):
-            raise ValueError('Codex daemon mode requires exact-session resume and no additional directories')
+        if c.get('codex_remote_daemon') and c['resume_policy'] != 'explicit-session':
+            raise ValueError('Codex daemon mode requires exact-session resume')
         if c.get('codex_instructions_file') and (c['provider'] != 'codex' or c.get('codex_mode') == 'agents'):
             raise ValueError('Codex instructions file requires a bindable Codex conversation context')
     return data
@@ -680,7 +680,8 @@ def migrate_codex_binding(c, expected_old_id):
                         'cwd': str(cwd(c))})
         from starforge_workbench.codex_daemon import create_thread
         identity = create_thread(cwd(c), c['title'], role_text,
-                                 'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write')
+                                 'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write',
+                                 directories(c)[1:])
         bind_session(c, identity)
         intent.unlink()
         return {'old_id': expected_old_id, 'new_id': identity,
@@ -723,7 +724,8 @@ def start_codex(c):
                 atomic(intent, {'context_id': c['id'], 'cwd': str(cwd(c))})
                 from starforge_workbench.codex_daemon import create_thread
                 identity = create_thread(cwd(c), c['title'], role_text,
-                                         'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write')
+                                         'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write',
+                                         directories(c)[1:])
                 bind_session(c, identity)
                 intent.unlink()
                 data = saved_session(c)
@@ -806,8 +808,9 @@ def provider_argv(c, choice):
             text = context_instructions(c)
             if text:
                 base += ['-c', 'developer_instructions='+json.dumps(text, ensure_ascii=False)]
-        for directory in directories(c)[1:]:
-            base += ['--add-dir', str(directory)]
+        if not c.get('codex_remote_daemon'):
+            for directory in directories(c)[1:]:
+                base += ['--add-dir', str(directory)]
         if choice == 'picker':
             if c.get('role'):
                 raise ValueError('Role-bound context cannot use a global conversation picker')

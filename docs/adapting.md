@@ -73,9 +73,10 @@ the work. Remove the request file when it is no longer needed.
 
 For a conversation that must share the local Codex app-server daemon with the
 Agents command center, opt in with `codex_remote_daemon: true`,
-`resume_policy: explicit-session`, and no additional directories. Workbench
+`resume_policy: explicit-session`. Workbench
 starts the daemon if needed, creates a named thread through app-server with
-the private `codex_instructions_file` content, saves its exact binding, then
+the private `codex_instructions_file` content and any additional workspace
+directories, saves its exact binding, then
 opens it through `--remote unix://`. On restart it resumes that exact thread.
 Existing local bindings are not silently converted: a deliberate migration
 must preserve the old thread and select a new daemon-backed binding. If thread
