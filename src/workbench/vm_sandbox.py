@@ -42,7 +42,7 @@ def _overlaps(left: Path, right: Path) -> bool:
     return left == right or left in right.parents or right in left.parents
 
 
-def _open_without_symlinks(path: Path, *, writable=False):
+def _open_without_symlinks(path: Path, *, writable=False, nonblocking=False):
     """Open from / using dirfds, never following a symlink component.
 
     FD mounts bind the checked inode, rather than resolving the host pathname
@@ -56,6 +56,8 @@ def _open_without_symlinks(path: Path, *, writable=False):
             os.close(current)
             current = new
         flags = os.O_RDWR if writable else os.O_RDONLY
+        if nonblocking:
+            flags |= os.O_NONBLOCK
         return os.open(path.name, flags | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=current)
     finally:
         os.close(current)
