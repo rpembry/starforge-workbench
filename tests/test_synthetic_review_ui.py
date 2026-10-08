@@ -247,6 +247,39 @@ def test_session_expiring_during_fence_wait_is_rechecked(setup, monkeypatch, ope
     assert broker.review() == snapshot
 
 
+@pytest.mark.parametrize('decision', ['approve', 'reject', 'defer', 'revoke'])
+def test_preview_expiring_during_fence_wait_never_records_decision(setup, monkeypatch, decision):
+    from contextlib import contextmanager
+    client, broker, _, _, fence, now, paths, _, snapshot = setup
+    data = form(client, decision)
+    now[0] = 1119
+    original = fence.scope
+    @contextmanager
+    def delayed_fence():
+        with original():
+            now[0] = 1121
+            yield
+    monkeypatch.setattr(fence, 'scope', delayed_fence)
+    assert post(client, data).status_code == 409
+    assert broker.review() == snapshot
+    assert not list(paths['authority'].glob('receipt-*.json'))
+
+
+def test_preview_expiry_after_local_evidence_read_is_checked_before_decision(setup, monkeypatch):
+    client, broker, worker, _, _, now, paths, _, snapshot = setup
+    data = form(client)
+    now[0] = 1119
+    original = worker.local_report
+    def delayed_read():
+        result = original()
+        now[0] = 1121
+        return result
+    monkeypatch.setattr(worker, 'local_report', delayed_read)
+    assert post(client, data).status_code == 409
+    assert broker.review() == snapshot
+    assert not list(paths['authority'].glob('receipt-*.json'))
+
+
 @pytest.mark.parametrize('kind', ['large', 'json', 'missing_origin', 'invalid_ascii'])
 def test_untrusted_body_errors_are_content_free(setup, kind):
     client, _, _, _, _, _, _, _, _ = setup

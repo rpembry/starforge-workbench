@@ -31,6 +31,8 @@ broker and canonical fence; no network content release is added.
 Session validity is rechecked inside the canonical fence after body/lock waits,
 including before revocation and local detail/status reads. All cooperating local
 draft edits, decisions, revocations and dispatch must use that same fence.
+The preview's own expiry is also rechecked immediately before a decision after
+local evidence reads; a delayed request cannot extend its validity.
 
 The synthetic authority accepts only capabilities issued by its own instance for
 trusted synthetic-human session fixtures. Machine/service fixtures and caller

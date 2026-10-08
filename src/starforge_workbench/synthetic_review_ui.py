@@ -192,6 +192,9 @@ def create_synthetic_review_app(*, broker=None, authority=None, worker=None, fen
             worker.local_report()
             if broker.review() != view[1]:
                 return denied(409)
+            session = current_session(request)
+            if clock() >= view[2]:
+                return denied(409)
             if form['decision'] == 'revoke':
                 broker.revoke()
             else:
