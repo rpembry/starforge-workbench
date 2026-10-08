@@ -43,11 +43,6 @@ def runtime_dir() -> Path:
     return private_dir(path)
 
 
-def recovery_dir() -> Path:
-    state = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
-    return private_dir(state / APP / "recovery")
-
-
 def profile_dir() -> Path:
     data = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
     return private_dir(data / APP)
@@ -64,23 +59,20 @@ def notify(message: str) -> None:
     print(message, file=sys.stderr)
 
 
-def save_recovery(data: bytes) -> Path:
-    folder = recovery_dir()
-    path = folder / ("recovery-" + uuid.uuid4().hex + ".txt")
-    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "wb") as stream:
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
-    return path
-
-
 def open_editor(text_file: Path, session: Path) -> int:
     profile = profile_dir()
     user_data = private_dir(profile / "code-data")
     extensions = private_dir(profile / "extensions")
     settings = private_dir(user_data / "User") / "settings.json"
-    settings.write_text(json.dumps({
+    if settings.exists() or settings.is_symlink():
+        fd = os.open(settings, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            status = os.fstat(fd)
+            if (not stat.S_ISREG(status.st_mode) or status.st_uid != os.getuid()
+                    or status.st_mode & 0o077 or status.st_nlink != 1):
+                raise ClipboardError("Editor settings are not private and owned")
+        finally: os.close(fd)
+    contents = json.dumps({
         "telemetry.telemetryLevel": "off",
         "update.mode": "none",
         "extensions.autoCheckUpdates": False,
@@ -91,8 +83,14 @@ def open_editor(text_file: Path, session: Path) -> int:
         "workbench.startupEditor": "none",
         "workbench.welcomePage.experimentalOnboarding": False,
         "security.workspace.trust.enabled": False,
-    }))
-    settings.chmod(0o600)
+    })
+    temporary = settings.parent / (".settings-" + uuid.uuid4().hex)
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(contents); stream.flush(); os.fsync(stream.fileno())
+        os.replace(temporary, settings); sync_dir(settings.parent)
+    finally: temporary.unlink(missing_ok=True)
     command = [EDITOR, "--new-window", "--wait", "--disable-extensions",
                "--user-data-dir", str(user_data), "--extensions-dir", str(extensions),
                "--sync", "off", str(text_file)]
