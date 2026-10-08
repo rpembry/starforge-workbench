@@ -41,10 +41,18 @@ outcomes. It stops after a destination cannot be verified, avoiding additional
 requests in an uncertain state. Recheck the browser before retrying a partial
 result, because a delayed Chrome launch may still finish.
 
-It never closes unrelated tabs. The CLI only controls the local browser; the
-authenticated Workbench API and MCP server expose desired-state CRUD so an AIW
-conversation can list, add, and remove named workspace entries without editing
-YAML.
+It never closes unrelated tabs. The CLI only controls the local browser.
+
+The authenticated Workbench API and MCP tools can edit desired state only when
+`WB_BROWSER_WORKSPACES_FILE` is explicitly set for the API service. Without it,
+these routes return `503 browser_workspace_not_configured`; they do not claim a
+desktop change. The configured absolute path must identify the **same file**
+read by the desktop launcher, with both processes running under the same Unix
+user on a shared filesystem. Keep the file and its parent private; the API
+requires a caller-owned `0600` file in a caller-owned private directory. The
+standard separate-user `workbench` service cannot edit a desktop user's
+private config, so use the desktop CLI unless such a same-user shared setup is
+deliberately configured. No browser tabs change until the local launcher acts.
 
 ### Current Chrome profiles
 

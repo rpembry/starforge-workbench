@@ -87,6 +87,15 @@ PRAGMA user_version=3;
 COMMIT;
 """
 
+MIGRATE_3_TO_4 = """
+BEGIN IMMEDIATE;
+CREATE TABLE quarantined_commands(
+ operation_id TEXT PRIMARY KEY REFERENCES operations(id),
+ reason TEXT NOT NULL CHECK(reason='identity_conflict'));
+PRAGMA user_version=4;
+COMMIT;
+"""
+
 
 class CoordinatorStore:
     def __init__(self, state_root: str | Path, policy: Policy):
@@ -111,12 +120,17 @@ class CoordinatorStore:
                     # executescript is used only for first creation. Its explicit transaction
                     # keeps schema and version atomic even if creation is interrupted.
                     db.executescript(SCHEMA.replace("COMMIT;", "PRAGMA user_version=3;\nCOMMIT;"))
+                    db.executescript(MIGRATE_3_TO_4)
                 elif version == 1:
                     db.executescript(MIGRATE_1_TO_2)
                     db.executescript(MIGRATE_2_TO_3)
+                    db.executescript(MIGRATE_3_TO_4)
                 elif version == 2:
                     db.executescript(MIGRATE_2_TO_3)
-                elif version != 3:
+                    db.executescript(MIGRATE_3_TO_4)
+                elif version == 3:
+                    db.executescript(MIGRATE_3_TO_4)
+                elif version != 4:
                     raise Unavailable("unsupported coordinator schema")
                 check = db.execute("PRAGMA quick_check").fetchone()[0]
                 if check != "ok":
@@ -146,7 +160,8 @@ class CoordinatorStore:
                     yield db
                     db.execute("COMMIT")
                 except BaseException:
-                    db.execute("ROLLBACK")
+                    if db.in_transaction:
+                        db.execute("ROLLBACK")
                     raise
         except sqlite3.Error as exc:
             raise Unavailable("coordinator store unavailable; operation outcome may be unknown") from exc
@@ -224,14 +239,46 @@ class CoordinatorStore:
         except sqlite3.Error as exc:
             raise Unavailable("coordinator store unavailable") from exc
 
-    def list(self, limit=100):
+    def list(self, limit=100, before: str | None = None):
         if not 1 <= limit <= 1000:
             raise ValueError("invalid page size")
         try:
             with self._connection() as db:
                 db.execute("BEGIN")
-                ids = db.execute("SELECT id FROM jobs ORDER BY created_at,id LIMIT ?", (limit,)).fetchall()
+                if before is None:
+                    ids = db.execute("SELECT id FROM jobs ORDER BY created_at DESC,id DESC LIMIT ?",
+                                     (limit,)).fetchall()
+                else:
+                    cursor = db.execute("SELECT created_at,id FROM jobs WHERE id=?", (before,)).fetchone()
+                    if cursor is None:
+                        raise ValueError("unknown job cursor")
+                    ids = db.execute("""SELECT id FROM jobs WHERE (created_at,id) < (?,?)
+                                      ORDER BY created_at DESC,id DESC LIMIT ?""",
+                                     (cursor["created_at"], cursor["id"], limit)).fetchall()
                 result = [self._view(db, item[0]) for item in ids]
+                db.execute("COMMIT")
+                return result
+        except sqlite3.Error as exc:
+            raise Unavailable("coordinator store unavailable") from exc
+
+    def list_active(self):
+        """Return all live jobs for reconciliation, regardless of lifetime history."""
+        try:
+            with self._connection() as db:
+                ids = db.execute("SELECT id FROM jobs WHERE phase IN ('active','finalizing')").fetchall()
+                return [self._view(db, item[0]) for item in ids]
+        except sqlite3.Error as exc:
+            raise Unavailable("coordinator store unavailable") from exc
+
+    def reservations(self):
+        try:
+            with self._connection() as db:
+                db.execute("BEGIN")
+                pending = db.execute("SELECT COUNT(*) FROM jobs WHERE phase='queued' AND intent='run'").fetchone()[0]
+                active = db.execute("SELECT spec FROM jobs WHERE phase IN ('active','finalizing')").fetchall()
+                result = {"state": "snapshot", "pending": pending, "active": len(active),
+                          "cpu_millis": sum(json.loads(row[0])["resources"]["cpu_millis"] for row in active),
+                          "memory_mb": sum(json.loads(row[0])["resources"]["memory_mb"] for row in active)}
                 db.execute("COMMIT")
                 return result
         except sqlite3.Error as exc:
@@ -406,11 +453,14 @@ class CoordinatorStore:
             return self._view(db, job_id)
 
     def record_no_start(self, job_id, *, attempt_id: str, incarnation: str,
-                        observation_seq: int, supervisor_id: str, reason: str):
+                        observation_seq: int, supervisor_id: str, reason: str,
+                        terminal_reason: str | None = None):
         """Apply distinct positive never-started evidence; no process exit is implied."""
         if (reason not in {"workspace_setup_failed", "prelaunch_abandon"} or
                 type(observation_seq) is not int or observation_seq < 1 or
-                not isinstance(supervisor_id, str) or not 1 <= len(supervisor_id) <= 128):
+                not isinstance(supervisor_id, str) or not 1 <= len(supervisor_id) <= 128 or
+                terminal_reason not in {None, 'launch_rejected'} or
+                terminal_reason == 'launch_rejected' and reason != 'prelaunch_abandon'):
             raise ValueError("invalid no-start evidence")
         with self._tx() as db:
             job = self._view(db, job_id)
@@ -432,15 +482,17 @@ class CoordinatorStore:
                     job["phase"] == "terminal"):
                 raise Conflict("stale no-start evidence")
             outcome = "cancelled" if job["intent"] == "cancel" else "failed"
+            visible_reason = (terminal_reason if job["intent"] == "run" and terminal_reason
+                              else reason)
             db.execute("UPDATE attempts SET phase='stopped',outcome=?,supervisor_id=?,"
                        "observation_seq=?,last_observed_at=?,stopped=1,no_start_reason=? WHERE id=?", (
                            outcome, supervisor_id, observation_seq, _stamp(), reason, attempt_id))
             db.execute("UPDATE jobs SET phase='terminal',outcome=?,visibility='fresh',reason=? "
-                       "WHERE id=?", (outcome, reason, job_id))
+                       "WHERE id=?", (outcome, visible_reason, job_id))
             db.execute("UPDATE operations SET outcome='confirmed' WHERE job_id=? "
                        "AND kind IN ('admit','retry','cancel') AND outcome='pending'", (job_id,))
             self._event(db, job_id, "no_start_observed", {
-                "attempt_id": attempt_id, "reason": reason, "outcome": outcome,
+                "attempt_id": attempt_id, "reason": visible_reason, "outcome": outcome,
                 "observation_gap": observation_seq > attempt["observation_seq"] + 1})
             return self._view(db, job_id)
 
@@ -452,6 +504,15 @@ class CoordinatorStore:
             if job["phase"] != "terminal" and job["visibility"] != "unknown":
                 db.execute("UPDATE jobs SET visibility='unknown',reason='observation_unavailable' WHERE id=?", (job_id,))
                 self._event(db, job_id, "visibility_unknown", {})
+            return self._view(db, job_id)
+
+    def mark_identity_conflict(self, job_id):
+        with self._tx() as db:
+            job = self._view(db, job_id)
+            if job["phase"] != "terminal" and (job["visibility"] != "unknown" or
+                                                    job["reason"] != "identity_conflict"):
+                db.execute("UPDATE jobs SET visibility='unknown',reason='identity_conflict' WHERE id=?", (job_id,))
+                self._event(db, job_id, "dispatch_identity_conflict", {})
             return self._view(db, job_id)
 
     def replay(self, job_id, after_seq=0, limit=100):
@@ -493,7 +554,9 @@ class CoordinatorStore:
         try:
             with self._connection() as db:
                 return [dict(row) for row in db.execute(
-                    "SELECT * FROM operations WHERE outcome IN ('pending','running','unknown') ORDER BY rowid LIMIT ?", (limit,))]
+                    "SELECT * FROM operations WHERE outcome IN ('pending','running','unknown') "
+                    "AND id NOT IN (SELECT operation_id FROM quarantined_commands) "
+                    "ORDER BY rowid LIMIT ?", (limit,))]
         except sqlite3.Error as exc:
             raise Unavailable("coordinator store unavailable") from exc
 
@@ -509,3 +572,30 @@ class CoordinatorStore:
                 raise Conflict("confirmed operation cannot regress")
             db.execute("UPDATE operations SET outcome=? WHERE id=?", (status, operation_id))
             return {**dict(row), "outcome": status}
+
+    def note_launch_rejection(self, operation_id: str):
+        """Remember a prelaunch rejection before the tombstone RPC can be lost."""
+        with self._tx() as db:
+            row = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
+            if not row or row["kind"] not in {"admit", "retry"} or row["outcome"] == "confirmed":
+                raise Conflict("invalid launch rejection operation")
+            response = json.loads(row["response"])
+            response["launch_rejected"] = True
+            db.execute("UPDATE operations SET response=? WHERE id=?", (_json(response), operation_id))
+
+    def quarantine_command(self, operation_id: str):
+        """Keep an identity-conflicted command visible but out of automatic replay."""
+        with self._tx() as db:
+            row = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
+            if not row or row["outcome"] == "confirmed":
+                raise Conflict("cannot quarantine missing or confirmed command")
+            db.execute("UPDATE operations SET outcome='unknown' WHERE id=?", (operation_id,))
+            db.execute("INSERT OR IGNORE INTO quarantined_commands VALUES(?,?)", (
+                operation_id, "identity_conflict"))
+            job = self._view(db, row["job_id"])
+            if job["phase"] != "terminal":
+                db.execute("UPDATE jobs SET visibility='unknown',reason='identity_conflict' WHERE id=?", (
+                    row["job_id"],))
+                self._event(db, row["job_id"], "dispatch_quarantined", {
+                    "operation_id": operation_id, "reason": "identity_conflict"})
+            return row["job_id"]

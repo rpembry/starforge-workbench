@@ -42,6 +42,12 @@ collector principal so the worker can claim its registration; the ordinary
 multi-context collector keeps its existing identity. See the
 [one-context rollout](mobile-control-rollout.md) for the cutover. The worker
 reloads its configuration every five seconds.
+While enabled, each sweep posts a collector heartbeat under a distinct
+`<host>:instruction-worker` source. A clean sweep reports `ok`; missing local
+registration state or another sweep failure reports `degraded`. A silent worker
+ages into the existing `collector_health` offline attention rule after 90
+seconds. A disabled worker sends no heartbeat, so a prior enabled heartbeat can
+age offline until an operator reviews or removes that collector record.
 Setting `enabled` to false stops future claims without deleting server pending
 records or private attempt receipts. The server kill switch independently
 rejects new claims. Neither switch cancels an already transmitted instruction.
@@ -57,7 +63,11 @@ process through a fresh collector-style scan, and compares the current exact
 launcher binding/process generation with the published opaque registration.
 It repeats that check after claiming. Missing or changed evidence prevents
 provider input. A claim is renewed immediately before attempting delivery;
-without confirmed renewal the worker sends nothing.
+without confirmed renewal the worker sends nothing. The server records renewal
+as the boundary after which a provider attempt may occur. If an unrenewed
+claim's lease lapses, it returns to `queued` with
+`lease_expired_before_attempt` (or `expired` if its instruction deadline passed).
+A renewed claim with a lapsed lease remains `uncertain/lease_expired`.
 
 The provider adapter has one durable-attempt marker per instruction, written
 before any POST. For a claimed instruction it also retains the opaque instruction
@@ -68,6 +78,10 @@ preflight outage maps to the server's retryable queue state. Once a POST may
 have begun, timeout, unexpected status, crash, or later message lookup 404
 maps to `uncertain` without automatic resubmission. Message lookup 200 after a
 crash can establish a stored user message.
+Local resolver or adapter failure before the durable attempt marker reports
+`retryable/local_preflight_failed`; failure after the marker reports
+`uncertain/worker_interrupted`. If the marker cannot be inspected, the worker
+fails closed as uncertain.
 
 After `received`, each worker sweep asks the same loopback API for at most the
 100 most recent records in the exact session. The response body is bounded to

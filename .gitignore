@@ -52,6 +52,7 @@
 !/docs/images/starforge-dashboard-simulated.png
 !/examples/
 !/examples/coordinator_worker.py
+!/examples/local_qwen_smoke.py
 !/examples/Dockerfile.coordinator-worker
 !/skills/
 !/skills/**/

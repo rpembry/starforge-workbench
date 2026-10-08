@@ -101,3 +101,13 @@ def test_unpinned_and_interrupted_sources_are_rejected(source, tmp_path):
     assert manage('doctor', NAME, home=home)['status'] == 'interrupted'
     with pytest.raises(ValueError, match='already exists'):
         manage('install', NAME, source=source, home=home)
+
+
+def test_ignored_skill_file_is_never_installed_under_commit_receipt(source, tmp_path):
+    (source / '.gitignore').write_text('notes.txt\n')
+    git(source, 'add', '.gitignore')
+    git(source, 'commit', '-qm', 'Ignore local notes')
+    (source / 'skills' / NAME / 'notes.txt').write_text('private local note\n')
+    with pytest.raises(ValueError, match='ignored files'):
+        manage('install', NAME, source=source, home=tmp_path / 'home')
+    assert not (tmp_path / 'home' / '.agents' / 'skills' / NAME).exists()

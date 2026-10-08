@@ -61,6 +61,22 @@ def test_bad_record_and_api_failure_do_not_starve_later_rows(tmp_path):
         assert not state['diagnostics']
 
 
+def test_completed_message_history_uses_bounded_cursor_state(tmp_path):
+    path = database(tmp_path)
+    with sqlite3.connect(path) as db:
+        db.executemany('insert into message values(?,?,?,?)',
+            [(f'msg_{number:04d}', 'ses_test', number + 1000, json.dumps(record()))
+             for number in range(300)])
+    state = {'cutoff_ms': 0}
+    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(201)),
+                      base_url='https://test') as api:
+        assert scan(api, path, state)['submitted'] == 300
+        assert scan(api, path, state)['submitted'] == 0
+    assert state['message_cursor'] == [1299, 'msg_0299']
+    assert state['pending_messages'] == {} and 'acknowledged' not in state
+    assert len(json.dumps(state)) < 300
+
+
 def test_missing_database_is_not_created(tmp_path):
     path=tmp_path/'missing.db'
     with pytest.raises(sqlite3.OperationalError):scan(None,path,{'cutoff_ms':0})
@@ -214,6 +230,31 @@ def test_attention_queue_restart_replay_and_failure_ordering(tmp_path):
         assert failed.get('attention_offset', 0) == 0
 
 
+def test_rejected_attention_record_does_not_block_later_record(tmp_path):
+    queue = tmp_path / 'attention.jsonl'
+    generation = {'kind': 'generation', 'provider': 'opencode', 'session_id': 'ses_test',
+        'generation_id': 'msg_one', 'source': 'opencode-plugin', 'source_instance': 'instance_one',
+        'started_at': '2026-09-12T12:00:00+00:00', 'provenance': 'opencode.chat.message'}
+    observation = {'kind': 'observation', 'provider': 'opencode', 'session_id': 'ses_test',
+        'generation_id': 'msg_one', 'source': 'opencode-plugin', 'source_instance': 'instance_one',
+        'incident_id': 'a' * 64, 'sequence': 1, 'observed_at': '2026-09-12T12:00:01+00:00',
+        'reason': 'user_question', 'state': 'resolved', 'provenance': 'opencode.question.completed'}
+    queue.write_text(json.dumps(observation) + '\n' + json.dumps(generation) + '\n')
+    calls = []
+    def respond(request):
+        calls.append(request.url.path)
+        if request.url.path.endswith('observations'):
+            return httpx.Response(409, json={'error': {'code': 'incident_not_open'}})
+        return httpx.Response(201, json={})
+    state = {}
+    with httpx.Client(transport=httpx.MockTransport(respond), base_url='https://test') as api:
+        assert scan_attention(api, queue, state) == dict(submitted=1, malformed=0, rejected=1, failed=0)
+        assert scan_attention(api, queue, state) == dict(submitted=0, malformed=0, rejected=0, failed=0)
+    assert len(calls) == 2 and state['attention_offset'] == queue.stat().st_size
+    assert list(state['attention_diagnostics'].values()) == ['rejected_record']
+    assert 'ses_test' not in json.dumps(state['attention_diagnostics'])
+
+
 @pytest.mark.parametrize('relation', ['smaller', 'equal', 'larger'])
 def test_attention_queue_replacement_resets_cursor_by_file_identity(tmp_path, relation):
     generation = {'kind': 'generation', 'provider': 'opencode', 'session_id': 'ses_new',
@@ -293,7 +334,10 @@ def test_loop_reports_valid_degraded_heartbeat_and_recovers(tmp_path, monkeypatc
         assert heartbeats[0]['reason'] == 'scan_failed'
         saved = json.loads(state_path.read_text())
         assert saved['cutoff_ms'] == original['cutoff_ms']
-        assert saved['acknowledged'] == original['acknowledged']
+        if missing == 'database':
+            assert saved['acknowledged'] == original['acknowledged']
+        else:
+            assert 'acknowledged' not in saved and 'message_cursor' not in saved
         if missing == 'database':
             assert not db.exists()
             database(tmp_path).rename(db)

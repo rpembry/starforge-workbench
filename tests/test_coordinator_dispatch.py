@@ -5,6 +5,7 @@ import hashlib
 
 from coordinator import CoordinatorStore, JobSpec, Limits, Policy, Unavailable
 from coordinator.dispatch import ControlError, Dispatcher, SupervisorEvidence
+from coordinator.supervisor import PlanRejected
 
 
 class FakeControl:
@@ -264,6 +265,8 @@ class RuntimeForService:
 
     def validate(self, plan):
         assert plan["profile_ref"] == "offline" and plan["workspace_ref"] == "scratch"
+        if not plan["payload"].get("argv"):
+            raise PlanRejected("invalid synthetic command")
 
     def launch(self, plan):
         self.starts += 1
@@ -323,6 +326,163 @@ class ServiceBridge:
             return self.service.dispatch({"method": method, "args": args})
         except Exception as exc:
             raise ControlError(type(exc).__name__) from exc
+
+
+def test_rejected_launch_tombstone_does_not_stall_next_job(tmp_path):
+    from coordinator.supervisor import Supervisor
+    from coordinator.supervisor_service import SupervisorService
+
+    store, spec = setup(tmp_path)
+    root = tmp_path / "supervisor"
+    root.mkdir(mode=0o700)
+    runtime = RuntimeForService(root)
+    dispatcher = Dispatcher(store, ServiceBridge(SupervisorService(Supervisor(root, runtime))))
+    bad = store.submit(spec.model_copy(update={"payload": {}}), principal="owner", key="bad")
+    good = store.submit(spec, principal="owner", key="good")
+    assert dispatcher.tick()["admitted"] == bad["id"]
+    assert dispatcher.tick()["admitted"] == good["id"]
+    rejected = store.get(bad["id"])
+    assert (rejected["phase"], rejected["outcome"], rejected["reason"]) == (
+        "terminal", "failed", "launch_rejected")
+    assert rejected["attempts"][-1]["no_start_reason"] == "prelaunch_abandon"
+    assert runtime.starts == 0 and not any(op["job_id"] == bad["id"] for op in store.pending_commands())
+    assert dispatcher.tick()["processed"] == 1
+    assert store.get(good["id"])["visibility"] == "fresh" and runtime.starts == 1
+    assert SupervisorEvidence(dispatcher).health()["last_problem"] == {
+        "job_id": bad["id"], "code": "launch_rejected"}
+
+
+def test_lost_rejection_tombstone_reply_keeps_terminal_reason(tmp_path):
+    import pytest
+
+    store, spec = setup(tmp_path)
+    job = store.submit(spec.model_copy(update={"payload": {}}), principal="owner", key="bad")
+
+    class LostAbandonReply(FakeControl):
+        lost = False
+
+        def call(self, method, **args):
+            if method == "launch":
+                raise ControlError("LaunchRejected")
+            result = super().call(method, **args)
+            if method == "abandon" and not self.lost:
+                self.lost = True
+                raise Unavailable("synthetic reply loss")
+            return result
+
+    dispatcher = Dispatcher(store, LostAbandonReply())
+    dispatcher.tick()
+    with pytest.raises(Unavailable):
+        dispatcher.tick()
+    assert store.get(job["id"])["phase"] == "active"
+    dispatcher.tick()
+    result = store.get(job["id"])
+    assert result["phase"] == "terminal" and result["reason"] == "launch_rejected"
+    assert result["attempts"][-1]["no_start_reason"] == "prelaunch_abandon"
+    assert not store.pending_commands()
+
+
+def test_identity_conflict_quarantines_only_its_command(tmp_path):
+    store, spec = setup(tmp_path)
+    first = store.submit(spec, principal="owner", key="first")
+    second = store.submit(spec, principal="owner", key="second")
+    control = FakeControl()
+    dispatcher = Dispatcher(store, control)
+    dispatcher.tick()
+    dispatcher.tick()
+    dispatcher.tick()
+    first_active, second_active = store.get(first["id"]), store.get(second["id"])
+    store.reattach(first["id"], expected_version=first_active["version"],
+                   principal="owner", key="reattach")
+    store.cancel(second["id"], expected_version=second_active["version"],
+                 principal="owner", key="cancel")
+    control.items[first_active["attempt_id"]]["job_id"] = "mismatch"
+    dispatcher.tick()
+    assert store.get(first["id"])["visibility"] == "unknown"
+    assert store.get(first["id"])["reason"] == "identity_conflict"
+    assert store.get(second["id"])["outcome"] == "cancelled"
+    assert not store.pending_commands()
+    assert SupervisorEvidence(dispatcher).health()["last_problem"] == {
+        "job_id": first["id"], "code": "identity_conflict"}
+
+
+def test_transient_supervisor_failure_does_not_make_job_terminal(tmp_path):
+    import pytest
+
+    store, spec = setup(tmp_path)
+    job = store.submit(spec, principal="owner", key="first")
+
+    class UnavailableControl(FakeControl):
+        def call(self, method, **args):
+            if method == "launch":
+                raise ControlError("Unavailable")
+            return super().call(method, **args)
+
+    dispatcher = Dispatcher(store, UnavailableControl())
+    dispatcher.tick()
+    with pytest.raises(ControlError, match="Unavailable"):
+        dispatcher.tick()
+    current = store.get(job["id"])
+    assert current["phase"] == "active" and current["outcome"] is None
+    assert current["visibility"] == "unknown"
+    assert store.pending_commands()[0]["job_id"] == job["id"]
+
+
+def test_generic_validation_value_error_is_not_a_launch_rejection(tmp_path):
+    import pytest
+    from coordinator.supervisor import Supervisor
+    from coordinator.supervisor_service import SupervisorService
+
+    store, spec = setup(tmp_path)
+    root = tmp_path / "supervisor"
+    root.mkdir(mode=0o700)
+
+    class UnreadableRuntime(RuntimeForService):
+        def validate(self, plan):
+            raise ValueError("synthetic malformed daemon response")
+
+    runtime = UnreadableRuntime(root)
+    dispatcher = Dispatcher(store, ServiceBridge(SupervisorService(Supervisor(root, runtime))))
+    job = store.submit(spec, principal="owner", key="bad")
+    dispatcher.tick()
+    with pytest.raises(ControlError, match="ValueError"):
+        dispatcher.tick()
+    result = store.get(job["id"])
+    assert result["phase"] == "active" and result["outcome"] is None
+    assert result["visibility"] == "unknown" and result["reason"] != "launch_rejected"
+    assert not result["attempts"][-1]["no_start_reason"]
+    assert store.pending_commands()[0]["job_id"] == job["id"]
+
+
+def test_reservation_full_leaves_launch_retryable_and_runs_later_cancel(tmp_path):
+    store, spec = setup(tmp_path)
+    first = store.submit(spec, principal="owner", key="first")
+    second = store.submit(spec, principal="owner", key="second")
+
+    class CapacityControl(FakeControl):
+        freed = False
+
+        def call(self, method, **args):
+            if method == "launch" and args["plan"]["job_id"] == second["id"] and not self.freed:
+                raise ControlError("ReservationFull")
+            result = super().call(method, **args)
+            if method == "cancel":
+                self.freed = True
+            return result
+
+    control = CapacityControl()
+    dispatcher = Dispatcher(store, control)
+    dispatcher.tick()
+    dispatcher.tick()
+    active = store.get(first["id"])
+    store.cancel(first["id"], expected_version=active["version"],
+                 principal="owner", key="cancel")
+    dispatcher.tick()
+    assert store.get(first["id"])["outcome"] == "cancelled"
+    assert store.get(second["id"])["phase"] == "active"
+    assert any(op["job_id"] == second["id"] for op in store.pending_commands())
+    dispatcher.tick()
+    assert store.get(second["id"])["visibility"] == "fresh"
 
 
 def test_real_supervisor_contract_two_jobs_and_verified_evidence(tmp_path):
@@ -487,11 +647,12 @@ def test_dispatcher_rejects_mismatched_no_start_evidence(tmp_path):
     dispatcher.tick()
     with pytest.raises(ControlError, match="OwnershipUnknown"):
         dispatcher.tick()
-    with pytest.raises(Conflict, match="no-start evidence mismatch"):
-        dispatcher.tick()
+    dispatcher.tick()
     result = store.get(job["id"])
     assert result["phase"] == "active" and result["outcome"] is None
     assert result["attempts"][-1]["no_start_reason"] is None
+    assert result["visibility"] == "unknown" and result["reason"] == "identity_conflict"
+    assert not store.pending_commands()
 
 
 def test_same_evidence_via_api_and_cli(tmp_path, capsys):

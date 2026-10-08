@@ -21,27 +21,48 @@ def client(url=None, credentials_file=None, role='operator'):
     if path.is_symlink() or path.stat().st_uid != os.getuid() or path.stat().st_mode & 0o077:
         raise ValueError('Client credentials must be owned by you with mode 0600')
     data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError('Client credentials must be a JSON object')
     url = url or data.get('url') or 'http://127.0.0.1:8027'
     parsed = urlsplit(url)
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError('API URL must not contain credentials, query, or fragment')
     if parsed.scheme != 'https' and not (parsed.scheme == 'http' and parsed.hostname in {'127.0.0.1', 'localhost', '::1'}):
         raise ValueError('Use HTTPS or an explicit loopback HTTP endpoint')
-    if role not in {'operator', 'collector'}:
+    role_bound = set(data) == {'url', 'role', 'token'}
+    if role == 'attention':
+        # Preserve legacy notifier configs while preferring a configured
+        # viewer credential. Never upgrade a collector-only file to operator.
+        role = data.get('role') if role_bound else 'viewer' if 'viewer' in data else 'operator'
+        if role not in {'operator', 'viewer'}:
+            raise ValueError('Attention client needs an operator or viewer credential')
+    if role not in {'operator', 'collector', 'viewer'}:
         raise ValueError('Unknown credential role')
     if data.get('auth_type') == 'cloudflare':
         if parsed.scheme != 'https' or url.rstrip('/') != data['url'].rstrip('/'):
             raise ValueError('Cloudflare credentials are bound to their configured HTTPS origin')
-        credentials = data[role]
+        credentials = data.get(role)
+        if not isinstance(credentials, dict) or not isinstance(credentials.get('client_id'), str) or not isinstance(credentials.get('client_secret'), str):
+            raise ValueError('Client credential is not configured for this role')
         headers = {'CF-Access-Client-Id': credentials['client_id'], 'CF-Access-Client-Secret': credentials['client_secret']}
+    elif role_bound:
+        if data['role'] not in {'operator', 'collector', 'viewer'} or data['role'] != role:
+            raise ValueError('Client credential is not authorized for this role')
+        if not isinstance(data['token'], str) or len(data['token']) < 32:
+            raise ValueError('Client token must be at least 32 characters')
+        if url.rstrip('/') != data['url'].rstrip('/'):
+            raise ValueError('Client credential is bound to its configured URL')
+        headers = {'Authorization': 'Bearer ' + data['token']}
     else:
+        if role == 'viewer' and 'viewer' not in data:
+            raise ValueError('Viewer credential is not configured')
         headers = {'Authorization': 'Bearer '+Auth(data).credentials[role]}
     return httpx.Client(base_url=url.rstrip('/'), headers=headers, timeout=15, follow_redirects=False)
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('method', choices=['GET', 'POST', 'PATCH'])
+    p.add_argument('method', choices=['GET', 'POST', 'PATCH', 'DELETE'])
     p.add_argument('path', help='Relative /api/... path or /openapi.json')
     p.add_argument('--json-file', type=Path, help='JSON request file; omit to read stdin for writes')
     p.add_argument('--url', default=os.environ.get('WB_API_URL'))
@@ -50,10 +71,13 @@ def main():
     if not args.path.startswith(('/api/', '/openapi.json')) or args.path.startswith('//'):
         p.error('Only relative Workbench API paths are allowed')
     data = None
-    if args.method != 'GET':
+    if args.method not in {'GET', 'DELETE'}:
         data = json.loads(args.json_file.read_text() if args.json_file else sys.stdin.read())
     with client(args.url, args.credentials_file) as api:
         response = api.request(args.method, args.path, json=data)
-    print(json.dumps(response.json(), indent=2))
+    try:
+        print(json.dumps(response.json(), indent=2))
+    except ValueError:
+        print(f'HTTP {response.status_code}: non-JSON response', file=sys.stderr)
     if response.is_error:
         raise SystemExit(1)

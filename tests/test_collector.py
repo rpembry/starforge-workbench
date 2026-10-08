@@ -1,4 +1,5 @@
 import os
+import re
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,7 +9,9 @@ import pytest
 import yaml
 
 from workbench.collector import collect, main
+from workbench.codex_observer import main as observer_main
 from workbench.client import client
+from workbench.repository import SESSION_HOST_OFFLINE_AFTER_SECONDS, SESSION_STALE_AFTER_SECONDS
 
 
 def process(root, pid, parent, name, birth):
@@ -83,3 +86,25 @@ def test_cli_passes_distinct_source_to_publisher_cycle(monkeypatch, capsys):
     main()
     assert observed == [(['opencode'], 'synthetic:opencode-instruction')]
     assert '"status": "ok"' in capsys.readouterr().out
+
+
+def test_shipped_publish_intervals_leave_server_freshness_margin():
+    deploy = Path(__file__).resolve().parents[1] / 'deploy'
+    intervals = [int(value) for unit in deploy.glob('*.service')
+                 for value in re.findall(r'--interval (\d+)', unit.read_text())]
+    assert intervals and set(intervals) == {30}
+    assert all(interval < SESSION_STALE_AFTER_SECONDS < SESSION_HOST_OFFLINE_AFTER_SECONDS
+               for interval in intervals)
+
+
+@pytest.mark.parametrize('entry', [main, observer_main])
+@pytest.mark.parametrize('interval', [61, 90, 120])
+def test_publisher_cli_rejects_interval_without_offline_margin(monkeypatch, capsys, entry, interval):
+    required = (['--manifest', '/synthetic/manifest.yaml'] if entry is main else
+                ['--bootstrap-file', '/synthetic/bootstrap.json', '--state', '/synthetic/state.json',
+                 '--credentials-file', '/synthetic/credentials.json'])
+    monkeypatch.setattr('sys.argv', ['synthetic-publisher', *required, '--interval', str(interval)])
+    with pytest.raises(SystemExit) as exc:
+        entry()
+    assert exc.value.code == 2
+    assert 'host-offline threshold' in capsys.readouterr().err

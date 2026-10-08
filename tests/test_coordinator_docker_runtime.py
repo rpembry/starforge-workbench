@@ -10,7 +10,7 @@ import sqlite3
 import pytest
 
 from coordinator.docker_runtime import DockerRuntime
-from coordinator.supervisor import Conflict, OwnershipUnknown, Supervisor
+from coordinator.supervisor import Conflict, LaunchRejected, OwnershipUnknown, Supervisor
 from coordinator.worker_sdk import WorkerClient
 from starforge_workbench.docker_worker import WorkerError
 
@@ -99,6 +99,34 @@ def runtime(tmp_path, monkeypatch):
                          workspaces={"scratch": "scratch"}, command_fn=fake), fake
 
 
+def test_profile_above_host_budget_is_a_prelaunch_rejection(runtime):
+    adapter, fake = runtime
+    adapter.host_budget["cpu_millis"] = 500
+    with pytest.raises(ValueError, match="approved profile exceeds"):
+        adapter.validate(plan())
+    assert fake.create_count == 0
+
+
+def test_malformed_daemon_info_is_not_permanent_plan_rejection(runtime, tmp_path):
+    adapter, fake = runtime
+    original = adapter.command
+
+    def malformed_info(argv, **kwargs):
+        return b'{invalid' if 'info' in argv else original(argv, **kwargs)
+
+    adapter.command = malformed_info
+    journal = tmp_path / 'journal'
+    journal.mkdir(mode=0o700)
+    supervisor = Supervisor(journal, adapter)
+    lease = supervisor.acquire('controller')
+    with pytest.raises(json.JSONDecodeError):
+        supervisor.launch(plan(), controller='controller', generation=lease['generation'],
+                          operation_id='launch-op')
+    with pytest.raises(KeyError):
+        supervisor.inspect(plan()['attempt_id'])
+    assert fake.create_count == 0
+
+
 def test_restricted_scratch_launch_stop_and_export(runtime):
     adapter, fake = runtime
     adapter.validate(plan())
@@ -185,7 +213,15 @@ def test_default_host_reservation_blocks_second_allocation(runtime, tmp_path):
         supervisor.inspect("b" * 32)
 
 
-def test_approved_git_worktree_exports_patch_and_retains_all_work(runtime, tmp_path):
+@pytest.fixture
+def isolated_git_home(tmp_path, monkeypatch):
+    home = tmp_path / 'git-home'
+    (home / 'config').mkdir(parents=True)
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(home / 'config'))
+
+
+def test_approved_git_worktree_exports_patch_and_retains_all_work(runtime, tmp_path, isolated_git_home):
     adapter, fake = runtime
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -308,7 +344,7 @@ def test_partial_git_setup_retains_receipt_and_never_creates_container(runtime, 
     assert adapter.inspect_no_start(spec) is False
 
 
-def test_no_start_retention_keeps_real_git_administration(runtime, tmp_path, monkeypatch):
+def test_no_start_retention_keeps_real_git_administration(runtime, tmp_path, monkeypatch, isolated_git_home):
     adapter, fake = runtime
     repository = tmp_path / "source-repository"
     repository.mkdir()
@@ -534,7 +570,8 @@ def test_policy_revocation_cannot_prevent_prelaunch_tombstone(runtime, tmp_path)
     assert supervisor.launch(plan(), controller="controller",
                              generation=lease["generation"], operation_id="launch-op")["state"] == "stopped"
     assert fake.create_count == 0
-    with pytest.raises(ValueError, match="unapproved"):
+    with pytest.raises(LaunchRejected) as rejection:
         adapter.profiles.pop("offline")
         supervisor.launch({**plan(), "attempt_id": "b" * 32}, controller="controller",
                           generation=lease["generation"], operation_id="new-op")
+    assert "unapproved" in str(rejection.value.__cause__)

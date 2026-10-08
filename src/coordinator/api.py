@@ -119,7 +119,7 @@ def create_app(store: CoordinatorStore, *, adapter: EvidenceAdapter | None = Non
         return adapter
 
     @app.get("/v1/health")
-    async def health():
+    def health():
         try:
             store.list(1)
             store_state = "ready"
@@ -129,7 +129,7 @@ def create_app(store: CoordinatorStore, *, adapter: EvidenceAdapter | None = Non
                 "runtime_visibility": "unknown"}
 
     @app.get("/v1/capabilities")
-    async def capabilities():
+    def capabilities():
         worker = adapter.capabilities() if adapter else {}
         return {"api_version": "v1", "jobs": True,
                 "reattach": bool(worker.get("reattach", False)),
@@ -138,20 +138,11 @@ def create_app(store: CoordinatorStore, *, adapter: EvidenceAdapter | None = Non
                 "checkpoint_resume": False, "worker": worker}
 
     @app.get("/v1/capacity")
-    async def capacity():
-        jobs = store.list(1000)
-        if len(jobs) == 1000:
-            return {"limits": store.policy.limits.model_dump(),
-                    "reservations": {"state": "unknown", "reason": "bounded read reached 1000 jobs"}}
-        active = [job for job in jobs if job["phase"] in {"active", "finalizing"}]
-        return {"limits": store.policy.limits.model_dump(), "reservations": {
-            "state": "snapshot", "pending": sum(job["phase"] == "queued" and job["intent"] == "run" for job in jobs),
-            "active": len(active),
-            "cpu_millis": sum(job["spec"]["resources"]["cpu_millis"] for job in active),
-            "memory_mb": sum(job["spec"]["resources"]["memory_mb"] for job in active)}}
+    def capacity():
+        return {"limits": store.policy.limits.model_dump(), "reservations": store.reservations()}
 
     @app.post("/v1/jobs/validate")
-    async def validate(spec: JobSpec):
+    def validate(spec: JobSpec):
         try:
             store.policy.validate_spec(spec)
         except ValueError as exc:
@@ -159,7 +150,7 @@ def create_app(store: CoordinatorStore, *, adapter: EvidenceAdapter | None = Non
         return {"valid": True, "spec": spec.model_dump(mode="json"), "capacity": store.policy.limits.model_dump()}
 
     @app.post("/v1/jobs", status_code=201)
-    async def submit(body: Submit):
+    def submit(body: Submit):
         try:
             job = store.submit(body.spec, principal=principal, key=body.idempotency_key)
         except Conflict:
@@ -169,48 +160,49 @@ def create_app(store: CoordinatorStore, *, adapter: EvidenceAdapter | None = Non
         return {"job": job, "operation": {"key": body.idempotency_key, "state": "confirmed"}}
 
     @app.get("/v1/jobs")
-    async def jobs(limit: int = 100):
+    def jobs(limit: int = 100, before: str | None = None):
         # List is a summary surface. The detailed, socket-protected job route
         # carries the opaque payload and approved policy references.
         fields = ("id", "version", "intent", "phase", "outcome", "visibility",
                   "reason", "attempt_id", "created_at", "updated_at")
-        return {"jobs": [{field: job[field] for field in fields}
-                         for job in store.list(limit)]}
+        page = store.list(limit, before=before)
+        return {"jobs": [{field: job[field] for field in fields} for job in page],
+                "next_cursor": page[-1]["id"] if len(page) == limit else None}
 
     @app.get("/v1/jobs/{job_id}")
-    async def job(job_id: str):
+    def job(job_id: str):
         return {"job": store.get(job_id)}
 
     @app.get("/v1/jobs/{job_id}/attempts")
-    async def attempts(job_id: str):
+    def attempts(job_id: str):
         return {"job_id": job_id, "attempts": store.get(job_id)["attempts"]}
 
     @app.get("/v1/jobs/{job_id}/events")
-    async def events(job_id: str, after_seq: int = 0, limit: int = 100):
+    def events(job_id: str, after_seq: int = 0, limit: int = 100):
         return store.replay(job_id, after_seq, limit)
 
     @app.post("/v1/jobs/{job_id}/cancel")
-    async def cancel(job_id: str, body: Mutation):
+    def cancel(job_id: str, body: Mutation):
         result = store.cancel(job_id, expected_version=body.expected_version,
                               principal=principal, key=body.idempotency_key)
         return {"job": result, "operation": {"key": body.idempotency_key,
                 "state": "confirmed" if result["phase"] == "terminal" else "pending"}}
 
     @app.post("/v1/jobs/{job_id}/retry")
-    async def retry(job_id: str, body: Mutation):
+    def retry(job_id: str, body: Mutation):
         result = store.retry(job_id, expected_version=body.expected_version,
                              principal=principal, key=body.idempotency_key)
         return {"job": result, "operation": {"key": body.idempotency_key, "state": "pending"}}
 
     @app.get("/v1/jobs/{job_id}/recovery")
-    async def recovery(job_id: str):
+    def recovery(job_id: str):
         result = store.get(job_id)
         return {"job_id": job_id, "attempt_id": result["attempt_id"],
                 "visibility": result["visibility"], "phase": result["phase"],
                 "reattach_available": adapter is not None}
 
     @app.post("/v1/jobs/{job_id}/reattach")
-    async def reattach(job_id: str, body: Mutation):
+    def reattach(job_id: str, body: Mutation):
         if not adapter or not adapter.capabilities().get("reattach", False):
             raise HTTPException(503, detail={"code": "supervisor_unavailable"})
         operation = store.reattach(job_id, expected_version=body.expected_version,
@@ -226,19 +218,19 @@ def create_app(store: CoordinatorStore, *, adapter: EvidenceAdapter | None = Non
         return result
 
     @app.get("/v1/jobs/{job_id}/attempts/{attempt_id}/logs")
-    async def logs(job_id: str, attempt_id: str, cursor: int = 0, limit: int = 4096):
+    def logs(job_id: str, attempt_id: str, cursor: int = 0, limit: int = 4096):
         if cursor < 0 or not 1 <= limit <= 65_536:
             raise HTTPException(422, detail={"code": "invalid_cursor"})
         result = checked_attempt(job_id, attempt_id)
         return evidence().logs(result, attempt_id, cursor, limit)
 
     @app.get("/v1/jobs/{job_id}/attempts/{attempt_id}/artifacts")
-    async def artifacts(job_id: str, attempt_id: str):
+    def artifacts(job_id: str, attempt_id: str):
         result = checked_attempt(job_id, attempt_id)
         return evidence().artifacts(result, attempt_id)
 
     @app.get("/v1/jobs/{job_id}/attempts/{attempt_id}/artifacts/{artifact_id}")
-    async def artifact(job_id: str, attempt_id: str, artifact_id: str,
+    def artifact(job_id: str, attempt_id: str, artifact_id: str,
                        offset: int = 0, limit: int = 65_536):
         if (not artifact_id.isascii() or artifact_id in {".", ".."} or
                 not artifact_id.replace("-", "").replace("_", "").replace(".", "").isalnum() or

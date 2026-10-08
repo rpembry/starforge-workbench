@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -66,6 +67,8 @@ def load(path):
         if c.get('codex_mode') == 'agents' and (c['provider'] != 'codex' or
                 c['resume_policy'] != 'never' or c['risk'] != 'local' or c['additional_cwds']):
             raise ValueError('Codex Agents requires a local Codex context with never resume and no additional directories')
+        if c.get('codex_instructions_file') and (c['provider'] != 'codex' or c.get('codex_mode') == 'agents'):
+            raise ValueError('Codex instructions file requires a bindable Codex conversation context')
     return data
 
 def cwd(c):
@@ -112,7 +115,10 @@ def lock(name, blocking=True):
     secure_dir(STATE)
     fd = os.open(STATE/(name+'.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            raise ValueError(f'Workbench lock is busy: {name}') from None
         yield
     finally:
         os.close(fd)
@@ -312,7 +318,8 @@ def retry_start(c, operation):
 
 
 def fingerprint(c):
-    return hashlib.sha256(json.dumps(c, sort_keys=True).encode()).hexdigest()
+    binding = {key: value for key, value in c.items() if key != 'codex_instructions_file'}
+    return hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
 
 def validate_context(c):
     if not c['enabled']:
@@ -340,7 +347,7 @@ def open_tab(c, manifest):
     command = [str(SELF), '--manifest', str(manifest), '_attach', c['id']]
     path = STATE/'terminal.json'
     owner = read_state(path)
-    if owner and birth(owner['pid']) == owner['birth']:
+    if owner and owner.get('birth') is not None and birth(owner['pid']) == owner['birth']:
         # Address the exact standalone process, never the active desktop application.
         bridge(owner['pid'], 'tab', command=shlex.join(command), title=c['title'], cwd=str(cwd(c)))
     else:
@@ -360,7 +367,11 @@ def open_tab(c, manifest):
                               '--title='+c['title'], '--working-directory='+str(cwd(c))],
                              env=terminal_env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True)
-        atomic(path, {'pid': p.pid, 'birth': birth(p.pid)})
+        started_at = birth(p.pid)
+        if started_at is not None:
+            atomic(path, {'pid': p.pid, 'birth': started_at})
+        else:
+            path.unlink(missing_ok=True)
         for _ in range(50):
             try:
                 bridge(p.pid)
@@ -671,6 +682,31 @@ def start_codex(c):
         return result.returncode
 
 
+def codex_instructions(c):
+    """Read a private regular file at every Codex launch and exact resume."""
+    name = c.get('codex_instructions_file')
+    if not name:
+        return None
+    path = Path(os.path.expandvars(name)).expanduser()
+    if not path.is_absolute():
+        raise ValueError('Codex instructions file must be absolute')
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > 16384:
+                raise ValueError('Codex instructions file must be owned by you, private, regular, and at most 16 KiB')
+            data = stream.read(16385)
+    except OSError as exc:
+        raise ValueError('Codex instructions file is unavailable or unsafe') from exc
+    if not data or len(data) > 16384:
+        raise ValueError('Codex instructions file must contain 1 to 16384 bytes')
+    try:
+        return data.decode('utf-8')
+    except UnicodeDecodeError as exc:
+        raise ValueError('Codex instructions file must be UTF-8') from exc
+
+
 def provider_argv(c, choice):
     exe = PROVIDERS[c['provider']]
     if c['resume_policy'] == 'never' and choice != 'new':
@@ -679,8 +715,11 @@ def provider_argv(c, choice):
         if c.get('codex_mode') == 'agents':
             return [exe, 'agents', '-C', str(cwd(c))]
         base = [exe, '-c', 'check_for_update_on_startup=false', '-C', str(cwd(c)), '-s', 'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write', '-a', 'on-request']
-        for p in c['additional_cwds']:
-            base += ['--add-dir', str(Path(p).expanduser().resolve())]
+        instructions = codex_instructions(c)
+        if instructions is not None:
+            base += ['-c', 'developer_instructions='+json.dumps(instructions, ensure_ascii=False)]
+        for directory in directories(c)[1:]:
+            base += ['--add-dir', str(directory)]
         if choice == 'picker':
             return base+['resume', '--all']
         if choice == 'resume':
@@ -810,6 +849,17 @@ def titles_main(argv=None):
     return result
 
 
+def launcher_plan(contexts):
+    """Return the same read-only context plan shown by the CLI dry run."""
+    return [{'id': c['id'], 'title': c['title'], 'cwd': str(cwd(c)) if c['cwd'] else None,
+             'additional_cwds': c['additional_cwds'], 'provider': c['provider'],
+             'resume_policy': c['resume_policy'], 'enabled': c['enabled'],
+             'action': ('resume saved conversation or create and remember' if c['provider'] == 'codex'
+                        else ('start interactive qwen3:8b' if c['provider'] == 'ollama'
+                              else 'resume saved conversation or open provider directly'))
+                        if c['enabled'] else 'disabled'} for c in contexts]
+
+
 def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv and raw_argv[0] == 'titles':
@@ -846,9 +896,7 @@ def main(argv=None):
     if args.command in ['attach','_attach','_menu','bind'] and len(args.contexts) != 1:
         raise ValueError('Exactly one context ID required')
     if args.dry_run or args.command in ['list','plan']:
-        print(json.dumps([{'id':c['id'],'title':c['title'],'cwd':str(cwd(c)) if c['cwd'] else None,
-                           'additional_cwds':c['additional_cwds'],'provider':c['provider'], 'resume_policy':c['resume_policy'],
-                           'enabled':c['enabled'],'action':('resume saved conversation or create and remember' if c['provider'] == 'codex' else ('start interactive qwen3:8b' if c['provider'] == 'ollama' else 'resume saved conversation or open provider directly')) if c['enabled'] else 'disabled'} for c in selected], indent=2))
+        print(json.dumps(launcher_plan(selected), indent=2))
         return
     if args.command == 'doctor':
         problems = []

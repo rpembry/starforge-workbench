@@ -89,6 +89,16 @@ def test_create_is_bounded_idempotent_and_does_not_echo_invalid_text(api):
     assert api.post('/api/instructions', json=instruction_body(3, text='x' * 2001)).status_code == 422
 
 
+def test_registration_older_than_publish_interval_stays_sendable(api, repo):
+    register_session(api)
+    with repo.connection() as db:
+        db.execute('UPDATE registered_sessions SET heartbeat_at=? WHERE id=?',
+                   (stamp(-35), SESSION_ID))
+        db.commit()
+    assert api.get('/api/registered-sessions/' + SESSION_ID).json()['visibility'] == 'fresh'
+    assert api.post('/api/instructions', json=instruction_body()).status_code == 201
+
+
 def test_roles_are_separated_and_worker_reads_only_by_claim(api):
     register_session(api)
     item = create_instruction(api)
@@ -101,6 +111,27 @@ def test_roles_are_separated_and_worker_reads_only_by_claim(api):
     api.headers.clear()
     assert api.get('/api/instructions').status_code == 401
     assert api.post('/api/instructions/claim', json={'registered_session_id': SESSION_ID}).status_code == 401
+
+
+def test_received_response_window_ends_as_uncertain_and_revokes_lease(api, repo):
+    register_session(api)
+    item = create_instruction(api)
+    claimed = claim(api).json()
+    result = api.post(f"/api/instructions/{item['id']}/results", json={
+        'lease_token': claimed['lease_token'], 'outcome': 'received',
+        'reason_code': 'provider_accepted'})
+    assert result.status_code == 200 and result.json()['state'] == 'received'
+    with repo.connection() as db:
+        db.execute('UPDATE instructions SET received_at=? WHERE id=?', (stamp(-2 * 60 * 60 - 1), item['id']))
+        db.commit()
+    api.headers['Authorization'] = 'Bearer ' + OPERATOR
+    terminal = api.get(f"/api/instructions/{item['id']}").json()
+    assert terminal['state'] == 'uncertain'
+    assert terminal['reason_code'] == 'response_unobserved'
+    assert terminal['history'][-1]['reason_code'] == 'response_unobserved'
+    with repo.connection() as db:
+        row = db.execute('SELECT lease_token_hash,claim_owner FROM instructions WHERE id=?', (item['id'],)).fetchone()
+    assert row['lease_token_hash'] is None and row['claim_owner'] is None
 
 
 @pytest.mark.parametrize('change,code', [
@@ -119,7 +150,7 @@ def test_create_rejects_uncontrollable_targets(api, change, code):
 def test_create_rejects_stale_and_offline_targets(api, repo):
     register_session(api)
     with repo.connection() as db:
-        db.execute('UPDATE registered_sessions SET heartbeat_at=?', (stamp(-31),))
+        db.execute('UPDATE registered_sessions SET heartbeat_at=?', (stamp(-80),))
         db.commit()
     assert api.post('/api/instructions', json=instruction_body()).json()['error']['code'] == 'target_unavailable'
     with repo.connection() as db:
@@ -202,6 +233,8 @@ def test_expiry_and_abandoned_lease_are_terminal_without_redelivery(api, repo):
 
     active = create_instruction(api, 2)
     claimed = claim(api).json()
+    assert api.post(f'/api/instructions/{active["id"]}/renew', json={
+        'lease_token': claimed['lease_token']}).status_code == 200
     with repo.connection() as db:
         db.execute('UPDATE instructions SET lease_until=? WHERE id=?', (stamp(-1), active['id']))
         db.commit()
@@ -212,6 +245,70 @@ def test_expiry_and_abandoned_lease_are_terminal_without_redelivery(api, repo):
     late = api.post(f'/api/instructions/{active["id"]}/results', json={
         'lease_token': claimed['lease_token'], 'outcome': 'received', 'reason_code': 'provider_accepted'})
     assert late.status_code == 409
+
+
+def test_unrenewed_claim_expiry_requeues_without_send_and_renewed_claim_stays_uncertain(api, repo):
+    register_session(api)
+    item = create_instruction(api, 2)
+    first = claim(api).json()
+    with repo.connection() as db:
+        db.execute('UPDATE instructions SET lease_until=? WHERE id=?', (stamp(-1), item['id']))
+        db.commit()
+    second = claim(api).json()
+    assert second['id'] == item['id'] and second['lease_token'] != first['lease_token']
+    api.headers['Authorization'] = 'Bearer ' + OPERATOR
+    history = api.get('/api/instructions/' + item['id']).json()['history']
+    assert any(entry['state'] == 'queued' and entry['reason_code'] == 'lease_expired_before_attempt'
+               for entry in history)
+    assert not any(entry['state'] == 'uncertain' for entry in history)
+    api.headers['Authorization'] = 'Bearer ' + COLLECTOR
+    assert api.post(f'/api/instructions/{item["id"]}/results', json={
+        'lease_token': first['lease_token'], 'outcome': 'received',
+        'reason_code': 'provider_accepted'}).status_code == 409
+
+
+def test_unrenewed_claim_past_instruction_deadline_expires(api, repo):
+    register_session(api)
+    item = create_instruction(api, 1)
+    claim(api)
+    with repo.connection() as db:
+        db.execute('UPDATE instructions SET lease_until=?,expires_at=? WHERE id=?',
+                   (stamp(-2), stamp(-1), item['id']))
+        db.commit()
+    assert claim(api).status_code == 404
+    api.headers['Authorization'] = 'Bearer ' + OPERATOR
+    result = api.get('/api/instructions/' + item['id']).json()
+    assert result['state'] == 'expired' and result['reason_code'] == 'instruction_expired'
+
+
+def test_local_preflight_result_returns_claim_to_queue(api):
+    register_session(api)
+    item = create_instruction(api)
+    claimed = claim(api).json()
+    result = api.post(f'/api/instructions/{item["id"]}/results', json={
+        'lease_token': claimed['lease_token'], 'outcome': 'retryable',
+        'reason_code': 'local_preflight_failed'})
+    assert result.status_code == 200, result.text
+    assert result.json()['state'] == 'queued'
+    assert claim(api).json()['id'] == item['id']
+
+
+def test_migrated_claim_without_renewal_history_stays_conservative(api, repo):
+    register_session(api)
+    item = create_instruction(api, 2)
+    claim(api)
+    with repo.connection() as db:
+        db.execute('DELETE FROM schema_migrations WHERE version=15')
+        db.commit()
+    reopened = SQLiteRepository(repo.path)
+    with reopened.connection() as db:
+        row = db.execute('SELECT renewed_at,updated_at FROM instructions WHERE id=?',
+                         (item['id'],)).fetchone()
+        assert row['renewed_at'] == row['updated_at']
+        db.execute('UPDATE instructions SET lease_until=? WHERE id=?', (stamp(-1), item['id']))
+        db.commit()
+    api.headers['Authorization'] = 'Bearer ' + OPERATOR
+    assert api.get('/api/instructions/' + item['id']).json()['state'] == 'uncertain'
 
 
 def test_offline_queue_survives_until_owned_worker_recovers(api, repo):
@@ -375,13 +472,13 @@ def test_upgrade_from_version_seven_preserves_registered_sessions(api, repo):
         db.execute('DROP TABLE flow_work_items')
         db.execute('DROP TABLE instruction_audit')
         db.execute('DROP TABLE instructions')
-        db.execute('DELETE FROM schema_migrations WHERE version IN (8,9,10,11,12)')
+        db.execute('DELETE FROM schema_migrations WHERE version IN (8,9,10,11,12,13,14,15)')
         db.commit()
     upgraded = SQLiteRepository(repo.path)
     assert upgraded.get_registered_session(SESSION_ID)['display_name'] == 'Synthetic OpenCode'
     with upgraded.connection() as db:
         assert [row[0] for row in db.execute(
-            'SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 13))
+                'SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 16))
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='instructions'").fetchone()
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='instruction_audit'").fetchone()
 

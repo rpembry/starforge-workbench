@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
 from uuid import uuid4
 
 from mcp.server.mcpserver import MCPServer
@@ -190,13 +191,17 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
     @server.tool(name='browser_workspace_add', structured_output=True)
     def browser_workspace_add(name: str, url: str, workspace: str = 'default', match: Literal['origin', 'url'] = 'origin') -> dict[str, object]:
         """Add a named URL to a Chrome workspace; use this for requests such as adding a site to Chrome."""
-        return request('POST', f'/api/browser/workspaces/{workspace}/entries',
+        if not re.fullmatch(r'[a-z][a-z0-9_-]{0,47}', workspace):
+            raise ValueError('Invalid browser workspace name')
+        return request('POST', f'/api/browser/workspaces/{quote(workspace, safe="")}/entries',
                        {'name': name, 'url': url, 'match': match})
 
     @server.tool(name='browser_workspace_remove', structured_output=True)
     def browser_workspace_remove(name: str, workspace: str = 'default') -> dict[str, object]:
         """Remove a named URL from a Chrome workspace; this changes desired state but does not close tabs."""
-        return request('DELETE', f'/api/browser/workspaces/{workspace}/entries/{name}')
+        if not re.fullmatch(r'[a-z][a-z0-9_-]{0,47}', workspace):
+            raise ValueError('Invalid browser workspace name')
+        return request('DELETE', f'/api/browser/workspaces/{quote(workspace, safe="")}/entries?name={quote(name, safe="")}')
 
     @server.tool(name='worklog_query', structured_output=True)
     def worklog_query(table: Literal['actions', 'artifacts', 'collectors', 'events', 'import_batches', 'import_records', 'objectives', 'runs'], limit: int = 100, offset: int = 0) -> dict[str, object]:
@@ -265,14 +270,23 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
             return {'context': context, 'dry_run': dry_run, 'status': 'denied',
                     'message': 'Set WB_MCP_ALLOW_RESTORE=1 for a deliberate live restoration'}
         if restore is None:
-            from starforge_workbench.cli import main as launcher
-            args = ['--manifest', str(manifest_path())]
             if dry_run:
-                args.append('--dry-run')
-            launcher([*args, 'up', context, '--headless'])
+                from starforge_workbench.cli import launcher_plan, load
+                selected = [item for item in load(manifest_path())['contexts'] if item['id'] == context]
+                if not selected:
+                    return {'context': context, 'dry_run': True, 'status': 'denied',
+                            'message': 'Unknown Workbench context'}
+                plan = launcher_plan(selected)
+            else:
+                from starforge_workbench.cli import main as launcher
+                launcher(['--manifest', str(manifest_path()), 'up', context, '--headless'])
         else:
-            restore(context, dry_run)
-        return {'context': context, 'dry_run': dry_run, 'status': 'previewed' if dry_run else 'restore_requested'}
+            plan = restore(context, dry_run)
+        result = {'context': context, 'dry_run': dry_run,
+                  'status': 'previewed' if dry_run else 'restore_requested'}
+        if dry_run and plan is not None:
+            result['plan'] = plan
+        return result
 
     if selected_flow_profile:
         register_flow_tools(server, profile=selected_flow_profile, allow_write=selected_flow_write,

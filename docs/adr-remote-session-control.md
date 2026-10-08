@@ -51,14 +51,29 @@ Collector observations may assert only directly evidenced states:
 | `stopped` | The exact registered process generation has positive stop evidence. |
 | `unknown` | Available evidence cannot establish a stronger state. |
 
+The launcher collector publishes one canonical provider process per configured
+context (oldest observed process across its panes). It keeps the exact boot ID,
+PID, and process start tick in a private local state file. A successful scan
+that confirms the old PID is absent, reused with a different start tick, or
+from a prior boot can publish `stopped/process_stopped` for the old run and
+registration. An unreadable PID, failed scan, disabled context, or deselected
+context supplies no stop evidence and leaves visibility to age normally.
+Older private registration records upgrade in place without changing their
+opaque IDs; until that generation is observed again, they lack the process
+tuple needed to assert a later stop.
+
 `stale` and `offline` are server-derived visibility conditions, not collector
 claims. A stale registration has exceeded the session heartbeat threshold while
 its host collector is still visible. An offline registration belongs to a host
 whose collector heartbeat has exceeded the host threshold. Neither condition
 means the task or provider failed. `working` and `idle` are not first-release
 states unless a later provider contract supplies generation-safe evidence.
-The current server thresholds are 30 seconds for a session heartbeat and 90
-seconds for its host collector heartbeat. A collector observation timestamp may
+The current server thresholds are 75 seconds for a session heartbeat and 90
+seconds for its host collector heartbeat. Shipped publishers run every 30 seconds
+plus scan time, leaving margin before a healthy registration becomes stale.
+Collectors and observers reject intervals above 60 seconds, leaving at least
+30 seconds before host-offline visibility (subject to scan and network delay).
+A collector observation timestamp may
 be at most five minutes ahead of server time to tolerate clock skew; visibility
 is based on server-recorded heartbeats, not that timestamp. This tolerance is
 not evidence that a future-dated observation has already occurred.
@@ -155,6 +170,11 @@ instruction.
   commands expire; they do not follow a display name.
 - Provider unavailable before transmission returns the claim to a bounded
   retryable condition while unexpired. Definite provider rejection is `failed`.
+- The worker never attempts a provider POST without a confirmed claim renewal.
+  An unrenewed lease expiry requeues the instruction if it has not expired;
+  a renewed claim's lease expiry remains uncertain. Local failures before a
+  durable provider-attempt marker are retryable; failures after that marker
+  remain uncertain unless positive provider evidence resolves them.
 - Connection loss after transmission begins is `uncertain` unless provider-side
   idempotency or lookup proves the outcome.
 - A kill switch stops new claims and delivery without deleting pending records.

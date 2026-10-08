@@ -35,6 +35,17 @@ their behavior. Workbench does not start tabs at login; if daemon availability
 at login is desired, configure a private user service to run the same
 idempotent daemon-start command.
 
+For a Codex conversation that starts in a directory outside its role-specific
+instructions, set `codex_instructions_file` in that context to an absolute
+path to a private UTF-8 file. Workbench reads it on each new launch and resume
+and passes its content as Codex `developer_instructions`. Missing, symlinked,
+nonregular, nonprivate, or oversized files prevent the provider from starting.
+Changing the file does not change an existing conversation binding; the next
+launch or resume receives the updated text. A currently running conversation
+does not reload it. Keep secrets out of this file: the text is passed as a
+process argument and may be visible to other local processes. Codex still
+discovers ordinary `AGENTS.md` files from the working directory as usual.
+
 ## Mouse scrolling and terminal preferences
 
 
@@ -96,13 +107,35 @@ uv run wb-api GET /openapi.json --url http://127.0.0.1:8027
 uv run wb-api GET /api/attention --url http://127.0.0.1:8027
 ```
 
+Keep the two-token `WB_CREDENTIALS_FILE` on the API server. A third, distinct
+`viewer` token is optional. It authorizes only `GET /api/attention`; all other
+protected routes still require their existing role. For a separate collector
+process, provision only its collector token in a private, owned,
+mode-0600 client file such as:
+
+```json
+{"url":"http://127.0.0.1:8027","role":"collector","token":"<the collector token>"}
+```
+
+Pass that path as the collector's `--credentials-file` (or `WB_CLIENT_CONFIG`).
+The client refuses to use this file for operator calls or another URL. Existing
+two-token server files still work with local clients for compatibility, but do
+not copy the server file to a collector host.
+
+For `wb-notify`, provision a separate role-bound client file with the configured
+API URL, `"role":"viewer"`, and the actual viewer token. The notifier selects
+viewer authority when configured. Existing two-token server files and
+operator-bound notifier files remain usable, but those legacy setups still
+carry operator authority. No viewer token or access grant is created by this
+code change.
+
 Local mode authenticates with bearer headers. An ordinary browser navigation does not automatically supply those headers. The deployed browser flow is designed around Cloudflare Access; adapt its configuration before expecting interactive browser login.
 
-In Cloudflare mode, set `WB_AUTH_MODE=cloudflare`, `WB_ACCESS_CONFIG` to a file containing `issuer`, `audience`, `browser_emails`, and `service_roles`, and `WB_PUBLIC_ORIGIN` to your HTTPS application origin. `service_roles` maps verified service identities to `operator` or `collector`. Inspect `CloudflareAuth` and its tests for the exact schema. Cloudflare machine client configuration includes its HTTPS `url`, `auth_type: cloudflare`, and role-specific `client_id`/`client_secret` values. Keep those files outside Git.
+In Cloudflare mode, set `WB_AUTH_MODE=cloudflare`, `WB_ACCESS_CONFIG` to a file containing `issuer`, `audience`, `browser_emails`, and `service_roles`, and `WB_PUBLIC_ORIGIN` to your HTTPS application origin. `service_roles` maps verified service identities to `operator`, `collector`, or optional `viewer`. Inspect `CloudflareAuth` and its tests for the exact schema. Cloudflare machine client configuration includes its HTTPS `url`, `auth_type: cloudflare`, and role-specific `client_id`/`client_secret` values. Keep those files outside Git.
 
 ## Collectors and deployment
 
-Read each observer's CLI help and tests before enabling it. The process collector can be tried with `wb-collect --manifest PATH --context CONTEXT --dry-run`; it requires the host's process namespace and existing Workbench tmux sessions. Service units select contexts explicitly; adapt those selections to your manifest.
+Read each observer's CLI help and tests before enabling it. The process collector can be tried with `wb-collect --manifest PATH --context CONTEXT --dry-run`; it requires the host's process namespace and existing Workbench tmux sessions. Shipped collector units read `%h/.config/starforge-ai-workbench/workbench.yaml` and select contexts explicitly; adapt those selections to your manifest. A systemd drop-in can override `ExecStart` for a different manifest, including one under a custom `XDG_CONFIG_HOME`. The installer checks the manifest named by the effective user unit and requires an owned, nonsymlink regular file with no group or world permissions before enabling it. Omitting `--context` collects every enabled context.
 
 Registered-session publishing by the launcher collector is opt-in. Pass
 `--registration-state` (or `WB_REGISTERED_SESSION_STATE`) with an absolute path
@@ -123,6 +156,12 @@ Claude collection starts with a persisted cutoff covering the preceding day. Ope
 `deploy/install-collector.py` expects a versioned release layout and protected client configuration. Options enable additional observer services. `deploy/install-release.sh` installs the server under `/opt/workbench` with state under `/var/lib/workbench`. Inspect paths, dependencies, service actions, and access configuration before running either helper. These recipes are not a universal installation workflow.
 
 The release installer preserves an existing `/etc/workbench/service.env` byte-for-byte and requires it to be a regular, nonsymlink file owned by `root:workbench` with mode `0600` or `0640`. A first install with no such file must explicitly pass `--init-service-env` to initialize it from the example; otherwise installation stops before switching the active release or activating services. Review the initialized private values before using the service.
+
+### Upgrade and rollback
+
+Before switching a server release, the installer reads the exact `WB_DATABASE` path from `/etc/workbench/service.env` as data. It requires one unquoted absolute path assignment and stops before changing the service if the setting is missing, ambiguous, or points to a missing database on an upgrade. The supported unit layout is the shipped `workbench.service` without per-service or shared `service.d` drop-ins or alternate unit files. The installer checks systemd's reported unit search paths and rejects those override layers before stopping the service, since they could change the effective `WB_DATABASE`. Adapt and verify the backup procedure separately for a modified unit. The installer then stops `workbench.service` and saves an integrity-checked SQLite backup of that configured database under `/var/lib/workbench/backups` as the `workbench` user, printing both source and backup paths. The previous release target is recorded in the root-private `/opt/workbench/rollback-target` file before the `current` symlink changes. A first installation records `none`. The installer then starts the service and waits for the loopback `/healthz` endpoint; an active systemd unit alone does not count as a successful install.
+
+If the health check fails, inspect the service logs and the recorded target. Manual rollback is: stop `workbench.service`, relink `/opt/workbench/current` to the recorded release, and restart. Restore the printed backup before restarting **only if** the new release migrated the database schema; an older release cannot open a newer schema. Preserve the failed database for diagnosis, and verify the restored backup with `PRAGMA integrity_check` before using it. Backup retention is left to the operator. For an explicit snapshot, run `deploy/backup-state.py --database PATH --dest PRIVATE_DIRECTORY` as the database owner.
 
 No task execution scheduler is implied by run heartbeats or attention records. Reporting time windows and the default human actor label are simple personal conventions to adapt.
 

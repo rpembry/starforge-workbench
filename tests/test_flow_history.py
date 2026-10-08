@@ -216,6 +216,7 @@ def test_signing_failure_retains_authored_bytes_without_success(workspace):
     profile, root = workspace
     git = ['git', '-C', str(root)]
     subprocess.run(git + ['config', 'commit.gpgsign', 'true'], check=True)
+    subprocess.run(git + ['config', 'gpg.format', 'openpgp'], check=True)
     subprocess.run(git + ['config', 'gpg.program', '/bin/false'], check=True)
     with pytest.raises(ValueError, match='Git commit failed'):
         change(profile, lambda text: text + '\n## P1\n\n- [ ] Task\n  - **ID**: task-01\n')

@@ -93,7 +93,17 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
 
     def operator(who=Depends(principal)):
         if who.role != 'operator':
-            raise Problem(403, 'operator_required', 'Collectors cannot commit or alter actions')
+            raise Problem(403, 'operator_required', 'Operator role required')
+        return who
+
+    def attention_reader(who=Depends(principal)):
+        if who.role not in {'operator', 'viewer'}:
+            raise Problem(403, 'attention_reader_required', 'Operator or viewer role required')
+        return who
+
+    def writer(who=Depends(principal)):
+        if who.role not in {'operator', 'collector'}:
+            raise Problem(403, 'writer_required', 'Viewer role cannot write Workbench state')
         return who
 
     def collector(who=Depends(principal)):
@@ -122,8 +132,11 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
             origin = request.headers.get('origin')
             expected_origin = os.environ.get('WB_PUBLIC_ORIGIN', str(request.base_url)).rstrip('/')
             if (origin and origin.rstrip('/') != expected_origin) or (request.url.path.startswith('/ui/') and not origin):
-                return JSONResponse(status_code=403, content={'error': {'code': 'origin_rejected', 'message': 'Cross-origin writes are disabled'}})
-        response = await call_next(request)
+                response = JSONResponse(status_code=403, content={'error': {'code': 'origin_rejected', 'message': 'Cross-origin writes are disabled'}})
+            else:
+                response = await call_next(request)
+        else:
+            response = await call_next(request)
         response.headers['Cache-Control'] = 'no-store'
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['Referrer-Policy'] = 'no-referrer'
@@ -163,9 +176,9 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     def dashboard():
         return repository.dashboard()
 
-    @app.get('/api/attention', dependencies=[Depends(operator)])
+    @app.get('/api/attention', dependencies=[Depends(attention_reader)])
     def attention():
-        return repository.dashboard()['attention']
+        return repository.attention()
 
     @app.get('/api/status/config')
     def status_config(who=Depends(operator)):
@@ -184,22 +197,53 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     @app.get('/api/browser/workspaces', dependencies=[Depends(operator)])
     def browser_workspaces():
         from starforge_workbench.browser import load_config
-        return load_config()
+        browser_workspace_configured()
+        return browser_workspace_result(load_config)
+
+    def browser_workspace_configured():
+        # The API process's default home is not necessarily the desktop's.
+        # Require an explicit path instead of reporting a misleading success.
+        if not os.environ.get('WB_BROWSER_WORKSPACES_FILE'):
+            raise Problem(503, 'browser_workspace_not_configured',
+                          'Browser workspace API requires an explicitly shared config path')
+
+    def browser_workspace_result(operation, *args):
+        from starforge_workbench.browser import (BrowserConfigError, BrowserConflict,
+                                                 BrowserInputError, BrowserNotFound)
+        try:
+            return operation(*args)
+        except BrowserConflict as exc:
+            raise Problem(409, 'browser_entry_exists', str(exc)) from None
+        except BrowserNotFound as exc:
+            raise Problem(404, 'browser_entry_not_found', str(exc)) from None
+        except BrowserInputError as exc:
+            raise Problem(422, 'invalid_browser_workspace', str(exc)) from None
+        except BrowserConfigError:
+            raise Problem(503, 'browser_workspace_unavailable', 'Browser workspace storage is unavailable') from None
 
     @app.post('/api/browser/workspaces/{workspace}/entries', status_code=201)
     def browser_workspace_add(workspace: str, body: BrowserWorkspaceEntryIn, who=Depends(operator)):
         from starforge_workbench.browser import add_entry
-        return add_entry(body.name, body.url, workspace, body.match)
+        browser_workspace_configured()
+        return browser_workspace_result(add_entry, body.name, body.url, workspace, body.match)
 
-    @app.patch('/api/browser/workspaces/{workspace}/entries/{name}')
+    @app.patch('/api/browser/workspaces/{workspace}/entries/{name:path}')
     def browser_workspace_update(workspace: str, name: str, body: BrowserWorkspacePatch, who=Depends(operator)):
         from starforge_workbench.browser import update_entry
-        return update_entry(name, body.url, body.name, workspace, body.match)
+        browser_workspace_configured()
+        return browser_workspace_result(update_entry, name, body.url, body.name, workspace, body.match)
 
-    @app.delete('/api/browser/workspaces/{workspace}/entries/{name}')
+    @app.delete('/api/browser/workspaces/{workspace}/entries')
+    def browser_workspace_remove_named(workspace: str, name: str = Query(...), who=Depends(operator)):
+        from starforge_workbench.browser import remove_entry
+        browser_workspace_configured()
+        return browser_workspace_result(remove_entry, name, workspace)
+
+    @app.delete('/api/browser/workspaces/{workspace}/entries/{name:path}')
     def browser_workspace_remove(workspace: str, name: str, who=Depends(operator)):
         from starforge_workbench.browser import remove_entry
-        return remove_entry(name, workspace)
+        browser_workspace_configured()
+        return browser_workspace_result(remove_entry, name, workspace)
 
     # Named request/response resources keep OpenAPI useful to an LLM client.
     def list_endpoint(table):
@@ -308,7 +352,7 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
         return repository.create('objectives', body.model_dump(mode='json'), who.name)
 
     @app.post('/api/actions', status_code=201)
-    def action(body: ActionIn, who=Depends(principal)):
+    def action(body: ActionIn, who=Depends(writer)):
         if body.execution_mode == 'human' and 'actor' not in body.model_fields_set:
             body.actor = settings.human_name
         if who.role == 'collector' and body.status not in {'observed', 'proposed'}:
@@ -334,11 +378,11 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
         return repository.patch('actions', identity, {'version': body.version, 'status': target}, who.name)
 
     @app.post('/api/events', status_code=201)
-    def event(body: EventIn, who=Depends(principal)):
+    def event(body: EventIn, who=Depends(writer)):
         return repository.create('events', body.model_dump(mode='json'), who.name)
 
     @app.post('/api/runs', status_code=201)
-    def run(body: RunIn, who=Depends(principal)):
+    def run(body: RunIn, who=Depends(writer)):
         if body.action_id:
             raise Problem(409, 'explicit_link_required', 'Create the run first, then link exact current records')
         if who.role == 'collector' and body.objective_id:
@@ -390,7 +434,7 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
         return repository.import_batch(body.model_dump(mode='json'), who.name)
 
     @app.post('/api/collectors/heartbeat')
-    def collector_heartbeat(body: CollectorIn, who=Depends(principal)):
+    def collector_heartbeat(body: CollectorIn, who=Depends(collector)):
         return repository.collector_heartbeat(body.model_dump(mode='json'), who.name)
 
     @app.post('/api/provider-attention/generations', status_code=201)
@@ -415,8 +459,7 @@ def create_app(repository=None, auth=None, settings=None, instruction_claims_ena
     def session_page(identity, notice=None, error=None, retry_key=None):
         from .session_views import display_instruction, display_session
         item = display_session(repository.get_registered_session(identity), repository)
-        history = [display_instruction(repository.get_instruction(row['id']))
-                   for row in repository.list_instructions(20, 0, identity)]
+        history = [display_instruction(row) for row in repository.list_instructions_with_history(identity)]
         key = retry_key if retry_key and re.fullmatch(r'[A-Za-z0-9._~-]{16,128}', retry_key) else secrets.token_urlsafe(24)
         errors = {
             'target_unavailable': 'The session became stale or offline. Refresh its collector evidence before retrying.',

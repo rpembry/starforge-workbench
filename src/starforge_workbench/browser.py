@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from collections import Counter
 from dataclasses import dataclass
+import fcntl
 import hashlib
 import json
 import os
@@ -12,6 +14,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 from urllib.parse import quote, urlparse
 from urllib.request import urlopen
@@ -31,6 +34,22 @@ class ChromeControlUnavailable(ValueError):
     """Chrome is present but its local browser-control endpoint is unavailable."""
 
 
+class BrowserInputError(ValueError):
+    """Invalid workspace name, entry, or URL supplied by a caller."""
+
+
+class BrowserConflict(ValueError):
+    """A named entry already exists."""
+
+
+class BrowserNotFound(ValueError):
+    """A named entry does not exist."""
+
+
+class BrowserConfigError(ValueError):
+    """Local desired-state storage is unsafe or unreadable."""
+
+
 @dataclass(frozen=True)
 class BrowserConnection:
     port: int
@@ -41,34 +60,37 @@ class BrowserConnection:
 def _config_path(path: Path | str | None = None) -> Path:
     result = Path(path).expanduser() if path else Path(os.environ.get('WB_BROWSER_WORKSPACES_FILE', CONFIG_PATH)).expanduser()
     if not result.is_absolute() or result.is_symlink():
-        raise ValueError('Browser workspace config must be an absolute, non-symlink path')
+        raise BrowserConfigError('Browser workspace config must be an absolute, non-symlink path')
     return result
 
 
 def _validate_url(url: str) -> str:
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        raise BrowserInputError('Workspace URLs must be valid HTTP(S) URLs') from exc
     if parsed.scheme not in {'http', 'https'} or not parsed.netloc or parsed.username or parsed.password:
-        raise ValueError('Workspace URLs must be HTTP(S) URLs without embedded credentials')
+        raise BrowserInputError('Workspace URLs must be HTTP(S) URLs without embedded credentials')
     return url
 
 
 def _validate_workspace(name: str) -> str:
-    if not WORKSPACE_RE.fullmatch(name):
-        raise ValueError('Workspace names must use lowercase letters, numbers, hyphens, or underscores')
+    if not isinstance(name, str) or not WORKSPACE_RE.fullmatch(name):
+        raise BrowserInputError('Workspace names must use lowercase letters, numbers, hyphens, or underscores')
     return name
 
 
 def _validate_entry(entry: object) -> dict[str, str]:
     if not isinstance(entry, dict) or set(entry) - {'name', 'url', 'match'} or 'name' not in entry or 'url' not in entry:
-        raise ValueError('Each browser entry requires name and url')
+        raise BrowserInputError('Each browser entry requires name and url')
     name, url = entry['name'], entry['url']
     if not isinstance(name, str) or not NAME_RE.fullmatch(name):
-        raise ValueError('Browser entry names must be non-empty text up to 120 characters')
+        raise BrowserInputError('Browser entry names must be non-empty text up to 120 characters')
     if not isinstance(url, str):
-        raise ValueError('Browser entry URL must be text')
+        raise BrowserInputError('Browser entry URL must be text')
     match = entry.get('match', 'origin')
-    if match not in {'origin', 'url'}:
-        raise ValueError("Browser entry match must be 'origin' or 'url'")
+    if not isinstance(match, str) or match not in {'origin', 'url'}:
+        raise BrowserInputError("Browser entry match must be 'origin' or 'url'")
     return {'name': name, 'url': _validate_url(url), 'match': match}
 
 
@@ -76,45 +98,87 @@ def validate_document(document: object) -> dict[str, object]:
     if document is None:
         document = {'version': 1, 'workspaces': {DEFAULT_WORKSPACE: []}}
     if not isinstance(document, dict) or document.get('version') != 1 or not isinstance(document.get('workspaces'), dict):
-        raise ValueError('Browser workspace config must contain version: 1 and a workspaces mapping')
+        raise BrowserConfigError('Browser workspace config must contain version: 1 and a workspaces mapping')
     workspaces: dict[str, list[dict[str, str]]] = {}
     for workspace, entries in document['workspaces'].items():
         _validate_workspace(workspace)
         if not isinstance(entries, list):
-            raise ValueError(f'Workspace {workspace} must contain a list')
+            raise BrowserConfigError(f'Workspace {workspace} must contain a list')
         normalized = [_validate_entry(entry) for entry in entries]
         names = [entry['name'].casefold() for entry in normalized]
         if len(names) != len(set(names)):
-            raise ValueError(f'Workspace {workspace} contains duplicate entry names')
+            raise BrowserConfigError(f'Workspace {workspace} contains duplicate entry names')
         workspaces[workspace] = normalized
     workspaces.setdefault(DEFAULT_WORKSPACE, [])
     return {'version': 1, 'workspaces': workspaces}
 
 
+def _private_parent(target: Path, create=False):
+    if create:
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if target.parent.is_symlink() or (target.parent.exists() and
+        (target.parent.stat().st_uid != os.getuid() or target.parent.stat().st_mode & 0o077)):
+        raise BrowserConfigError('Browser workspace config directory must be caller-owned and private')
+
+
 def load_config(path: Path | str | None = None) -> dict[str, object]:
     target = _config_path(path)
+    _private_parent(target)
     if not target.exists():
         return validate_document(None)
-    if target.is_symlink() or target.stat().st_uid != os.getuid() or target.stat().st_mode & 0o077:
-        raise ValueError('Browser workspace config must be owned by you with mode 0600')
+    if (target.is_symlink() or target.stat().st_uid != os.getuid() or
+        target.stat().st_mode & 0o077 or target.stat().st_nlink != 1):
+        raise BrowserConfigError('Browser workspace config must be owned by you with mode 0600')
     try:
         document = yaml.safe_load(target.read_text())
     except (OSError, UnicodeError, yaml.YAMLError):
-        raise ValueError('Unable to read browser workspace config') from None
-    return validate_document(document)
+        raise BrowserConfigError('Unable to read browser workspace config') from None
+    try:
+        return validate_document(document)
+    except (ValueError, TypeError) as exc:
+        raise BrowserConfigError('Invalid stored browser workspace config') from exc
 
 
 def save_config(document: dict[str, object], path: Path | str | None = None) -> dict[str, object]:
     target = _config_path(path)
     document = validate_document(document)
-    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if target.parent.stat().st_mode & 0o077:
-        raise ValueError('Browser workspace config directory must be private with mode 0700')
-    temporary = target.with_name('.' + target.name + '.tmp')
-    temporary.write_text(yaml.safe_dump(document, sort_keys=False), encoding='utf-8')
-    temporary.chmod(0o600)
-    os.replace(temporary, target)
+    _private_parent(target, create=True)
+    if target.exists() and (target.stat().st_uid != os.getuid() or
+                            target.stat().st_mode & 0o077 or target.stat().st_nlink != 1):
+        raise BrowserConfigError('Browser workspace config must be owned by you with mode 0600')
+    fd, temporary = tempfile.mkstemp(prefix='.' + target.name + '-', dir=target.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            stream.write(yaml.safe_dump(document, sort_keys=False))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+        directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     return document
+
+
+@contextmanager
+def _edit_lock(path):
+    target = _config_path(path)
+    _private_parent(target, create=True)
+    lock = target.with_name('.' + target.name + '.lock')
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise BrowserConfigError('Browser workspace lock must be caller-owned and private')
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield target
+    finally:
+        os.close(fd)
 
 
 def entries(workspace: str = DEFAULT_WORKSPACE, path: Path | str | None = None) -> list[dict[str, str]]:
@@ -123,42 +187,47 @@ def entries(workspace: str = DEFAULT_WORKSPACE, path: Path | str | None = None) 
 
 
 def add_entry(name: str, url: str, workspace: str = DEFAULT_WORKSPACE, match: str = 'origin', path=None) -> dict[str, str]:
-    document = load_config(path)
-    _validate_workspace(workspace)
-    item = _validate_entry({'name': name, 'url': url, 'match': match})
-    current = document['workspaces'].setdefault(workspace, [])
-    if any(item['name'].casefold() == existing['name'].casefold() for existing in current):
-        raise ValueError(f'Entry already exists in workspace {workspace}: {name}')
-    current.append(item)
-    save_config(document, path)
-    return item
+    with _edit_lock(path) as target:
+        document = load_config(target)
+        _validate_workspace(workspace)
+        item = _validate_entry({'name': name, 'url': url, 'match': match})
+        current = document['workspaces'].setdefault(workspace, [])
+        if any(item['name'].casefold() == existing['name'].casefold() for existing in current):
+            raise BrowserConflict(f'Entry already exists in workspace {workspace}: {name}')
+        current.append(item)
+        save_config(document, target)
+        return item
 
 
 def remove_entry(name: str, workspace: str = DEFAULT_WORKSPACE, path=None) -> dict[str, str]:
-    document = load_config(path)
-    current = document['workspaces'].get(workspace, [])
-    for index, item in enumerate(current):
-        if item['name'].casefold() == name.casefold():
-            removed = current.pop(index)
-            save_config(document, path)
-            return removed
-    raise ValueError(f'No browser entry named {name!r} in workspace {workspace}')
+    with _edit_lock(path) as target:
+        _validate_workspace(workspace)
+        document = load_config(target)
+        current = document['workspaces'].get(workspace, [])
+        for index, item in enumerate(current):
+            if item['name'].casefold() == name.casefold():
+                removed = current.pop(index)
+                save_config(document, target)
+                return removed
+        raise BrowserNotFound(f'No browser entry named {name!r} in workspace {workspace}')
 
 
 def update_entry(name: str, url: str | None = None, new_name: str | None = None,
                  workspace: str = DEFAULT_WORKSPACE, match: str | None = None, path=None) -> dict[str, str]:
-    document = load_config(path)
-    current = document['workspaces'].get(workspace, [])
-    for item in current:
-        if item['name'].casefold() == name.casefold():
-            candidate = {'name': new_name or item['name'], 'url': url or item['url'], 'match': match or item['match']}
-            normalized = _validate_entry(candidate)
-            if any(other is not item and other['name'].casefold() == normalized['name'].casefold() for other in current):
-                raise ValueError(f'Entry already exists in workspace {workspace}: {normalized["name"]}')
-            item.update(normalized)
-            save_config(document, path)
-            return item
-    raise ValueError(f'No browser entry named {name!r} in workspace {workspace}')
+    with _edit_lock(path) as target:
+        _validate_workspace(workspace)
+        document = load_config(target)
+        current = document['workspaces'].get(workspace, [])
+        for item in current:
+            if item['name'].casefold() == name.casefold():
+                candidate = {'name': new_name or item['name'], 'url': url or item['url'], 'match': match or item['match']}
+                normalized = _validate_entry(candidate)
+                if any(other is not item and other['name'].casefold() == normalized['name'].casefold() for other in current):
+                    raise BrowserConflict(f'Entry already exists in workspace {workspace}: {normalized["name"]}')
+                item.update(normalized)
+                save_config(document, target)
+                return item
+        raise BrowserNotFound(f'No browser entry named {name!r} in workspace {workspace}')
 
 
 def _running(proc: Path = Path('/proc')) -> bool:

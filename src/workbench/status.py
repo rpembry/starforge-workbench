@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .attention import derive
+from .attention_projection import read as read_attention
 from .repository import Problem
 
 
@@ -80,22 +80,7 @@ def read_widget(repository, widget: str):
                 row['freshness'] = 'stale' if age > 90 else 'fresh'
             return {'checked_at': stamp, 'source': 'Workbench runs', 'items': rows, 'availability': 'available'}
         if widget == 'attention':
-            actions = [dict(row) for row in db.execute('SELECT * FROM actions')]
-            runs = [dict(row) for row in db.execute('SELECT * FROM runs')]
-            collectors = [dict(row) for row in db.execute('SELECT * FROM collectors')]
-            for run in runs:
-                run['stale'] = (now - datetime.fromisoformat(run['heartbeat_at'])).total_seconds() > 90
-            for collector in collectors:
-                age = (now - datetime.fromisoformat(collector['heartbeat_at'])).total_seconds()
-                collector['health'] = 'offline' if age > 90 else collector['status']
-            incidents = [dict(row) for row in db.execute('''SELECT i.*,g.generation_started_at
-                FROM provider_attention_incidents i JOIN provider_attention g
-                  ON g.provider=i.provider AND g.session_id=i.session_id AND g.generation_id=i.generation_id
-                WHERE i.state='open' ORDER BY i.provider,i.session_id,i.opened_at,i.incident_id''')]
-            for incident in incidents:
-                age = (now - datetime.fromisoformat(incident['last_observed_at'])).total_seconds()
-                incident['fresh'] = bool(incident['reason']) and age <= 90
-            result = derive(actions, runs, collectors, stamp, incidents)
+            result = read_attention(db, now)
             return {'checked_at': stamp, 'source': 'Workbench attention', 'items': result['items'][:100],
                     'truncated': len(result['items']) > 100, 'availability': 'available'}
     raise Problem(404, 'not_found', 'Unknown status widget')

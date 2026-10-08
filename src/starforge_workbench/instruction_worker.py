@@ -3,8 +3,10 @@ import argparse
 import json
 import os
 from pathlib import Path
+import socket
 import stat
 import time
+import uuid
 
 import httpx
 
@@ -85,13 +87,14 @@ def cycle(api, config, adapter, resolver=resolve_opencode_registration):
         if report is not None and report.status_code == 200:
             adapter.mark_response(evidence.instruction_id, 'reported')
             counts['responses_reported'] += 1
-        elif report is not None and report.status_code in (409, 422):
+        elif report is not None and report.status_code in (404, 409, 422):
             # The server rejected the durable lease/state pairing. Repeating
             # cannot make that transition valid and must not loop forever.
             adapter.mark_response(evidence.instruction_id, 'unreportable')
             counts['ambiguous'] += 1
         else:
             counts['ambiguous'] += 1
+    counts['ambiguous'] += getattr(adapter, 'degraded_receipts', 0)
     state_file = Path(config['registration_state'])
     if not state_file.is_file():
         return counts
@@ -131,20 +134,29 @@ def cycle(api, config, adapter, resolver=resolve_opencode_registration):
         try:
             confirmed = resolver(registered_id, config['manifest'], state_file,
                                  config['launcher_state'], selected)
+        except (OSError, ValueError, RuntimeError, KeyError):
+            outcome, reason = 'retryable', 'local_preflight_failed'
+        else:
             if confirmed != exact:
                 outcome, reason = 'failed', 'session_missing'
             else:
                 renewed = _post(api, f'/api/instructions/{instruction_id}/renew',
                                 {'lease_token': token})
                 if renewed is None or renewed.status_code != 200:
-                    # No transmission without a confirmed live lease.
+                    # No transmission without a confirmed live lease. The
+                    # server requeues an unrenewed claim when its lease lapses.
                     counts['ambiguous'] += 1
                     continue
-                result = adapter.deliver(instruction_id, exact, text, token)
-                outcome, reason = _result_outcome(result)
-        except (OSError, ValueError, RuntimeError, KeyError):
-            # After a claim, unknown local failure must not become another POST.
-            outcome, reason = 'uncertain', 'worker_interrupted'
+                try:
+                    result = adapter.deliver(instruction_id, exact, text, token)
+                    outcome, reason = _result_outcome(result)
+                except (OSError, ValueError, RuntimeError, KeyError):
+                    try:
+                        receipt_exists = adapter.attempt_recorded(instruction_id)
+                    except (AttributeError, OSError, ValueError, RuntimeError):
+                        receipt_exists = True  # Missing/unreadable proof fails closed.
+                    outcome, reason = (('uncertain', 'worker_interrupted') if receipt_exists else
+                                       ('retryable', 'local_preflight_failed'))
         report = _post(api, f'/api/instructions/{instruction_id}/results', {
             'lease_token': token, 'outcome': outcome, 'reason_code': reason})
         if report is not None and report.status_code == 200:
@@ -154,12 +166,33 @@ def cycle(api, config, adapter, resolver=resolve_opencode_registration):
     return counts
 
 
+def worker_sweep(api, config, adapter, instance_id, resolver=resolve_opencode_registration):
+    """Report worker health separately from provider and instruction outcomes."""
+    if not config['enabled']:
+        return cycle(api, config, adapter, resolver)
+    health = dict(source=socket.gethostname()+':instruction-worker', instance_id=instance_id,
+                  scope='remote instruction delivery', status='ok', reason='scan_complete', observed_runs=0)
+    try:
+        if not Path(config['registration_state']).is_file():
+            raise OSError('Registration state unavailable')
+        counts = cycle(api, config, adapter, resolver)
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, httpx.HTTPError):
+        health.update(status='degraded', reason='scan_failed')
+        api.post('/api/collectors/heartbeat', json=health).raise_for_status()
+        raise
+    if counts['ambiguous']:
+        health.update(status='degraded', reason='submission_failed')
+    api.post('/api/collectors/heartbeat', json=health).raise_for_status()
+    return counts
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, type=Path)
     parser.add_argument('--credentials-file', type=Path)
     parser.add_argument('--once', action='store_true')
     args = parser.parse_args()
+    instance_id = str(uuid.uuid4())
     while True:
         try:
             config = load_config(args.config)
@@ -167,13 +200,13 @@ def main():
                 adapter = OpenCodeDelivery(config['opencode_origin'], config['delivery_state'],
                                            config['provider_id'], config['model_id'])
                 with client(role='collector', credentials_file=args.credentials_file) as api:
-                    counts = cycle(api, config, adapter)
+                    counts = worker_sweep(api, config, adapter, instance_id)
             else:
                 counts = {'eligible': 0, 'claimed': 0, 'reported': 0,
                           'responses_reported': 0, 'previews_sent': 0, 'ambiguous': 0}
             if args.once or counts['claimed'] or counts['ambiguous']:
                 print(json.dumps(counts, sort_keys=True), flush=True)
-        except (OSError, ValueError, WorkerConfigError, httpx.HTTPError):
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, WorkerConfigError, httpx.HTTPError):
             # No paths, credentials, instruction text or provider output in logs.
             print('{"worker":"unavailable"}', flush=True)
         if args.once:
