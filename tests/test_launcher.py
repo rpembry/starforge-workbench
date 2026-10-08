@@ -244,7 +244,7 @@ class LauncherTests(unittest.TestCase):
         lock.assert_called_once_with('provider-'+self.c['id'], blocking=False)
 
     def test_dry_run_never_launches_or_creates_state(self):
-        with patch.object(cli, 'STATE', self.path/'absent'), patch.object(cli.subprocess, 'run', side_effect=AssertionError('spawned')):
+        with patch.object(cli, 'default_manifest', return_value=ROOT/'config/workbench.example.yaml'), patch.object(cli, 'STATE', self.path/'absent'), patch.object(cli.subprocess, 'run', side_effect=AssertionError('spawned')):
             with contextlib.redirect_stdout(io.StringIO()):
                 cli.main(['--dry-run','up'])
         self.assertFalse((self.path/'absent').exists())
@@ -463,7 +463,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(calls[1][-2:], ['resume', identity])
 
     def test_one_context_failure_does_not_block_other_contexts(self):
-        with patch.object(cli, 'up', side_effect=[ValueError('fixture startup failure'), None]) as up:
+        with patch.object(cli, 'default_manifest', return_value=ROOT/'config/workbench.example.yaml'), patch.object(cli, 'up', side_effect=[ValueError('fixture startup failure'), None]) as up:
             with self.assertRaisesRegex(ValueError, 'Some contexts'):
                 cli.main(['up', 'ai-workbench', 'claude-code', '--headless'])
         self.assertEqual(up.call_count, 2)

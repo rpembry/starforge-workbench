@@ -19,6 +19,7 @@ import uuid
 
 import jsonschema
 import yaml
+from starforge_workbench.role_policy import instructions
 
 ROOT = Path(__file__).resolve().parents[2]
 SELF = ROOT / 'bin/ai-workbench'
@@ -64,6 +65,9 @@ def load(path):
             raise ValueError('Enabled context requires cwd')
         if c['risk'] == 'production' and c['enabled'] and c['provider'] != 'codex':
             raise ValueError('Enabled production contexts require the Codex adapter')
+        if c.get('role') and (c['provider'] != 'codex' or c.get('codex_mode') == 'agents' or
+                              c['resume_policy'] != 'explicit-session'):
+            raise ValueError('Daily interface role requires an exact-resume Codex conversation context')
         if c.get('codex_mode') == 'agents' and (c['provider'] != 'codex' or
                 c['resume_policy'] != 'never' or c['risk'] != 'local' or c['additional_cwds']):
             raise ValueError('Codex Agents requires a local Codex context with never resume and no additional directories')
@@ -322,7 +326,7 @@ def retry_start(c, operation):
 
 
 def fingerprint(c):
-    binding = {key: value for key, value in c.items() if key not in {'codex_instructions_file', 'codex_remote_daemon'}}
+    binding = {key: value for key, value in c.items() if key not in {'role', 'codex_instructions_file', 'codex_remote_daemon'}}
     return hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
 
 def validate_context(c):
@@ -671,11 +675,11 @@ def migrate_codex_binding(c, expected_old_id):
         if intent.exists():
             raise ValueError('Prior daemon thread creation is uncertain; inspect before migration')
         ensure_codex_daemon(c)
-        instructions = codex_instructions(c)
+        role_text = context_instructions(c)
         atomic(intent, {'context_id': c['id'], 'old_id': expected_old_id,
                         'cwd': str(cwd(c))})
         from starforge_workbench.codex_daemon import create_thread
-        identity = create_thread(cwd(c), c['title'], instructions,
+        identity = create_thread(cwd(c), c['title'], role_text,
                                  'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write')
         bind_session(c, identity)
         intent.unlink()
@@ -715,10 +719,10 @@ def start_codex(c):
             if not data:
                 if intent.exists():
                     raise ValueError(c['id']+': prior daemon thread creation is uncertain; inspect and bind an exact ID before retrying')
-                instructions = codex_instructions(c)
+                role_text = context_instructions(c)
                 atomic(intent, {'context_id': c['id'], 'cwd': str(cwd(c))})
                 from starforge_workbench.codex_daemon import create_thread
-                identity = create_thread(cwd(c), c['title'], instructions,
+                identity = create_thread(cwd(c), c['title'], role_text,
                                          'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write')
                 bind_session(c, identity)
                 intent.unlink()
@@ -777,6 +781,12 @@ def codex_instructions(c):
         raise ValueError('Codex instructions file must be UTF-8') from exc
 
 
+def context_instructions(c):
+    role_text = instructions(c['role']) if c.get('role') else None
+    private_text = codex_instructions(c)
+    return '\n\n'.join(part for part in (role_text, private_text) if part) or None
+
+
 def provider_argv(c, choice):
     exe = PROVIDERS[c['provider']]
     if c['resume_policy'] == 'never' and choice != 'new':
@@ -793,18 +803,22 @@ def provider_argv(c, choice):
             if choice == 'new':
                 raise ValueError('Create daemon-backed Codex threads through Workbench before opening the TUI')
         else:
-            instructions = codex_instructions(c)
-            if instructions is not None:
-                base += ['-c', 'developer_instructions='+json.dumps(instructions, ensure_ascii=False)]
+            text = context_instructions(c)
+            if text:
+                base += ['-c', 'developer_instructions='+json.dumps(text, ensure_ascii=False)]
         for directory in directories(c)[1:]:
             base += ['--add-dir', str(directory)]
         if choice == 'picker':
+            if c.get('role'):
+                raise ValueError('Role-bound context cannot use a global conversation picker')
             return base+['resume', '--all']
         if choice == 'resume':
             if c['resume_policy'] == 'last-in-directory':
                 return base+['resume', '--last']
             data = saved_session(c)
             if not data:
+                if c.get('role'):
+                    raise ValueError('Role-bound context requires an exact saved conversation before reconnect')
                 return base+['resume', '--all']
             return base+['resume', data['id']]
         return base

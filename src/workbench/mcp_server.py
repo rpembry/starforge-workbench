@@ -1,6 +1,7 @@
 """Local stdio MCP server for the authenticated Starforge Workbench API."""
 import os
 import re
+import httpx
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -92,7 +93,8 @@ def _contexts(path: Path) -> list[dict[str, object]]:
 
 def build_server(api_factory=client, manifest_path=_manifest_path, context_loader=_contexts,
                  restore=None, flow_profile=None, flow_write=None,
-                 flow_prepare=None, flow_disclose_paths=None, title_service=None) -> MCPServer:
+                 flow_prepare=None, flow_disclose_paths=None, title_service=None,
+                 handoff_verifier=None) -> MCPServer:
     """Build a server with injectable dependencies for isolated tests."""
     selected_flow_profile = flow_profile or os.environ.get('WB_MCP_FLOW_PROFILE')
     selected_flow_write = flow_write if flow_write is not None else os.environ.get('WB_MCP_FLOW_WRITE') == '1'
@@ -130,6 +132,8 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
             'tool_families': ['configured-contexts', 'browser-desired-state',
                               'bounded-worklog', 'standup', 'registered-session-status',
                               'session-restore-preview', 'codex-title-preview-status',
+                              'agent-handoff-preview', 'private-agent-roster',
+                              *(['opt-in-agent-handoff-send'] if os.environ.get('WB_MCP_ALLOW_HANDOFF') == '1' else []),
                               *(['opt-in-codex-title-apply'] if os.environ.get('WB_MCP_ALLOW_TITLE_APPLY') == '1' else []),
                               *(['opt-in-session-restore'] if os.environ.get('WB_MCP_ALLOW_RESTORE') == '1' else [])],
             'flow': ('local-read-write' if selected_flow_profile and selected_flow_write else
@@ -142,6 +146,73 @@ def build_server(api_factory=client, manifest_path=_manifest_path, context_loade
     def list_contexts() -> list[dict[str, object]]:
         """List configured launcher contexts without disclosing commands or filesystem paths."""
         return context_loader(manifest_path())
+
+    def handoff():
+        from workbench.agent_handoff import Handoff
+        state = os.environ.get('WB_MCP_REGISTRATION_STATE')
+        launcher = os.environ.get('WB_MCP_LAUNCHER_STATE')
+        def verify(session_id):
+            if handoff_verifier is not None:
+                return handoff_verifier(session_id)
+            if not state or not launcher:
+                return False
+            from starforge_workbench.opencode_registration import resolve_opencode_registration
+            return bool(resolve_opencode_registration(session_id, manifest_path(), state, launcher))
+        def handoff_request(method, path, payload=None):
+            try:
+                return request(method, path, payload)
+            except httpx.HTTPStatusError as exc:
+                if method == 'GET' and path.startswith('/api/instructions/by-key/') and exc.response.status_code == 404:
+                    raise LookupError('No prior attempt') from exc
+                raise
+        return Handoff(context_loader(manifest_path()), state, handoff_request, verify)
+
+    def codex_handoff(context_id):
+        from starforge_workbench import agent_roster, cli
+        listed = [item for item in context_loader(manifest_path())
+                  if item.get('id') == context_id and item.get('enabled')]
+        if len(listed) != 1 or listed[0].get('provider') != 'codex':
+            return None
+        configured = [item for item in cli.load(manifest_path())['contexts']
+                      if item['id'] == context_id and item['enabled']]
+        if (len(configured) != 1 or configured[0]['provider'] != 'codex'
+                or not configured[0].get('codex_remote_daemon')):
+            return None
+        path = Path(os.environ.get('WB_MCP_AGENT_ROSTER') or
+                    Path.home()/'.config/starforge-ai-workbench/agent-roster.yaml')
+        if context_id not in agent_roster.roster(path):
+            return None
+        return agent_roster, path
+
+    @server.tool(name='list_agent_roster', structured_output=True)
+    def list_agent_roster() -> list[dict[str, object]]:
+        """List private specialist role descriptions without exposing prompts or paths."""
+        from starforge_workbench.agent_roster import list_agents
+        path = Path(os.environ.get('WB_MCP_AGENT_ROSTER') or
+                    Path.home()/'.config/starforge-ai-workbench/agent-roster.yaml')
+        return list_agents(manifest_path(), path)
+
+    @server.tool(name='agent_handoff_preview', structured_output=True)
+    def agent_handoff_preview(context_id: str) -> dict[str, object]:
+        """Resolve one configured context to a current exact registered session, or explain why delivery is unavailable."""
+        target = codex_handoff(context_id)
+        if target:
+            module, path = target
+            return module.preview(manifest_path(), path, context_id)
+        return handoff().target(context_id)
+
+    @server.tool(name='agent_handoff_send', structured_output=True)
+    def agent_handoff_send(context_id: str, expected_session_id: str, text: str,
+                           idempotency_key: str) -> dict[str, object]:
+        """After explicit operator handoff, submit once to one verified exact target."""
+        if os.environ.get('WB_MCP_ALLOW_HANDOFF') != '1':
+            return {'outcome': 'denied', 'reason': 'handoff_send_disabled'}
+        target = codex_handoff(context_id)
+        if target:
+            module, path = target
+            return module.send(manifest_path(), path, context_id, expected_session_id,
+                               text, idempotency_key)
+        return handoff().send(context_id, expected_session_id, text, idempotency_key)
 
     def reconcile():
         if title_service is not None:

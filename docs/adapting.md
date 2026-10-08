@@ -126,6 +126,27 @@ behavior fixes should be committed and reviewed. Mouse selection, clipboard, and
 link-opening preferences can also be requested, but depend on the terminal app
 and should be checked separately.
 
+## Daily operator conversation role
+
+An optional private manifest context may select `role: daily-interface` for an
+exact-resume Codex conversation. Workbench then supplies its public, provider
+neutral role policy as additional developer instructions on a new launch and on
+reconnecting the **same saved conversation**. Personal wording and destination
+names remain in private local instructions. The role keeps Workbench status and
+authorized operations in the daily conversation, routes development and
+substantial research to the appropriate separate context, and treats explicit
+handoff as a distinct request. It does not change a running conversation or
+its tmux binding. To validate without touching an existing session, use a
+synthetic manifest and inspect `ai-workbench --manifest PATH --dry-run up` plus
+the isolated tests; a real reconnect requires a separately planned idle window.
+
+The MCP preview/send path is described in [mcp-server.md](mcp-server.md).
+Delivery supports a verified OpenCode registration through its instruction
+queue or a private-roster Codex thread through the local shared daemon.
+Unsupported providers need a copyable handoff.
+Neither role selection nor a handoff authorizes the destination agent to start
+work, merge, deploy, or change bindings.
+
 ## Isolated local API
 
 After `uv sync --frozen`, create a private local credential file. The following generates fresh random values without printing them and refuses to overwrite an existing file:

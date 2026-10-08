@@ -58,6 +58,9 @@
               "opencode"
             ]
           },
+          "role": {
+            "enum": ["daily-interface"]
+          },
           "codex_mode": {
             "enum": ["conversation", "agents"]
           },
