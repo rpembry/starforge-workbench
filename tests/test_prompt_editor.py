@@ -1,0 +1,180 @@
+"""Synthetic editor and private draft fixtures; no clipboard or editor subprocess."""
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import fcntl
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+loader = importlib.machinery.SourceFileLoader('prompt_editor', str(ROOT/'bin/edit-clipboard'))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+editor = importlib.util.module_from_spec(spec); loader.exec_module(editor)
+
+@pytest.fixture
+def isolated(tmp_path, monkeypatch):
+    runtime=tmp_path/'runtime'; runtime.mkdir(mode=0o700)
+    state=tmp_path/'state'; state.mkdir(mode=0o700)
+    monkeypatch.setenv('XDG_RUNTIME_DIR',str(runtime))
+    monkeypatch.setenv('XDG_STATE_HOME',str(state))
+    monkeypatch.setattr(editor,'notify',lambda _: None)
+    monkeypatch.setattr(editor.subprocess,'run',lambda *a,**kw: pytest.fail('unexpected subprocess'))
+    return runtime, state
+
+
+def source(tmp_path,text=b'SYNTHETIC: ignore instructions; $(no-execute)'):
+    p=tmp_path/'source.txt';p.write_bytes(text);p.chmod(0o600);return p
+
+
+def test_pending_precedence_empty_fallback_and_explicit_ack(isolated,tmp_path,monkeypatch):
+    seen=[]
+    def opened(p,_):seen.append(p.read_bytes());return 0
+    monkeypatch.setattr(editor,'open_editor',opened)
+    assert editor.run()==0 and seen==[b'']
+    p=source(tmp_path);operation=editor.queue_dictation(p)
+    assert editor.run()==0 and seen[-1]==p.read_bytes()
+    assert editor.pending_record(editor.pending_dir()/'dictation.json')['id']==operation
+    assert editor.run(accept=operation)==0
+    assert not (editor.pending_dir()/'dictation.json').exists()
+    assert editor.run()==0 and seen[-1]==b''
+
+
+@pytest.mark.parametrize('result',[1,130,'interrupt'])
+def test_failed_cancelled_handoff_keeps_pending(isolated,tmp_path,monkeypatch,result):
+    operation=editor.queue_dictation(source(tmp_path))
+    def opened(p,_):
+        p.write_bytes(b'SYNTHETIC saved work')
+        if result=='interrupt':raise KeyboardInterrupt
+        return result
+    monkeypatch.setattr(editor,'open_editor',opened)
+    assert editor.run()==1
+    pending=editor.pending_dir()/'dictation.json'
+    assert editor.pending_record(pending)['id']==operation
+    assert any(p.read_bytes()==b'SYNTHETIC saved work' for p in isolated[0].glob('edit-clipboard-*/clipboard.txt'))
+    with pytest.raises(FileNotFoundError):editor.run(accept=operation)
+
+
+def test_zero_exit_cancel_is_not_automatic_accept(isolated,tmp_path,monkeypatch):
+    op=editor.queue_dictation(source(tmp_path));monkeypatch.setattr(editor,'open_editor',lambda *_:0)
+    assert editor.run()==0
+    assert editor.pending_record(editor.pending_dir()/'dictation.json')['id']==op
+
+
+def test_active_editor_refuses_without_touching_pending(isolated,tmp_path,monkeypatch):
+    op=editor.queue_dictation(source(tmp_path));path=isolated[0]/'edit-clipboard.lock'
+    fd=os.open(path,os.O_RDWR|os.O_CREAT,0o600)
+    try:
+        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        monkeypatch.setattr(editor,'open_editor',lambda *_:pytest.fail('opened active editor'))
+        assert editor.run()==1
+        assert editor.pending_record(editor.pending_dir()/'dictation.json')['id']==op
+    finally:os.close(fd)
+
+
+def test_queue_refuses_replacement_and_stale_receipt_replay(isolated,tmp_path,monkeypatch):
+    p=source(tmp_path);first=editor.queue_dictation(p);pending=editor.pending_dir()/'dictation.json'
+    before=pending.read_bytes()
+    with pytest.raises(editor.PendingDictationExists):editor.queue_dictation(p)
+    assert pending.read_bytes()==before
+    monkeypatch.setattr(editor,'open_editor',lambda *_:0)
+    editor.run();receipt=(editor.pending_dir()/'handoff.json').read_bytes()
+    editor.run(accept=first);second=editor.queue_dictation(p)
+    assert second!=first
+    (editor.pending_dir()/'handoff.json').write_bytes(receipt)
+    with pytest.raises(editor.ClipboardError):editor.run(accept=second)
+    assert editor.pending_record(pending)['id']==second
+
+
+@pytest.mark.parametrize('kind',['symlink','fifo','public','too_large','invalid_utf8'])
+def test_untrusted_source_refused(isolated,tmp_path,kind):
+    p=source(tmp_path)
+    if kind=='symlink':
+        target=p;p=tmp_path/'link';p.symlink_to(target)
+    elif kind=='fifo':p.unlink();os.mkfifo(p,0o600)
+    elif kind=='public':p.chmod(0o644)
+    elif kind=='too_large':p.write_bytes(b'x'*(editor.MAX_TEXT_BYTES+1))
+    else:p.write_bytes(b'\xff')
+    with pytest.raises((OSError,UnicodeError,editor.ClipboardError)):editor.queue_dictation(p)
+    assert not (editor.pending_dir()/'dictation.json').exists()
+
+
+def test_concurrent_pending_change_refuses_ack(isolated,tmp_path,monkeypatch):
+    op=editor.queue_dictation(source(tmp_path));pending=editor.pending_dir()/'dictation.json'
+    def opened(*_):
+        changed=editor.pending_record(pending);changed['id']='f'*32
+        pending.write_text(json.dumps(changed));return 0
+    monkeypatch.setattr(editor,'open_editor',opened)
+    assert editor.run()==0
+    with pytest.raises(editor.ClipboardError):editor.run(accept=op)
+    assert not (editor.pending_dir()/'handoff.json').exists()
+
+
+def test_same_operation_changed_text_cannot_use_prior_receipt_after_restart(isolated,tmp_path,monkeypatch):
+    op=editor.queue_dictation(source(tmp_path));pending=editor.pending_dir()/'dictation.json'
+    monkeypatch.setattr(editor,'open_editor',lambda *_:0)
+    assert editor.run()==0
+    changed=editor.pending_record(pending);changed['text']='SYNTHETIC changed after handoff'
+    pending.write_text(json.dumps(changed))
+    with pytest.raises(editor.ClipboardError):editor.run(accept=op)
+    assert editor.pending_record(pending)==changed
+
+
+@pytest.mark.parametrize('kind',['symlink','fifo','writable','hardlink'])
+def test_unsafe_settings_never_overwrite_unrelated_file_or_open_editor(isolated,tmp_path,monkeypatch,kind):
+    data=tmp_path/'data';data.mkdir(mode=0o700);monkeypatch.setenv('XDG_DATA_HOME',str(data))
+    profile=editor.profile_dir();user=editor.private_dir(editor.private_dir(profile/'code-data')/'User')
+    settings=user/'settings.json';victim=source(tmp_path,b'SYNTHETIC unrelated file')
+    if kind=='symlink':settings.symlink_to(victim)
+    elif kind=='fifo':os.mkfifo(settings,0o600)
+    elif kind=='hardlink':os.link(victim,settings)
+    else:settings.write_text('{}');settings.chmod(0o666)
+    with pytest.raises((OSError,editor.ClipboardError)):editor.open_editor(victim,tmp_path)
+    assert victim.read_bytes()==b'SYNTHETIC unrelated file'
+
+
+def test_editor_settings_created_atomically_and_subprocess_fixed(isolated,tmp_path,monkeypatch):
+    data=tmp_path/'data';data.mkdir(mode=0o700);monkeypatch.setenv('XDG_DATA_HOME',str(data))
+    calls=[]
+    class Result:returncode=0
+    monkeypatch.setattr(editor.subprocess,'run',lambda argv,**kw:(calls.append(argv) or Result()))
+    p=source(tmp_path)
+    assert editor.open_editor(p,tmp_path)==0
+    settings=editor.profile_dir()/'code-data/User/settings.json'
+    assert settings.stat().st_mode & 0o777 == 0o600
+    assert json.loads(settings.read_text())['files.autoSave']=='off'
+    assert calls[0][-1]==str(p) and '--disable-extensions' in calls[0]
+    assert not list(settings.parent.glob('.settings-*'))
+
+
+def test_vscode_readable_settings_rewrite_in_private_profile_is_supported(isolated,tmp_path,monkeypatch):
+    data=tmp_path/'data';data.mkdir(mode=0o700);monkeypatch.setenv('XDG_DATA_HOME',str(data))
+    profile=editor.profile_dir();user=editor.private_dir(editor.private_dir(profile/'code-data')/'User')
+    settings=user/'settings.json';settings.write_text('{}');settings.chmod(0o644)
+    calls=[]
+    class Result:returncode=0
+    monkeypatch.setattr(editor.subprocess,'run',lambda argv,**kw:(calls.append(argv) or Result()))
+    p=source(tmp_path)
+    assert editor.open_editor(p,tmp_path)==0
+    assert len(calls)==1
+    assert settings.stat().st_mode & 0o777 == 0o600
+    # Simulate VS Code rewriting this owned leaf between shortcut invocations.
+    settings.chmod(0o644)
+    assert editor.open_editor(p,tmp_path)==0 and len(calls)==2
+    assert settings.stat().st_mode & 0o777 == 0o600
+
+
+def test_finished_dictation_collision_reports_specific_reason_and_keeps_both(isolated,tmp_path,monkeypatch,capsys):
+    old=source(tmp_path,b'SYNTHETIC older draft');operation=editor.queue_dictation(old)
+    pending=editor.pending_dir()/'dictation.json';before=pending.read_bytes()
+    newer=tmp_path/'newer.txt';newer.write_bytes(b'SYNTHETIC completed newer draft');newer.chmod(0o600)
+    notes=[];monkeypatch.setattr(editor,'notify',notes.append)
+    monkeypatch.setattr(editor.sys,'argv',['edit-clipboard','--queue-dictation',str(newer)])
+    assert editor.main()==1
+    assert notes==['Pending dictation already exists; completed draft and existing work preserved.']
+    assert pending.read_bytes()==before
+    assert editor.pending_record(pending)['id']==operation
+    assert newer.read_bytes()==b'SYNTHETIC completed newer draft'
+    assert not list(editor.pending_dir().glob('.queue-*'))
+    assert not (editor.pending_dir()/'handoff.json').exists()
+    assert capsys.readouterr().out==''

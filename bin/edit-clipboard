@@ -1,0 +1,251 @@
+#!/usr/bin/python3
+"""Open pending dictation, or an empty draft, in the existing isolated editor."""
+
+import argparse
+import hashlib
+import stat
+import fcntl
+import json
+import os
+from pathlib import Path
+import signal
+import shutil
+import subprocess
+import sys
+import tempfile
+import uuid
+
+
+APP = "edit-clipboard"
+MAX_TEXT_BYTES = 64 * 1024
+EDITOR = "/usr/bin/code"
+
+
+class ClipboardError(Exception):
+    pass
+
+
+class PendingDictationExists(ClipboardError):
+    """Expected single-pending queue collision, never replacement authority."""
+
+
+def private_dir(path: Path) -> Path:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    status = path.stat()
+    if path.is_symlink() or status.st_uid != os.getuid() or status.st_mode & 0o077:
+        raise ClipboardError("A required directory is not private and user-owned")
+    return path
+
+
+def runtime_dir() -> Path:
+    value = os.environ.get("XDG_RUNTIME_DIR")
+    if not value:
+        raise ClipboardError("XDG_RUNTIME_DIR is unavailable")
+    path = Path(value)
+    if not path.is_dir():
+        raise ClipboardError("XDG_RUNTIME_DIR is unavailable")
+    return private_dir(path)
+
+
+def profile_dir() -> Path:
+    data = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
+    return private_dir(data / APP)
+
+
+def notify(message: str) -> None:
+    tool = shutil.which("notify-send")
+    if tool:
+        try:
+            subprocess.run([tool, "Edit clipboard", message], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    print(message, file=sys.stderr)
+
+
+def open_editor(text_file: Path, session: Path) -> int:
+    profile = profile_dir()
+    user_data = private_dir(profile / "code-data")
+    extensions = private_dir(profile / "extensions")
+    settings = private_dir(user_data / "User") / "settings.json"
+    if settings.exists() or settings.is_symlink():
+        fd = os.open(settings, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            status = os.fstat(fd)
+            if (not stat.S_ISREG(status.st_mode) or status.st_uid != os.getuid()
+                    or status.st_mode & 0o022 or status.st_nlink != 1):
+                raise ClipboardError("Editor settings are not safe and owned")
+        finally: os.close(fd)
+    contents = json.dumps({
+        "telemetry.telemetryLevel": "off",
+        "update.mode": "none",
+        "extensions.autoCheckUpdates": False,
+        "extensions.autoUpdate": False,
+        "workbench.localHistory.enabled": False,
+        "files.hotExit": "off",
+        "files.autoSave": "off",
+        "workbench.startupEditor": "none",
+        "workbench.welcomePage.experimentalOnboarding": False,
+        "security.workspace.trust.enabled": False,
+    })
+    temporary = settings.parent / (".settings-" + uuid.uuid4().hex)
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(contents); stream.flush(); os.fsync(stream.fileno())
+        os.replace(temporary, settings); sync_dir(settings.parent)
+    finally: temporary.unlink(missing_ok=True)
+    command = [EDITOR, "--new-window", "--wait", "--disable-extensions",
+               "--user-data-dir", str(user_data), "--extensions-dir", str(extensions),
+               "--sync", "off", str(text_file)]
+    try:
+        return subprocess.run(command, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+    except OSError as exc:
+        raise ClipboardError("VS Code could not start") from exc
+
+
+def pending_dir() -> Path:
+    state = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
+    return private_dir(private_dir(state / APP) / "pending")
+
+
+def owned_text(path: Path, limit=MAX_TEXT_BYTES) -> bytes:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        status = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(status.st_mode) or status.st_uid != os.getuid()
+                or status.st_mode & 0o077):
+            raise ClipboardError("Draft is not a private owned regular file")
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise ClipboardError("Draft exceeds the 64 KiB limit")
+    data.decode("utf-8")
+    return data
+
+
+def sync_dir(folder: Path) -> None:
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+
+
+def queue_dictation(path: Path) -> str:
+    text = owned_text(path)
+    operation = uuid.uuid4().hex
+    data = json.dumps({"id": operation, "text": text.decode("utf-8")}, ensure_ascii=False).encode()
+    if len(data) > MAX_TEXT_BYTES + 1024:
+        raise ClipboardError("Encoded pending draft exceeds its bounded record limit")
+    folder = pending_dir()
+    temporary = folder / (".queue-" + uuid.uuid4().hex)
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data); stream.flush(); os.fsync(stream.fileno())
+        # Atomic, no-replace publication: another pending draft always wins.
+        try:
+            os.link(temporary, folder / "dictation.json", follow_symlinks=False)
+        except FileExistsError:
+            raise PendingDictationExists() from None
+        sync_dir(folder)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return operation
+
+
+def pending_record(path):
+    value = json.loads(owned_text(path, MAX_TEXT_BYTES + 1024))
+    if (type(value) is not dict or set(value) != {"id", "text"}
+            or type(value["id"]) is not str or len(value["id"]) != 32
+            or any(c not in "0123456789abcdef" for c in value["id"])
+            or type(value["text"]) is not str
+            or len(value["text"].encode()) > MAX_TEXT_BYTES):
+        raise ClipboardError("Invalid pending dictation")
+    return value
+
+
+def run(accept=None) -> int:
+    base = runtime_dir()
+    lock_path = base / (APP + ".lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "rb") as lock:
+        status = os.fstat(lock.fileno())
+        if (not stat.S_ISREG(status.st_mode) or status.st_uid != os.getuid()
+                or status.st_mode & 0o077):
+            raise ClipboardError("Editor lock is not private and user-owned")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            notify("An edit window is already open; pending dictation preserved.")
+            return 1
+        folder = pending_dir()
+        pending = folder / "dictation.json"
+        record = pending_record(pending) if pending.exists() or pending.is_symlink() else None
+        original = record["text"].encode() if record else b""
+        operation = record["id"] if record else None
+        digest = hashlib.sha256(original).hexdigest()
+        receipt = folder / "handoff.json"
+        if accept is not None:
+            if not pending.exists() or accept != operation:
+                raise ClipboardError("Pending dictation changed; nothing accepted")
+            proof = json.loads(owned_text(receipt))
+            if proof != {"id": operation, "sha256": digest, "editor_closed_successfully": True}:
+                raise ClipboardError("No completed editor handoff; pending preserved")
+            # Explicit human acknowledgement, never inferred from editor exit.
+            pending.unlink(); sync_dir(folder)
+            receipt.unlink(missing_ok=True); sync_dir(folder)
+            notify("Acknowledged dictation handoff; pending draft cleared.")
+            return 0
+        session = Path(tempfile.mkdtemp(prefix=APP + "-", dir=base))
+        session.chmod(0o700)
+        text_file = session / "clipboard.txt"
+        file_fd = os.open(text_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(file_fd, "wb") as stream:
+            stream.write(original); stream.flush(); os.fsync(stream.fileno())
+        sync_dir(session)
+        try:
+            editor_result = open_editor(text_file, session)
+            owned_text(text_file)  # validate saved file, never substitute clipboard
+            if editor_result:
+                raise ClipboardError("Editor did not finish successfully")
+            if record and pending_record(pending) == record:
+                # Keep pending even on zero exit: closing/cancelling is ambiguous.
+                temp = folder / (".receipt-" + uuid.uuid4().hex)
+                fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, "w") as stream:
+                    json.dump({"id": operation, "sha256": digest, "editor_closed_successfully": True}, stream)
+                    stream.flush(); os.fsync(stream.fileno())
+                os.replace(temp, receipt); sync_dir(folder)
+            notify("Draft retained locally; copy manually. Pending dictation remains until explicit acknowledgement.")
+            return 0
+        except (ClipboardError, OSError, UnicodeError, KeyboardInterrupt):
+            notify("Editor interrupted; local draft and pending dictation preserved.")
+            return 1
+
+
+def interrupted(signum, frame) -> None:
+    raise ClipboardError("Edit interrupted")
+
+
+def main() -> int:
+    signal.signal(signal.SIGTERM, interrupted)
+    parser = argparse.ArgumentParser(description=__doc__)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--queue-dictation", type=Path)
+    group.add_argument("--accept-dictation", metavar="OPERATION_ID")
+    args = parser.parse_args()
+    try:
+        if args.queue_dictation is not None:
+            print(queue_dictation(args.queue_dictation))
+            return 0
+        return run(args.accept_dictation)
+    except PendingDictationExists:
+        notify("Pending dictation already exists; completed draft and existing work preserved.")
+        return 1
+    except (ClipboardError, OSError, UnicodeError, ValueError) as exc:
+        notify("Draft operation refused; existing work preserved.")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
