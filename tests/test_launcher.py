@@ -45,6 +45,38 @@ class LauncherTests(unittest.TestCase):
         self.data['contexts'].append(self.data['contexts'][0])
         with self.assertRaises(ValueError): self.load()
 
+    def test_private_codex_instructions_load_on_new_and_resume_without_rebinding(self):
+        path = self.path/'AGENT.md'
+        path.write_text('Read the shared instructions first.\n')
+        path.chmod(0o600)
+        original = cli.fingerprint(self.c)
+        self.c['codex_instructions_file'] = str(path)
+        self.assertEqual(cli.fingerprint(self.c), original)
+        for choice in ('new', 'picker'):
+            args = cli.provider_argv(self.c, choice)
+            self.assertIn('developer_instructions='+json.dumps(path.read_text()), args)
+        path.write_text('Updated instructions.\n')
+        self.assertIn('developer_instructions='+json.dumps(path.read_text()), cli.provider_argv(self.c, 'new'))
+
+    def test_codex_instructions_fail_closed_for_unsafe_file(self):
+        path = self.path/'AGENT.md'
+        path.write_text('Private.\n')
+        self.c['codex_instructions_file'] = str(path)
+        path.chmod(0o644)
+        with self.assertRaisesRegex(ValueError, 'private'):
+            cli.provider_argv(self.c, 'new')
+        path.chmod(0o600)
+        link = self.path/'link.md'
+        link.symlink_to(path)
+        self.c['codex_instructions_file'] = str(link)
+        with self.assertRaisesRegex(ValueError, 'unavailable or unsafe'):
+            cli.provider_argv(self.c, 'new')
+        self.c['provider'] = 'claude'
+        self.data['contexts'][0]['provider'] = 'claude'
+        self.data['contexts'][0]['codex_instructions_file'] = str(path)
+        with self.assertRaisesRegex(ValueError, 'requires the Codex provider'):
+            self.load()
+
     def test_autostart_and_unknown_keys_rejected(self):
         self.data['autostart'] = True
         with self.assertRaises(jsonschema.ValidationError): self.load()

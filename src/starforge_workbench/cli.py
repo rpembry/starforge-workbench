@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -63,6 +64,8 @@ def load(path):
             raise ValueError('Enabled context requires cwd')
         if c['risk'] == 'production' and c['enabled'] and c['provider'] != 'codex':
             raise ValueError('Enabled production contexts require the Codex adapter')
+        if c.get('codex_instructions_file') and c['provider'] != 'codex':
+            raise ValueError('Codex instructions file requires the Codex provider')
     return data
 
 def cwd(c):
@@ -312,7 +315,8 @@ def retry_start(c, operation):
 
 
 def fingerprint(c):
-    return hashlib.sha256(json.dumps(c, sort_keys=True).encode()).hexdigest()
+    binding = {key: value for key, value in c.items() if key != 'codex_instructions_file'}
+    return hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
 
 def validate_context(c):
     if not c['enabled']:
@@ -673,12 +677,40 @@ def start_codex(c):
         return result.returncode
 
 
+def codex_instructions(c):
+    """Read a private regular file at every Codex launch and exact resume."""
+    name = c.get('codex_instructions_file')
+    if not name:
+        return None
+    path = Path(os.path.expandvars(name)).expanduser()
+    if not path.is_absolute():
+        raise ValueError('Codex instructions file must be absolute')
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > 16384:
+                raise ValueError('Codex instructions file must be owned by you, private, regular, and at most 16 KiB')
+            data = stream.read(16385)
+    except OSError as exc:
+        raise ValueError('Codex instructions file is unavailable or unsafe') from exc
+    if not data or len(data) > 16384:
+        raise ValueError('Codex instructions file must contain 1 to 16384 bytes')
+    try:
+        return data.decode('utf-8')
+    except UnicodeDecodeError as exc:
+        raise ValueError('Codex instructions file must be UTF-8') from exc
+
+
 def provider_argv(c, choice):
     exe = PROVIDERS[c['provider']]
     if c['resume_policy'] == 'never' and choice != 'new':
         raise ValueError('This context does not permit conversation resume')
     if c['provider'] == 'codex':
         base = [exe, '-c', 'check_for_update_on_startup=false', '-C', str(cwd(c)), '-s', 'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write', '-a', 'on-request']
+        instructions = codex_instructions(c)
+        if instructions is not None:
+            base += ['-c', 'developer_instructions='+json.dumps(instructions, ensure_ascii=False)]
         for directory in directories(c)[1:]:
             base += ['--add-dir', str(directory)]
         if choice == 'picker':

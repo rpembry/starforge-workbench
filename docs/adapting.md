@@ -19,6 +19,17 @@ test coverage. Interactive attachment remains unbounded.
 
 Runtime state, locks, and exact conversation bindings live under `~/.local/state/starforge-ai-workbench`. The dedicated tmux server is also named `starforge-ai-workbench`. Do not run this copy alongside another installation using that same runtime namespace without first isolating it.
 
+For a Codex conversation that starts in a directory outside its role-specific
+instructions, set `codex_instructions_file` in that context to an absolute
+path to a private UTF-8 file. Workbench reads it on each new launch and resume
+and passes its content as Codex `developer_instructions`. Missing, symlinked,
+nonregular, nonprivate, or oversized files prevent the provider from starting.
+Changing the file does not change an existing conversation binding; the next
+launch or resume receives the updated text. A currently running conversation
+does not reload it. Keep secrets out of this file: the text is passed as a
+process argument and may be visible to other local processes. Codex still
+discovers ordinary `AGENTS.md` files from the working directory as usual.
+
 ## Mouse scrolling and terminal preferences
 
 Ask AIW to configure scrolling when a terminal app behaves differently:
