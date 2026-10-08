@@ -41,6 +41,9 @@ capability/no-new-privileges fields and descriptor presence. It never reads FD
 contents or protected files. `verify_runtime_identity` rejects wrong real,
 effective or saved IDs; extra groups; a mapped user namespace; nonempty capability
 sets; missing no-new-privileges; or retained descriptors beyond stdio.
+Only `EBADF` after descriptor enumeration proves a stale, closed entry. Other
+descriptor inspection errors, including access denial or I/O failure, fail closed
+with the fixed profile error and cannot authorize file grants.
 `open_exact_grants` always collects this runtime observation itself, before
 opening grants. Caller-supplied observations cannot activate grants. The pure
 verification function is useful for synthetic tests; it is not an authenticated

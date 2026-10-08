@@ -1,5 +1,6 @@
 """Synthetic host identity/file preflight; no account or permission grants."""
 from dataclasses import replace
+import errno
 import os
 from pathlib import Path
 import subprocess
@@ -171,3 +172,32 @@ def test_preflight_detects_inherited_descriptors_and_child_close_fds(tmp_path):
         assert kept.strip() == b'False' and closed.strip() == b'True'
     finally:
         os.close(fd)
+
+
+@pytest.mark.parametrize('error_number', [errno.EBADF, errno.EACCES, errno.EPERM, errno.EIO, None])
+def test_descriptor_inspection_ignores_only_proven_stale_entries(tmp_path, monkeypatch, capsys, error_number):
+    selected = profile(tmp_path)
+    status = '\n'.join([*(name+': 0' for name in
+                          ('CapInh','CapPrm','CapEff','CapBnd','CapAmb')), 'NoNewPrivs: 1'])
+    monkeypatch.setattr(module.Path, 'read_text', lambda path:status if str(path) == '/proc/self/status'
+                        else '0 0 4294967295\n')
+    monkeypatch.setattr(module.os, 'listdir', lambda path:['0','1','2','3'])
+    monkeypatch.setattr(module.os, 'getresuid', lambda:(selected.executor_uid,)*3)
+    monkeypatch.setattr(module.os, 'getresgid', lambda:(selected.executor_gid,)*3)
+    monkeypatch.setattr(module.os, 'getgroups', lambda:[])
+    def failed(fd):
+        assert fd == 3
+        raise OSError(error_number, 'SYNTHETIC_INSPECTION_DENIED')
+    monkeypatch.setattr(module.os, 'fstat', failed)
+    if error_number == errno.EBADF:
+        observed = module.inspect_runtime_identity()
+        assert observed.inherited_fds_closed is True
+        verify_runtime_identity(selected, observed)
+    else:
+        with pytest.raises(ProfileError, match='^Dedicated diagnostic profile unavailable$') as failure:
+            module.inspect_runtime_identity()
+        assert failure.value.__suppress_context__
+        # The canonical grant opener cannot continue after unknown FD state.
+        with pytest.raises(ProfileError, match='^Dedicated diagnostic profile unavailable$'):
+            open_exact_grants(selected)
+    assert capsys.readouterr() == ('', '')

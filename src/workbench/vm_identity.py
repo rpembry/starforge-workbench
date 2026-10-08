@@ -1,5 +1,6 @@
 """Offline dedicated-host-identity preparation; no privilege changes or launcher."""
 from dataclasses import dataclass, field
+import errno
 import os
 from pathlib import Path
 import re
@@ -95,8 +96,9 @@ def inspect_runtime_identity():
             try:
                 os.fstat(fd)
                 inherited.append(fd)
-            except OSError:
-                pass
+            except OSError as error:
+                if error.errno != errno.EBADF:
+                    raise
         return RuntimeIdentity(os.getresuid(), os.getresgid(), tuple(sorted(os.getgroups())),
                                initial, fields['NoNewPrivs'].strip() == '1', caps, not inherited)
     except Exception:
