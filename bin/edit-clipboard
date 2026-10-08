@@ -69,8 +69,8 @@ def open_editor(text_file: Path, session: Path) -> int:
         try:
             status = os.fstat(fd)
             if (not stat.S_ISREG(status.st_mode) or status.st_uid != os.getuid()
-                    or status.st_mode & 0o077 or status.st_nlink != 1):
-                raise ClipboardError("Editor settings are not private and owned")
+                    or status.st_mode & 0o022 or status.st_nlink != 1):
+                raise ClipboardError("Editor settings are not safe and owned")
         finally: os.close(fd)
     contents = json.dumps({
         "telemetry.telemetryLevel": "off",

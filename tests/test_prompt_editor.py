@@ -120,7 +120,7 @@ def test_same_operation_changed_text_cannot_use_prior_receipt_after_restart(isol
     assert editor.pending_record(pending)==changed
 
 
-@pytest.mark.parametrize('kind',['symlink','fifo','public','hardlink'])
+@pytest.mark.parametrize('kind',['symlink','fifo','writable','hardlink'])
 def test_unsafe_settings_never_overwrite_unrelated_file_or_open_editor(isolated,tmp_path,monkeypatch,kind):
     data=tmp_path/'data';data.mkdir(mode=0o700);monkeypatch.setenv('XDG_DATA_HOME',str(data))
     profile=editor.profile_dir();user=editor.private_dir(editor.private_dir(profile/'code-data')/'User')
@@ -128,7 +128,7 @@ def test_unsafe_settings_never_overwrite_unrelated_file_or_open_editor(isolated,
     if kind=='symlink':settings.symlink_to(victim)
     elif kind=='fifo':os.mkfifo(settings,0o600)
     elif kind=='hardlink':os.link(victim,settings)
-    else:settings.write_text('{}');settings.chmod(0o644)
+    else:settings.write_text('{}');settings.chmod(0o666)
     with pytest.raises((OSError,editor.ClipboardError)):editor.open_editor(victim,tmp_path)
     assert victim.read_bytes()==b'SYNTHETIC unrelated file'
 
@@ -145,3 +145,20 @@ def test_editor_settings_created_atomically_and_subprocess_fixed(isolated,tmp_pa
     assert json.loads(settings.read_text())['files.autoSave']=='off'
     assert calls[0][-1]==str(p) and '--disable-extensions' in calls[0]
     assert not list(settings.parent.glob('.settings-*'))
+
+
+def test_vscode_readable_settings_rewrite_in_private_profile_is_supported(isolated,tmp_path,monkeypatch):
+    data=tmp_path/'data';data.mkdir(mode=0o700);monkeypatch.setenv('XDG_DATA_HOME',str(data))
+    profile=editor.profile_dir();user=editor.private_dir(editor.private_dir(profile/'code-data')/'User')
+    settings=user/'settings.json';settings.write_text('{}');settings.chmod(0o644)
+    calls=[]
+    class Result:returncode=0
+    monkeypatch.setattr(editor.subprocess,'run',lambda argv,**kw:(calls.append(argv) or Result()))
+    p=source(tmp_path)
+    assert editor.open_editor(p,tmp_path)==0
+    assert len(calls)==1
+    assert settings.stat().st_mode & 0o777 == 0o600
+    # Simulate VS Code rewriting this owned leaf between shortcut invocations.
+    settings.chmod(0o644)
+    assert editor.open_editor(p,tmp_path)==0 and len(calls)==2
+    assert settings.stat().st_mode & 0o777 == 0o600

@@ -40,7 +40,10 @@ inferred from model output, transcript content or window closing.
 
 This is a same-OS-user workflow, not authentication against that user. Source,
 pending record and receipt reads reject symlinks, FIFOs, unsafe ownership or
-permissions, invalid UTF-8 and oversized input. A changed pending revision cannot
+permissions, invalid UTF-8 and oversized input. The settings leaf is a separate
+case: VS Code may rewrite an owned file as 0644 inside its validated private 0700
+profile directory. That is accepted if not group/world writable, not linked, and
+regular; the next settings update replaces it atomically with a 0600 file. A changed pending revision cannot
 receive a successful receipt or be acknowledged through a stale operation ID.
 
 Native-first remains the preference: verify Codex's existing dictation controls
