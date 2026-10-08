@@ -101,3 +101,20 @@ model-supplied approval, and sends only immutable reviewed bytes. It does not
 record actual human authorization. A real guest trial is held pending independent
 acceptance of the console transport fixes; that guest must be stopped and reaped
 before the one isolated model invocation. No production readiness is claimed.
+
+The authorized live synthetic trial used an external operator harness, rather
+than a cloud entry point. Its first console report inadvertently included
+synthetic numeric provenance. The guest and model were cleaned up, the detailed
+report stayed local, and no real endpoint received content; this original run
+does not establish strict numeric nondisclosure.
+
+The corrected console boundary is now tracked as
+`starforge_workbench.diagnostic_trial_reporting`. Its `emit_status` function and
+operator-only CLI emit exactly `protocol` and an allowlisted `status`, including
+on malformed evidence. The CLI accepts only an owner-local regular evidence
+file with mode 0600 and a 64 KiB limit, refuses symlinks/devices, and emits no
+stderr, private paths, digests, reports, numeric provenance, or exception text.
+The external harness calls this tracked boundary. Captured synthetic evidence
+was replayed through it without another guest or model invocation, with exact
+stdout and empty stderr assertions. Independent replay review is required;
+this bounded regression evidence is separate from production acceptance.
