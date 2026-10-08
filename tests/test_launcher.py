@@ -172,6 +172,26 @@ class LauncherTests(unittest.TestCase):
                 cli.start_codex_agents(self.c)
             self.assertEqual(run.call_count, 1)
 
+    def test_daemon_thread_creation_crash_does_not_retry_or_replace_binding(self):
+        self.c.update(codex_remote_daemon=True, resume_policy='explicit-session')
+        from starforge_workbench import codex_daemon
+        with patch.object(cli, 'STATE', self.path), \
+                patch.object(cli, 'external_session', return_value=None), \
+                patch.object(cli, 'validate_context'), \
+                patch.object(cli, 'checkout_keys', return_value=[]), \
+                patch.object(cli, 'reject_external_agents'), \
+                patch.object(cli, 'ensure_codex_daemon'), \
+                patch.object(cli, 'codex_instructions', return_value='Synthetic role'), \
+                patch.object(codex_daemon, 'create_thread', side_effect=SystemExit('synthetic crash')) as create:
+            with self.assertRaises(SystemExit):
+                cli.start_codex(self.c)
+            intent = self.path/'daemon-start'/(self.c['id']+'.json')
+            self.assertTrue(intent.exists())
+            self.assertFalse((self.path/'sessions'/(self.c['id']+'.json')).exists())
+            with self.assertRaisesRegex(ValueError, 'creation is uncertain'):
+                cli.start_codex(self.c)
+            self.assertEqual(create.call_count, 1)
+
     def test_agents_menu_skips_conversation_binding_and_checkout_locks(self):
         self.c.update(codex_mode='agents', resume_policy='never')
         with patch.object(cli, 'validate_context'), patch.object(cli, 'set_title'), \
