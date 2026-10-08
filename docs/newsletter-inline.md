@@ -106,12 +106,12 @@ content. Configure its parent directory before installing the service.
 Official [Todoist task description limits](https://www.todoist.com/help/todoist/features/add-a-task-description-in-todoist-rOryWIHn)
 and [API documentation](https://developer.todoist.com/api/v1/).
 
-## Known activation blocker
+## Attachment download boundary and personal handoff
 
 A live check found that current `files.todoist.com/user_upload/` attachments
 redirect to an authenticated Todoist page when requested without credentials.
-The downloader deliberately rejects redirects and never sends its token to that
-host. The official SDK's [viewAttachment documentation](https://doist.github.io/todoist-sdk-typescript/api/classes/TodoistApi/#viewattachment)
+Default mode rejects redirects and never sends its token to that host. The
+official SDK's [viewAttachment documentation](https://doist.github.io/todoist-sdk-typescript/api/classes/TodoistApi/#viewattachment)
 describes Bearer authentication to `files.todoist.com` and credential-free CDN
 downloads. The [SDK implementation at c7412eb](https://github.com/Doist/todoist-sdk-typescript/blob/c7412eb6c44859fe63ee7da7d27254cc30981217/src/clients/upload-client.ts)
 supports pre-signed URLs at `todoist.b-cdn.net` and
@@ -126,7 +126,46 @@ of a separate credential-free download URL. Do not use backup downloads or broad
 account exports to retrieve project attachments.
 
 A successful scheduled no-op over existing receipts does not verify future
-attachment conversion. Keep the timer paused until a supported retrieval method
-within the allowed credential-origin boundary and live conversion are verified.
-User approval alone does not override a rejected credential transmission. Do not
-bypass it by running the SDK, reusing browser cookies, or another credential.
+attachment conversion. A rejected credential transmission is not bypassed by
+another chat confirmation, the SDK, browser cookies or another credential.
+The agent must leave the configuration and timer disabled and hand the first
+credential-bearing download to the user personally.
+
+After installing the reviewed build, the user can run this in their own terminal:
+
+```sh
+"$HOME/personal-jobs/jobs/newsletter-inline/.venv/bin/python" -m workbench.newsletter_activate --config "$HOME/.config/newsletter-inline/config.json"
+```
+
+The program displays the exact mechanism and requires an interactive `ACTIVATE`
+confirmation before reading the existing local token. No token is pasted,
+printed, copied or sent in a URL. It validates the installed unit templates and
+requires initially disabled configuration. Before any task update or enabling,
+it reads and parses an actual matching attachment from the configured project.
+An existing nonblank task can prove retrieval without clearing or editing it.
+Empty scans, login pages, source mismatches and no-op service reports cannot
+substitute for the real source proof.
+
+This explicit mode sends the token only to the API host and exact HTTPS
+`files.todoist.com/user_upload/[v2/]ID/NAME.html` resources from matching comments.
+Automatic redirects are disabled, including on clients configured to follow them.
+Only one explicit redirect to an HTTPS pre-signed URL on the two documented CDN
+hosts is accepted; that request strips Authorization, cookies and ambient HTTP
+authentication. Other hosts, ports, userinfo, fragments, controls, traversal,
+unsigned CDN URLs and additional hops are rejected. HTML responses are limited
+to 2 MB, strict UTF-8 and expected content types. Compressed responses are
+rejected to bound decoding. No articles, images or scripts are fetched.
+
+After source proof, the program saves a private proof bound to the exact project
+and hashes of the downloader, converter, worker and activation code. It records
+the explicit `todoist-files-origin-download.v1` grant, runs the existing service,
+requires a fresh successful service report, enables the timer, and checks active
+state and next trigger. It prints only fixed status/counts. Later authenticated
+runs require the matching private proof; code changes invalidate it and require
+another personal proof. Failure after configuration changes attempts to disable
+both configuration and timer. If systemd rollback fails, the terminal reports
+activation failure and asks the user to check the timer remains disabled.
+
+This handoff has offline regression coverage; the agent does not run the real
+credential-bearing retrieval or enable the timer. The first actual scheduled run
+after personal activation must still be checked separately.

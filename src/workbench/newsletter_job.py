@@ -11,12 +11,12 @@ import re
 from pathlib import Path
 import stat
 import time
-from urllib.parse import urlsplit
 import uuid
 
 import httpx
 
 from .newsletter_inline import VERSION, ConversionError, convert, source_matches
+from .newsletter_download import GRANT, DownloadError, read_html, validate_proof
 
 API = 'https://api.todoist.com/api/v1/'
 
@@ -104,14 +104,15 @@ def atomic_json(path: Path, data: dict):
 
 
 class Remote:
-    def __init__(self, token: str, client: httpx.Client | None = None):
+    def __init__(self, token: str, client: httpx.Client | None = None, *, attachment_auth: bool = False):
         self.token = token
         self.client = client or httpx.Client(timeout=10, trust_env=False, follow_redirects=False)
+        self.attachment_auth = attachment_auth
 
     def request(self, method: str, path: str, **kwargs):
         for attempt in range(3 if method == 'GET' else 1):
             try:
-                result = self.client.request(method, API + path, headers={'Authorization': 'Bearer ' + self.token}, **kwargs)
+                result = self.client.request(method, API + path, headers={'Authorization': 'Bearer ' + self.token}, follow_redirects=False, **kwargs)
             except httpx.HTTPError:
                 if method == 'GET' and attempt < 2:
                     time.sleep(attempt + 1)
@@ -154,24 +155,10 @@ class Remote:
                 for comment in payload['results'] if not comment.get('is_deleted', False)]
 
     def html(self, url: str):
-        parsed = urlsplit(url)
-        if parsed.scheme != 'https' or parsed.netloc != 'files.todoist.com' or not parsed.path.startswith('/user_upload/'):
-            raise JobError('unsafe_attachment_url')
-        # Delivery token stays on the API origin, never on attachments or links.
-        with self.client.stream('GET', url, headers={}) as response:
-            if response.status_code != 200:
-                raise JobError('attachment_unavailable')
-            chunks = []
-            size = 0
-            for chunk in response.iter_bytes():
-                size += len(chunk)
-                if size > 2_000_000:
-                    raise JobError('source_too_large')
-                chunks.append(chunk)
         try:
-            return b''.join(chunks).decode('utf-8')
-        except UnicodeDecodeError:
-            raise JobError('invalid_html_encoding') from None
+            return read_html(self.client, url, token=self.token if self.attachment_auth else None)
+        except DownloadError as error:
+            raise JobError(str(error)) from None
 
     def update(self, task_id: str, description: str):
         return self.request('POST', 'tasks/' + task_id, json={'description': description})
@@ -291,6 +278,15 @@ def once(config_path: Path, *, apply: bool):
     if not directory.is_absolute():
         raise JobError('absolute_state_path_required')
     private_dir(directory)
+    attachment_auth = False
+    if config.get('attachment_grant') is not None:
+        if config['attachment_grant'] != GRANT:
+            raise JobError('invalid_attachment_grant')
+        try:
+            validate_proof(json.loads(protected_read(directory / 'attachment-proof.json')), config['project_id'])
+        except DownloadError:
+            raise JobError('live_attachment_proof_required') from None
+        attachment_auth = True
     with os.fdopen(os.open(directory / 'lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600), 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         token_path = Path(config['token_file']).expanduser()
@@ -311,7 +307,7 @@ def once(config_path: Path, *, apply: bool):
             else:
                 atomic_json(state_file, data)
         with httpx.Client(timeout=10, trust_env=False, follow_redirects=False) as client:
-            counts = process(Remote(token, client), config, state, save, apply=apply)
+            counts = process(Remote(token, client, attachment_auth=attachment_auth), config, state, save, apply=apply)
         report = {'status': 'failed' if counts['failed'] else 'success', 'version': VERSION, 'finished_at': time.time(),
                   'name': 'newsletter-inline', 'exit_code': 1 if counts['failed'] else 0,
                   'ended_at': datetime.now(timezone.utc).isoformat(), **counts}
