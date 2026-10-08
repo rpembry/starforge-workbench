@@ -4,6 +4,7 @@ Operator creates a private verified base/overlay and a bounded transient user
 cgroup before entering this adapter. No host registration/auth is installed.
 """
 import os
+from dataclasses import dataclass
 from pathlib import Path
 import re
 import resource
@@ -59,6 +60,60 @@ def framed_result(raw: bytes, token: str, maximum: int) -> bytes | None:
     return result
 
 
+@dataclass(frozen=True, slots=True)
+class BootProtocol:
+    """Operator-selected framed producer contract; no prompt autodetection."""
+    hostname: str
+
+    def __post_init__(self):
+        if type(self.hostname) is not str or not re.fullmatch('[a-z][a-z0-9-]{0,62}', self.hostname):
+            raise ValueError('Invalid synthetic boot configuration')
+
+
+class BootDetector:
+    """Completed LF records over append-only, bounded console bytes.
+
+    The reserved protocol prefix is emitted only by the controlled producer,
+    not historical logs. This is not authenticated guest identity.
+    """
+    def __init__(self, protocol):
+        if type(protocol) is not BootProtocol:
+            raise ValueError('Invalid synthetic boot configuration')
+        prefix = b'SF_BOOT_V1 ' + protocol.hostname.encode('ascii') + b' '
+        self._login = prefix + b'login_ready'
+        self._shell = prefix + b'shell_ready'
+        self._password = prefix + b'auth_required'
+        self._state = 'login'
+        self._length = 0
+        self._cursor = 0
+
+    def observe(self, raw):
+        """Yield ordered events only after complete records; no timing heuristic."""
+        if type(raw) is not bytes or len(raw) < self._length:
+            raise RuntimeError('Synthetic guest console invalid')
+        self._length = len(raw)
+        while self._state != 'ready':
+            end = raw.find(b'\n', self._cursor)
+            if end < 0:
+                return
+            line = raw[self._cursor:end]
+            if line.endswith(b'\r'):
+                line = line[:-1]
+            self._cursor = end + 1
+            if not line.startswith(b'SF_BOOT_V1 '):
+                continue
+            if self._state == 'login' and line == self._login:
+                self._state = 'shell'
+                yield 'login'
+            elif self._state == 'shell' and line == self._shell:
+                self._state = 'ready'
+                yield 'ready'
+            elif line == self._password or (self._state == 'shell' and line == self._login):
+                raise RuntimeError('Synthetic guest authentication unavailable')
+            else:
+                raise RuntimeError('Synthetic guest console invalid')
+
+
 class SyntheticConsoleTransport:
     """Fixed diagnostics for one freshly created operator-owned test guest.
 
@@ -67,12 +122,14 @@ class SyntheticConsoleTransport:
     fresh overlay before another attempt. It is deliberately unsuitable for
     existing/private guests and supplies no live registration to wb-vm-mcp.
     """
-    def __init__(self, guest: GuestRegistration, policy: SyntheticVMPolicy):
+    def __init__(self, guest: GuestRegistration, policy: SyntheticVMPolicy, *, boot_protocol=None):
         if (type(guest) is not GuestRegistration or guest.transport_ref != 'synthetic-console'
-                or type(policy) is not SyntheticVMPolicy):
+                or type(policy) is not SyntheticVMPolicy
+                or (boot_protocol is not None and type(boot_protocol) is not BootProtocol)):
             raise ValueError('Invalid synthetic guest configuration')
         self._guest = guest
         self._policy = policy
+        self._boot_protocol = boot_protocol
         self._process = None
         self._timer = None
         self._start = None
@@ -127,6 +184,8 @@ class SyntheticConsoleTransport:
     def __enter__(self):
         if self._process is not None:
             raise RuntimeError('Synthetic guest already used')
+        if self._boot_protocol is None:
+            raise RuntimeError('Synthetic guest boot configuration unavailable')
         require_cgroup_bounds()
         self._start = time.monotonic()
         try:
@@ -137,16 +196,13 @@ class SyntheticConsoleTransport:
                                                 preexec_fn=_process_limits, bufsize=0)
             self._timer = threading.Timer(self._policy.lifetime_seconds, self._close_quietly)
             self._timer.start()
-            sent_login = False
+            detector = BootDetector(self._boot_protocol)
             def boot(raw):
-                nonlocal sent_login
-                if b'login:' in raw and not sent_login:
-                    self._write(b'root\n', self._start + self._policy.lifetime_seconds)
-                    sent_login = True
-                if sent_login and b'Password:' in raw:
-                    raise RuntimeError('Synthetic guest authentication unavailable')
-                if re.search(rb'root@[^:\r\n]+:[^\r\n]*#\s*$', raw):
-                    return True
+                for event in detector.observe(raw):
+                    if event == 'login':
+                        self._write(b'root\n', self._start + self._policy.lifetime_seconds)
+                    if event == 'ready':
+                        return True
                 return None
             self._read(self._start + self._policy.lifetime_seconds, 512 * 1024, boot)
             return self
