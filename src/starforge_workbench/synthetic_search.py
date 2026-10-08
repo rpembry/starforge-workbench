@@ -131,7 +131,7 @@ class SearchApprovalBroker:
         if not self.enabled:
             return search_status('disabled')
         try:
-            if type(query) is not str:
+            if type(query) is not str or not 0 < len(query) <= MAX_QUERY_BYTES:
                 raise SearchError()
             payload = query.encode('utf-8', errors='strict')
             if not 0 < len(payload) <= MAX_QUERY_BYTES or not query.strip():
