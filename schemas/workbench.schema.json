@@ -58,6 +58,9 @@
               "opencode"
             ]
           },
+          "codex_mode": {
+            "enum": ["conversation", "agents"]
+          },
           "resume_policy": {
             "enum": [
               "never",

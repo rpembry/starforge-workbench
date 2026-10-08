@@ -19,7 +19,24 @@ test coverage. Interactive attachment remains unbounded.
 
 Runtime state, locks, and exact conversation bindings live under `~/.local/state/starforge-ai-workbench`. The dedicated tmux server is also named `starforge-ai-workbench`. Do not run this copy alongside another installation using that same runtime namespace without first isolating it.
 
+## Codex Agents command center
+
+For an optional persistent command-center tab, add a local context with
+`provider: codex`, `codex_mode: agents`, `resume_policy: never`, and no
+additional directories. Give it its own context ID and title. Then use
+`ai-workbench up CONTEXT` as usual; repeated launches reuse the live tab.
+
+This mode runs `codex app-server daemon start` before `codex agents -C CWD`.
+Daemon startup is bounded and a failure prevents the command center from
+opening. It never restarts or updates a running daemon. The installed Codex
+must support these commands. The command center has no conversation binding
+and does not acquire a checkout lock. Existing conversation contexts retain
+their behavior. Workbench does not start tabs at login; if daemon availability
+at login is desired, configure a private user service to run the same
+idempotent daemon-start command.
+
 ## Mouse scrolling and terminal preferences
+
 
 Ask AIW to configure scrolling when a terminal app behaves differently:
 

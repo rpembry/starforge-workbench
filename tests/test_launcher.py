@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import subprocess
 from unittest.mock import patch
 
 import jsonschema
@@ -70,6 +71,57 @@ class LauncherTests(unittest.TestCase):
                              'AWS_PROFILE':'synthetic', 'GH_TOKEN':'synthetic', 'BASH_ENV':'evil',
                              'LD_PRELOAD':'evil', 'PYTHONPATH':'evil', 'RESTIC_PASSWORD':'synthetic'})
         self.assertEqual(set(env), {'HOME','TERM','PATH'})
+
+    def test_agents_manifest_constraints(self):
+        c = self.data['contexts'][0]
+        c.update(provider='codex', codex_mode='agents', resume_policy='never', risk='local', additional_cwds=[])
+        self.load()
+        for key, value in [('provider', 'claude'), ('resume_policy', 'picker'),
+                           ('risk', 'production'), ('additional_cwds', ['/tmp/example'])]:
+            original = c[key]
+            c[key] = value
+            with self.assertRaises(ValueError):
+                self.load()
+            c[key] = original
+
+    def test_agents_starts_daemon_before_command_center(self):
+        self.c.update(codex_mode='agents', resume_policy='never')
+        with patch.object(cli, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+            self.assertEqual(cli.start_codex_agents(self.c), 0)
+        self.assertEqual(run.call_args_list[0].args[0],
+                         [cli.PROVIDERS['codex'], 'app-server', 'daemon', 'start'])
+        self.assertEqual(run.call_args_list[0].kwargs['timeout'], 30)
+        self.assertEqual(run.call_args_list[1].args[0],
+                         [cli.PROVIDERS['codex'], 'agents', '-C', str(self.path)])
+        with self.assertRaises(ValueError):
+            cli.provider_argv(self.c, 'resume')
+        with patch.object(cli, 'atomic', side_effect=AssertionError('binding written')):
+            with self.assertRaises(ValueError):
+                cli.bind_session(self.c, 'synthetic')
+
+    def test_agents_daemon_failure_does_not_open_command_center(self):
+        self.c.update(codex_mode='agents', resume_policy='never')
+        with patch.object(cli, 'run', return_value=subprocess.CompletedProcess([], 1)) as run:
+            with self.assertRaisesRegex(ValueError, 'daemon start failed'):
+                cli.start_codex_agents(self.c)
+            self.assertEqual(run.call_count, 1)
+        with patch.object(cli, 'run', side_effect=subprocess.TimeoutExpired('synthetic', 30)) as run:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                cli.start_codex_agents(self.c)
+            self.assertEqual(run.call_count, 1)
+
+    def test_agents_menu_skips_conversation_binding_and_checkout_locks(self):
+        self.c.update(codex_mode='agents', resume_policy='never')
+        with patch.object(cli, 'validate_context'), patch.object(cli, 'set_title'), \
+                patch.object(cli.Path, 'cwd', return_value=self.path), \
+                patch.object(cli, 'clean_env', return_value=dict(os.environ)), \
+                patch.object(cli, 'lock', return_value=contextlib.nullcontext()) as lock, \
+                patch.object(cli, 'start_codex_agents', return_value=0) as agents, \
+                patch.object(cli, 'start_codex', side_effect=AssertionError('conversation')), \
+                patch.object(cli, 'checkout_keys', side_effect=AssertionError('checkout lock')):
+            cli.menu(self.c)
+        agents.assert_called_once_with(self.c)
+        lock.assert_called_once_with('provider-'+self.c['id'], blocking=False)
 
     def test_dry_run_never_launches_or_creates_state(self):
         with patch.object(cli, 'STATE', self.path/'absent'), patch.object(cli.subprocess, 'run', side_effect=AssertionError('spawned')):
