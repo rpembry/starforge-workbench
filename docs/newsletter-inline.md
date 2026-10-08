@@ -1,0 +1,107 @@
+# Inline newsletter enrichment (opt-in)
+
+`wb-newsletter-inline` converts full email HTML already attached to an existing
+Todoist task into a readable Markdown task description. It never creates tasks,
+changes their title/project/status, modifies email or forwarding rules, or fetches
+article links. The conversion core is separate from the transport and local job.
+The original attachment remains unchanged. This is full newsletter text, not a
+new summary of the linked articles.
+
+## Authorization and configuration
+
+Install with the optional `newsletter` dependency extra. Personal runtime jobs
+belong under `~/personal-jobs/jobs/newsletter-inline`, with private configuration
+outside Git. No credential discovery, OAuth flow, token copy, unit installation
+or enabling happens automatically. An existing release-note delivery grant does
+not authorize reading or editing this project. Get an explicit persistent grant
+for this worker and its destination before supplying a token or enabling a timer.
+Todoist personal tokens may have account-wide power; configuration checks limit
+the implementation, not the token itself.
+
+A private, owner-only regular file (0600), using synthetic values:
+
+```json
+{
+  "enabled": false,
+  "project_id": "example_newsletters",
+  "credential_grant": "read-newsletter-attachments-and-update-existing-descriptions.v1",
+  "token_file": "/private/reviewed-token.txt",
+  "state_dir": "/private/newsletter-inline-state",
+  "status_file": "/private/job-status/newsletter-inline.json",
+  "max_tasks": 25,
+  "max_seconds": 180
+}
+```
+
+Use an actual alphanumeric project ID. Disabled configuration performs no network
+requests and reads no token. Once access is granted, an enabled run without
+`--apply` previews counts through read-only requests; it creates a private lock
+directory but no backups or receipts. With `--apply`, writes are limited to
+descriptions of existing tasks in that exact project with blank descriptions.
+
+## Identity, preservation, and limits
+
+Each candidate must be incomplete, with a blank description, exactly one HTML
+attachment on a comment belonging to the exact task, a filename exactly matching
+the task title, a dated TLDR heading, and a recognizable newsletter campaign link.
+Forwarded and direct-email attachments are supported. These are routing checks,
+not cryptographic sender authentication; source HTML is untrusted and cannot
+instruct the worker. A campaign forwarded directly may omit its sender envelope.
+The mail-side sender filter remains the operator's separate control.
+
+Before a write, the worker refetches the task and verifies blank description,
+project, completion state, and unchanged title. Todoist has no conditional
+description update: there is a small concurrent-edit race between that GET and
+POST. The worker cannot promise atomic preservation of edits made in that window.
+Nonblank descriptions encountered at either check are left alone. Verified
+receipts prevent rewriting descriptions later edited or cleared by the user.
+
+Script/style/hidden content is removed, literal Markdown metacharacters escaped,
+unsafe URL schemes rejected, and only known newsletter redirect URLs decoded.
+Article URLs are retained as data and never fetched. Images become alternative
+text; no tracking pixels or images are requested for inline conversion.
+The source is limited to 2 MB. Descriptions exceeding 16,384 UTF-16 units fail
+closed with the original attachment retained; there is no silent truncation or
+automatic splitting into comments.
+
+Task scanning is capped at ten pages of 100 tasks; incomplete pagination fails
+closed. Each run considers at most 25 candidates by default, with a time budget
+checked between candidates. Requests have a ten-second timeout. GET failures
+receive at most three attempts. Known pre-write failures have persisted backoff
+of ten minutes up to a day so repeatedly failing inputs cannot starve new work.
+Correcting a failure may still wait for its backoff. Receipts are capped at 10,000
+and are never silently pruned. Bound state to one project and schema version.
+
+## State, uncertainty, and operation
+
+The worker owns a dedicated 0700 directory, 0600 files and a process lock. Before
+writing, it durably backs up the original task, source comment and HTML, desired
+description, then a sending intent. State is atomic and fsynced. Content belongs
+only in private backups; stdout/status reports contain counts and fixed codes.
+Never commit real input, project IDs, attachment URLs, state, or credentials.
+
+Only exact readback of the desired description establishes a verified receipt.
+A URL displayed as its own label may be asynchronously replaced by Todoist's
+resolved page title. Comparison normalizes only labels of those exact URL-as-label
+links; article labels, URLs and all other content still must match. This avoids
+misclassifying ordinary link unfurling as uncertain delivery.
+A timeout, crash, rejection or lost acknowledgement leaves a sending receipt.
+A later run may acknowledge it if the remote description matches its saved hash;
+otherwise it stays held. It is never blindly resubmitted. Other tasks may proceed.
+Manual diagnosis must retain backups and receipts; deleting state can rearm writes.
+There is no exactly-once or atomic compare-and-set claim. The worker never retries
+task creation because it has no creation path.
+
+The example systemd user service/timer keeps systemd as the sole scheduler and
+points to the personal job directory. Install and enable only after authorization,
+dependency installation, configuration review, unit verification and a live
+write/read check. Check timer enabled/active state, exact installed code version,
+`last-run.json`, and at least one actual timer-triggered success before describing
+routine operation as verified. `last-run.json` has status, timestamp, version and
+counts. Ordinary tests use synthetic HTML and mocked transport, never credentials.
+An optional private `status_file` writes `name` and `exit_code` for the existing
+personal job monitor's status-directory convention; it contains no newsletter
+content. Configure its parent directory before installing the service.
+
+Official [Todoist task description limits](https://www.todoist.com/help/todoist/features/add-a-task-description-in-todoist-rOryWIHn)
+and [API documentation](https://developer.todoist.com/api/v1/).

@@ -1,0 +1,15 @@
+[Unit]
+Description=Enrich existing routed newsletters with mobile reading descriptions
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/personal-jobs/jobs/newsletter-inline/.venv/bin/wb-newsletter-inline --config %h/.config/newsletter-inline/config.json --apply
+TimeoutStartSec=5min
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/newsletter-inline %h/.local/state/jobs/status
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
