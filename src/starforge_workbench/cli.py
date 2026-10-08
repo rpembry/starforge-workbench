@@ -812,6 +812,10 @@ def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv and raw_argv[0] == 'titles':
         return titles_main(raw_argv[1:])
+    if raw_argv and raw_argv[0] == 'companion':
+        from starforge_workbench.terminal_companion import main as companion_main
+        return companion_main(raw_argv[1:], load=load, default_manifest=default_manifest,
+                              resolve_context=resolve_connect_context)
     if raw_argv and raw_argv[0] == 'chrome':
         from starforge_workbench.browser import main as browser_main
         return browser_main(raw_argv[1:])
