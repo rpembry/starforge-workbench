@@ -192,6 +192,42 @@ class LauncherTests(unittest.TestCase):
                 cli.start_codex(self.c)
             self.assertEqual(create.call_count, 1)
 
+    def test_deliberate_codex_migration_preserves_old_binding(self):
+        self.c.update(codex_remote_daemon=True, resume_policy='explicit-session')
+        old_id = '11111111-2222-3333-4444-555555555555'
+        new_id = '22222222-2222-3333-4444-555555555555'
+        old = {'id': old_id, 'provider': 'codex', 'cwd': str(self.path),
+               'source_cwd': str(self.path)}
+        from starforge_workbench import codex_daemon
+        with patch.object(cli, 'STATE', self.path), \
+                patch.object(cli, 'validate_context'), \
+                patch.object(cli, 'codex_sessions', side_effect=lambda remote=False: {
+                    new_id if remote else old_id: str(self.path)}), \
+                patch.object(cli, 'codex_thread_running', return_value=False), \
+                patch.object(cli, 'ensure_codex_daemon'), \
+                patch.object(cli, 'codex_instructions', return_value='Synthetic role'), \
+                patch.object(codex_daemon, 'create_thread', return_value=new_id):
+            cli.atomic(self.path/'sessions'/(self.c['id']+'.json'), old)
+            result = cli.migrate_codex_binding(self.c, old_id)
+            self.assertEqual(result['new_id'], new_id)
+            self.assertEqual(cli.read_state(self.path/'legacy-sessions'/(self.c['id']+'-'+old_id+'.json')), old)
+            self.assertEqual(cli.saved_session(self.c)['id'], new_id)
+            self.assertFalse((self.path/'daemon-start'/(self.c['id']+'.json')).exists())
+
+    def test_codex_migration_rejects_running_source(self):
+        self.c.update(codex_remote_daemon=True, resume_policy='explicit-session')
+        old_id = '11111111-2222-3333-4444-555555555555'
+        old = {'id': old_id, 'provider': 'codex', 'cwd': str(self.path),
+               'source_cwd': str(self.path)}
+        with patch.object(cli, 'STATE', self.path), \
+                patch.object(cli, 'codex_sessions', return_value={old_id: str(self.path)}), \
+                patch.object(cli, 'codex_thread_running', return_value=True), \
+                patch.object(cli, 'ensure_codex_daemon', side_effect=AssertionError('daemon start')):
+            cli.atomic(self.path/'sessions'/(self.c['id']+'.json'), old)
+            with self.assertRaisesRegex(ValueError, 'still running'):
+                cli.migrate_codex_binding(self.c, old_id)
+            self.assertEqual(cli.read_state(self.path/'sessions'/(self.c['id']+'.json')), old)
+
     def test_agents_menu_skips_conversation_binding_and_checkout_locks(self):
         self.c.update(codex_mode='agents', resume_policy='never')
         with patch.object(cli, 'validate_context'), patch.object(cli, 'set_title'), \

@@ -634,6 +634,54 @@ def saved_session(c):
             raise ValueError('Saved provider session is missing or its directory changed unexpectedly')
     return data
 
+
+def codex_thread_running(identity):
+    for proc in Path('/proc').iterdir():
+        try:
+            if proc.name.isdigit() and (proc/'comm').read_text().strip() == 'codex':
+                if identity in (proc/'cmdline').read_bytes().decode().split('\0'):
+                    return True
+        except (OSError, UnicodeError):
+            continue
+    return False
+
+
+def migrate_codex_binding(c, expected_old_id):
+    """Deliberately replace an exited local thread with a seeded daemon thread."""
+    if c['provider'] != 'codex' or not c.get('codex_remote_daemon'):
+        raise ValueError('Codex daemon mode is required for migration')
+    with lock('provider-'+c['id'], blocking=False):
+        path = STATE/'sessions'/(c['id']+'.json')
+        old = read_state(path)
+        if (not old or old.get('transport') == 'daemon' or old.get('id') != expected_old_id
+                or old.get('provider') != 'codex' or old.get('cwd') != str(cwd(c))):
+            raise ValueError('Exact local Codex binding does not match migration request')
+        if codex_sessions().get(expected_old_id) not in {old.get('source_cwd'), old['cwd']}:
+            raise ValueError('Original local Codex thread is missing or moved')
+        state = live(c)
+        if (state and not state['dead'] and provider_pids(c, state['pane_pid'])) or codex_thread_running(expected_old_id):
+            raise ValueError('Original Codex provider is still running; save drafts and exit it first')
+        backup = STATE/'legacy-sessions'/(c['id']+'-'+expected_old_id+'.json')
+        if backup.exists():
+            if read_state(backup) != old:
+                raise ValueError('Legacy binding backup differs; inspect it before migration')
+        else:
+            atomic(backup, old)
+        intent = STATE/'daemon-start'/(c['id']+'.json')
+        if intent.exists():
+            raise ValueError('Prior daemon thread creation is uncertain; inspect before migration')
+        ensure_codex_daemon(c)
+        instructions = codex_instructions(c)
+        atomic(intent, {'context_id': c['id'], 'old_id': expected_old_id,
+                        'cwd': str(cwd(c))})
+        from starforge_workbench.codex_daemon import create_thread
+        identity = create_thread(cwd(c), c['title'], instructions,
+                                 'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write')
+        bind_session(c, identity)
+        intent.unlink()
+        return {'old_id': expected_old_id, 'new_id': identity,
+                'legacy_backup': str(backup)}
+
 def remember_created(c, before):
     candidates = [identity for identity, directory in provider_sessions(c).items()
                   if identity not in before and directory == str(cwd(c))]
@@ -654,15 +702,8 @@ def start_codex(c):
         stack.enter_context(lock('provider-'+c['id'], blocking=False))
         data = saved_session(c)
         # The same UUID may still be running in a terminal with a different label.
-        if data:
-            for proc in Path('/proc').iterdir():
-                try:
-                    if proc.name.isdigit() and (proc/'comm').read_text().strip() == c['provider']:
-                        args = (proc/'cmdline').read_bytes().decode().split('\0')
-                        if data['id'] in args:
-                            raise ValueError('This conversation is already running; use its existing terminal')
-                except (OSError, UnicodeError):
-                    continue
+        if data and c['provider'] == 'codex' and codex_thread_running(data['id']):
+            raise ValueError('This conversation is already running; use its existing terminal')
         keys = checkout_keys(c)
         reject_external_agents(keys)
         for key in keys:
@@ -674,9 +715,10 @@ def start_codex(c):
             if not data:
                 if intent.exists():
                     raise ValueError(c['id']+': prior daemon thread creation is uncertain; inspect and bind an exact ID before retrying')
+                instructions = codex_instructions(c)
                 atomic(intent, {'context_id': c['id'], 'cwd': str(cwd(c))})
                 from starforge_workbench.codex_daemon import create_thread
-                identity = create_thread(cwd(c), c['title'], codex_instructions(c),
+                identity = create_thread(cwd(c), c['title'], instructions,
                                          'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write')
                 bind_session(c, identity)
                 intent.unlink()
@@ -914,10 +956,13 @@ def main(argv=None):
     if raw_argv and raw_argv[0] == 'skills':
         from starforge_workbench.skills_install import main as skills_main
         return skills_main(raw_argv[1:])
+    if raw_argv and raw_argv[0] == 'handoff':
+        from starforge_workbench.agent_roster import main as handoff_main
+        return handoff_main(raw_argv[1:])
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--manifest', type=Path, default=default_manifest())
     p.add_argument('--dry-run', action='store_true')
-    p.add_argument('command', choices=['doctor','list','plan','up','attach','c','connect','status','bind','_attach','_menu'])
+    p.add_argument('command', choices=['doctor','list','plan','up','attach','c','connect','status','bind','migrate-codex','_attach','_menu'])
     p.add_argument('contexts', nargs='*')
     p.add_argument('--headless', action='store_true', help='Create/reuse detached menu sessions without windows')
     p.add_argument('--session-id')
@@ -931,7 +976,7 @@ def main(argv=None):
         return
     byid = {c['id']: c for c in data['contexts']}
     selected = [byid[k] for k in args.contexts] if args.contexts else list(byid.values())
-    if args.command in ['attach','_attach','_menu','bind'] and len(args.contexts) != 1:
+    if args.command in ['attach','_attach','_menu','bind','migrate-codex'] and len(args.contexts) != 1:
         raise ValueError('Exactly one context ID required')
     if args.dry_run or args.command in ['list','plan']:
         print(json.dumps(launcher_plan(selected), indent=2))
@@ -991,6 +1036,10 @@ def main(argv=None):
             raise ValueError('Provide an explicit session ID via --session-id')
         bind_session(c, args.session_id)
         print('Saved verified conversation binding')
+    elif args.command == 'migrate-codex':
+        if not args.session_id:
+            raise ValueError('Pass the exact existing thread with --session-id')
+        print(json.dumps(migrate_codex_binding(selected[0], args.session_id)))
 
 if __name__ == '__main__':
     try:

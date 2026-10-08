@@ -49,6 +49,28 @@ conversation does not reload it. Keep secrets out of this file: local-mode
 text is passed as a process argument and may be visible to other processes. Codex still
 discovers ordinary `AGENTS.md` files from the working directory as usual.
 
+For explicit specialist handoffs, keep a private mode-0600 YAML roster outside
+the repository, for example at
+`~/.config/starforge-ai-workbench/agent-roster.yaml`:
+
+```yaml
+version: 1
+agents:
+  - context_id: example-support
+    description: Handles local system diagnostics and maintenance.
+```
+
+Only listed, enabled, daemon-backed Codex contexts can receive a handoff.
+`ai-workbench handoff list` shows the roster; `ai-workbench handoff preview
+example-support` returns the exact current session ID and idle/busy status.
+After choosing one target, write the request to a private mode-0600 file and
+call `ai-workbench handoff send example-support --session-id ID
+--message-file FILE --key STABLE-UNIQUE-KEY`. The key prevents a retry from
+submitting the same request twice. A timeout or crash after submission begins
+is recorded as uncertain; inspect the target conversation before making a
+new request. The command returns acceptance by the daemon, not completion of
+the work. Remove the request file when it is no longer needed.
+
 For a conversation that must share the local Codex app-server daemon with the
 Agents command center, opt in with `codex_remote_daemon: true`,
 `resume_policy: explicit-session`, and no additional directories. Workbench
@@ -62,6 +84,16 @@ possible duplicate. Other contexts retain their current transport. The Codex
 CLI must support local Unix-socket remote mode. A remote conversation's turns
 are visible to other authorized clients of that daemon, so use this only when
 shared control is intended.
+
+To migrate one existing local context, save any draft and exit its Codex TUI,
+then enable daemon mode in the private manifest. Run
+`ai-workbench migrate-codex CONTEXT --session-id OLD-ID`. The command checks
+that the exact old provider process has exited, saves a private backup of its
+binding, creates a new named daemon thread with the context's current role
+instructions, and binds it. The old Codex conversation remains in Codex's
+history. Reopen the context with `ai-workbench up CONTEXT`. A failed or
+uncertain migration does not retry thread creation automatically; inspect the
+private creation intent and daemon thread list before resolving it.
 
 ## Mouse scrolling and terminal preferences
 
