@@ -671,10 +671,11 @@ def migrate_codex_binding(c, expected_old_id):
         if intent.exists():
             raise ValueError('Prior daemon thread creation is uncertain; inspect before migration')
         ensure_codex_daemon(c)
+        instructions = codex_instructions(c)
         atomic(intent, {'context_id': c['id'], 'old_id': expected_old_id,
                         'cwd': str(cwd(c))})
         from starforge_workbench.codex_daemon import create_thread
-        identity = create_thread(cwd(c), c['title'], codex_instructions(c),
+        identity = create_thread(cwd(c), c['title'], instructions,
                                  'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write')
         bind_session(c, identity)
         intent.unlink()
@@ -714,9 +715,10 @@ def start_codex(c):
             if not data:
                 if intent.exists():
                     raise ValueError(c['id']+': prior daemon thread creation is uncertain; inspect and bind an exact ID before retrying')
+                instructions = codex_instructions(c)
                 atomic(intent, {'context_id': c['id'], 'cwd': str(cwd(c))})
                 from starforge_workbench.codex_daemon import create_thread
-                identity = create_thread(cwd(c), c['title'], codex_instructions(c),
+                identity = create_thread(cwd(c), c['title'], instructions,
                                          'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write')
                 bind_session(c, identity)
                 intent.unlink()

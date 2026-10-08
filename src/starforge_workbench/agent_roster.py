@@ -82,6 +82,8 @@ def preview(manifest, roster_path, context_id):
 
 
 def send(manifest, roster_path, context_id, expected_session_id, message, key):
+    if not isinstance(context_id, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,47}', context_id):
+        raise ValueError('Select a valid roster context ID')
     if not KEY.fullmatch(key):
         raise ValueError('Use a stable 16..128 character handoff key')
     if not isinstance(message, str) or not message.strip() or len(message) > 4000:
@@ -142,4 +144,3 @@ def main(argv=None):
         result = send(args.manifest, args.roster, args.context_id, args.session_id,
                       _private_text(args.message_file, 8192), args.key)
     print(json.dumps(result))
-    return result

@@ -105,3 +105,11 @@ def test_busy_or_changed_target_is_not_sent(tmp_path):
         assert agent_roster.send(manifest, roster, 'synthetic-support', SESSION,
                                  'Synthetic request', KEY)['reason'] == 'binding_changed'
         start.assert_not_called()
+
+
+def test_handoff_rejects_context_path_before_lock(tmp_path):
+    manifest, roster = setup(tmp_path)
+    with patch.object(cli, 'STATE', tmp_path/'state'), \
+            patch.object(cli, 'lock', side_effect=AssertionError('lock reached')):
+        with pytest.raises(ValueError, match='valid roster context'):
+            agent_roster.send(manifest, roster, '../other', SESSION, 'Synthetic', KEY)
