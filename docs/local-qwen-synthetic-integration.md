@@ -124,10 +124,12 @@ HTTP/1.1 JSON responses requiring connection close; an optional single
 Content-Length must match the complete received body. Requests explicitly send
 Connection: close. Keep-alive framing remains unsupported, even with a length;
 failure to close within the deadline denies. The existing 16 KiB cap includes headers; the
-receive deadline applies across split reads. Duplicate/invalid/mismatched
+absolute deadline supplies the remaining budget before connect, send and every
+receive, including split reads. Duplicate/invalid/mismatched
 lengths, malformed headers/status, encoded bodies and every Transfer-Encoding
 (including chunked or identity) are explicitly unsupported and produce the fixed
-LocalModelError. Non-JSON NaN/Infinity constants also deny. Chunked decoding,
+LocalModelError. Non-JSON NaN/Infinity constants and floating-point overflow
+(including nested JSON numbers such as 1e400) also deny during parsing. Chunked decoding,
 compression, streaming and general HTTP
 transport are not added. JSON/body and socket failures tested here also produce
 the same fixed helper error rather than server-controlled exception text.

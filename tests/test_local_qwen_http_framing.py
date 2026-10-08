@@ -127,11 +127,73 @@ def test_ignored_close_request_keepalive_is_explicitly_unsupported(monkeypatch, 
 
 def test_total_deadline_applies_even_to_split_supported_body(monkeypatch):
     stream = install(monkeypatch, fixed(), step=1)
-    now = iter([0, 0, 0.9, 1.01])
+    now = iter([0, 0, 0, 0, 0.9, 1.01])
     monkeypatch.setattr(m.time, 'monotonic', lambda: next(now))
     with pytest.raises(m.LocalModelError):
         m.unix_request(Path('/synthetic-owned.sock'), '/health', timeout=1)
     assert stream.closed and stream.timeouts[-1] <= 0.11
+
+
+@pytest.mark.parametrize('phase', ['connect', 'send', 'recv'])
+def test_each_blocking_phase_uses_remaining_deadline(monkeypatch, phase, capsys):
+    stream = install(monkeypatch, fixed(), step=1)
+    clock = [0.0]
+    phases = []
+    monkeypatch.setattr(m.time, 'monotonic', lambda: clock[0])
+    def block(name, duration):
+        phases.append(name)
+        budget = stream.timeouts[-1]
+        if duration > budget:
+            clock[0] += budget
+            raise TimeoutError('PRIVATE_DEADLINE_CANARY')
+        clock[0] += duration
+    def connect(path):
+        assert path == '/synthetic-owned.sock'
+        block('connect', 0.08 if phase == 'send' else 0.01)
+    def send(payload):
+        block('send', 0.08 if phase == 'send' else 0.01)
+        stream.request = payload
+    original = stream.recv
+    def recv(limit):
+        block('recv', 0.03)
+        return original(limit)
+    monkeypatch.setattr(stream, 'connect', connect)
+    monkeypatch.setattr(stream, 'sendall', send)
+    monkeypatch.setattr(stream, 'recv', recv)
+    if phase == 'connect':
+        monkeypatch.setattr(stream, 'connect', lambda path: block('connect', 0.16))
+    with pytest.raises(m.LocalModelError, match='^Synthetic local inference unavailable$'):
+        m.unix_request(Path('/synthetic-owned.sock'), '/health', timeout=0.1)
+    assert clock[0] == pytest.approx(0.1) and stream.closed
+    assert phases[-1] == phase
+    if phase == 'send':
+        assert stream.timeouts[-1] == pytest.approx(0.02)
+    assert capsys.readouterr() == ('', '')
+
+
+@pytest.mark.parametrize('timeout', [0, -1, float('nan'), float('inf'), True, '1'])
+def test_invalid_timeout_denies_before_socket_creation(monkeypatch, timeout):
+    monkeypatch.setattr(m.socket, 'socket', lambda *args: pytest.fail('socket must not be created'))
+    with pytest.raises(m.LocalModelError):
+        m.unix_request(Path('/synthetic-owned.sock'), '/health', timeout=timeout)
+
+
+@pytest.mark.parametrize('body', [b'1e400', b'-1e400', b'{"nested":[{"number":1e400}]}',
+    b'[0,[-1e9999]]'])
+def test_numeric_overflow_denies_recursively(monkeypatch, body, capsys, caplog):
+    stream = install(monkeypatch, fixed(body), step=3)
+    with pytest.raises(m.LocalModelError, match='^Synthetic local inference unavailable$'):
+        m.unix_request(Path('/synthetic-owned.sock'), '/health')
+    assert stream.closed and capsys.readouterr() == ('', '') and not caplog.text
+
+
+@pytest.mark.parametrize('body, expected', [
+    (b'1e308', 1e308), (b'-1e308', -1e308), (b'0e400', 0.0), (b'1e-400', 0.0),
+    (b'{"nested":[1.25,"1e400",123]}', {'nested': [1.25, '1e400', 123]})])
+def test_finite_numbers_and_overflow_text_remain_supported(monkeypatch, body, expected):
+    stream = install(monkeypatch, fixed(body))
+    assert m.unix_request(Path('/synthetic-owned.sock'), '/health') == expected
+    assert stream.closed
 
 
 def test_chunked_completion_adapter_cleanup_remains_fail_closed(fake_lifecycle, monkeypatch, capsys, caplog):

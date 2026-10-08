@@ -6,6 +6,7 @@ the shared Ollama service is never contacted or modified.
 """
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -109,7 +110,12 @@ def _response_json(response):
             raise LocalModelError()
         def reject_constant(_):
             raise LocalModelError()
-        return json.loads(data, parse_constant=reject_constant)
+        def finite_float(value):
+            number = float(value)
+            if not math.isfinite(number):
+                raise LocalModelError()
+            return number
+        return json.loads(data, parse_constant=reject_constant, parse_float=finite_float)
     except Exception:
         raise LocalModelError() from None
 
@@ -121,17 +127,22 @@ def unix_request(path, route, body=None, timeout=1):
     request = (f'{method} {route} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n'
                f'Content-Type: application/json\r\nContent-Length: {len(payload)}\r\n\r\n').encode()+payload
     try:
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            raise LocalModelError()
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
             deadline = time.monotonic()+timeout
-            stream.settimeout(timeout)
-            stream.connect(str(path))
-            stream.sendall(request)
-            response = bytearray()
-            while True:
+            def refresh_timeout():
                 remaining = deadline-time.monotonic()
                 if remaining <= 0:
                     raise LocalModelError()
                 stream.settimeout(remaining)
+            refresh_timeout()
+            stream.connect(str(path))
+            refresh_timeout()
+            stream.sendall(request)
+            response = bytearray()
+            while True:
+                refresh_timeout()
                 part = stream.recv(min(4096, MAX_RESPONSE+1-len(response)))
                 if not part:
                     break
