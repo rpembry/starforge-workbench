@@ -67,6 +67,8 @@ def load(path):
         if c.get('codex_mode') == 'agents' and (c['provider'] != 'codex' or
                 c['resume_policy'] != 'never' or c['risk'] != 'local' or c['additional_cwds']):
             raise ValueError('Codex Agents requires a local Codex context with never resume and no additional directories')
+        if c.get('codex_remote_daemon') and (c['provider'] != 'codex' or c.get('codex_mode') == 'agents'):
+            raise ValueError('Codex daemon mode requires a Codex conversation context')
         if c.get('codex_instructions_file') and (c['provider'] != 'codex' or c.get('codex_mode') == 'agents'):
             raise ValueError('Codex instructions file requires a bindable Codex conversation context')
     return data
@@ -318,7 +320,7 @@ def retry_start(c, operation):
 
 
 def fingerprint(c):
-    binding = {key: value for key, value in c.items() if key != 'codex_instructions_file'}
+    binding = {key: value for key, value in c.items() if key not in {'codex_instructions_file', 'codex_remote_daemon'}}
     return hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
 
 def validate_context(c):
@@ -655,6 +657,8 @@ def start_codex(c):
         for key in keys:
             stack.enter_context(lock('checkout-'+hashlib.sha256(key.encode()).hexdigest(), blocking=False))
         before = provider_sessions(c) if not data else None
+        if c.get('codex_remote_daemon'):
+            ensure_codex_daemon(c)
         stop = threading.Event()
         errors = []
         def remember():
@@ -715,6 +719,8 @@ def provider_argv(c, choice):
         if c.get('codex_mode') == 'agents':
             return [exe, 'agents', '-C', str(cwd(c))]
         base = [exe, '-c', 'check_for_update_on_startup=false', '-C', str(cwd(c)), '-s', 'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write', '-a', 'on-request']
+        if c.get('codex_remote_daemon'):
+            base += ['--remote', 'unix://']
         instructions = codex_instructions(c)
         if instructions is not None:
             base += ['-c', 'developer_instructions='+json.dumps(instructions, ensure_ascii=False)]
@@ -758,12 +764,16 @@ def provider_argv(c, choice):
         return [exe, 'run', 'qwen3:8b']
     raise ValueError('Unsupported provider operation')
 
-def start_codex_agents(c):
+def ensure_codex_daemon(c):
     """Ensure the shared daemon exists without restarting any running work."""
     result = run([PROVIDERS['codex'], 'app-server', 'daemon', 'start'],
                  cwd=cwd(c), timeout=30)
     if result.returncode:
-        raise ValueError(c['id']+': Codex daemon start failed; command center was not opened')
+        raise ValueError(c['id']+': Codex daemon start failed; conversation was not opened')
+
+
+def start_codex_agents(c):
+    ensure_codex_daemon(c)
     return run(provider_argv(c, 'new'), cwd=cwd(c)).returncode
 
 

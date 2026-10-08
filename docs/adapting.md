@@ -46,6 +46,16 @@ does not reload it. Keep secrets out of this file: the text is passed as a
 process argument and may be visible to other local processes. Codex still
 discovers ordinary `AGENTS.md` files from the working directory as usual.
 
+For a conversation that must share the local Codex app-server daemon with the
+Agents command center, opt in with `codex_remote_daemon: true`. Workbench
+starts the daemon if needed, then opens or resumes the exact Codex thread
+through `--remote unix://`. The saved thread binding is unchanged; an existing
+local TUI must exit before the next launcher resume takes the new route.
+Other contexts continue to use their current transport. The daemon and Codex
+CLI must support the local Unix-socket remote mode. A remote conversation's
+turns may be visible to other authorized clients of that daemon, so use this
+only when shared control is intended.
+
 ## Mouse scrolling and terminal preferences
 
 

@@ -137,6 +137,27 @@ class LauncherTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'daemon start failed'):
                 cli.start_codex_agents(self.c)
             self.assertEqual(run.call_count, 1)
+
+    def test_daemon_backed_codex_conversation_is_opt_in_and_preserves_binding(self):
+        original = cli.fingerprint(self.c)
+        self.c['codex_remote_daemon'] = True
+        self.assertEqual(cli.fingerprint(self.c), original)
+        for choice in ('new', 'picker'):
+            args = cli.provider_argv(self.c, choice)
+            self.assertEqual(args[args.index('--remote')+1], 'unix://')
+        with patch.object(cli, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+            cli.ensure_codex_daemon(self.c)
+            self.assertEqual(run.call_args.args[0], [cli.PROVIDERS['codex'], 'app-server', 'daemon', 'start'])
+            self.assertEqual(run.call_args.kwargs['timeout'], 30)
+        self.data['contexts'][0]['codex_remote_daemon'] = True
+        self.load()
+        self.data['contexts'][0]['provider'] = 'claude'
+        with self.assertRaisesRegex(ValueError, 'requires a Codex conversation context'):
+            self.load()
+        self.data['contexts'][0]['provider'] = 'codex'
+        self.data['contexts'][0].update(codex_mode='agents', resume_policy='never')
+        with self.assertRaisesRegex(ValueError, 'requires a Codex conversation context'):
+            self.load()
         with patch.object(cli, 'run', side_effect=subprocess.TimeoutExpired('synthetic', 30)) as run:
             with self.assertRaises(subprocess.TimeoutExpired):
                 cli.start_codex_agents(self.c)
