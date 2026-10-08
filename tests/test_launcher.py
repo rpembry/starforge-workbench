@@ -149,6 +149,8 @@ class LauncherTests(unittest.TestCase):
             args = cli.provider_argv(self.c, 'resume')
         self.assertEqual(args[args.index('--remote')+1], 'unix://')
         self.assertEqual(args[-2:], ['resume', 'synthetic'])
+        self.assertNotIn('-s', args)
+        self.assertNotIn('-a', args)
         with patch.object(cli, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
             cli.ensure_codex_daemon(self.c)
             self.assertEqual(run.call_args.args[0], [cli.PROVIDERS['codex'], 'app-server', 'daemon', 'start'])
