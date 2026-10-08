@@ -35,6 +35,14 @@ their behavior. Workbench does not start tabs at login; if daemon availability
 at login is desired, configure a private user service to run the same
 idempotent daemon-start command.
 
+For opt-in Codex saved-name synchronization, add `codex_title_sync: practical`
+to a bindable Codex context in the private manifest. The launcher checks the
+exact binding after `up` or `bind`; it only auto-renames unnamed threads or
+threads whose current name matches a verified prior Workbench rename. Existing
+custom names need a one-time reviewed `titles preview` and selected `titles
+apply`. See [Codex title reconciliation](codex-title-reconciliation.md) for the
+non-atomic provider limitation, manual refresh, and recovery rules.
+
 ## Mouse scrolling and terminal preferences
 
 

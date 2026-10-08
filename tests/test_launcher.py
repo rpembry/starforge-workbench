@@ -53,6 +53,42 @@ class LauncherTests(unittest.TestCase):
         self.data['shell_command'] = 'unreviewed'
         with self.assertRaises(jsonschema.ValidationError): self.load()
 
+    def test_codex_title_sync_is_opt_in_and_codex_only(self):
+        self.assertNotIn('codex_title_sync', self.load()['contexts'][0])
+        self.data['contexts'][0]['codex_title_sync'] = 'practical'
+        self.assertEqual(self.load()['contexts'][0]['codex_title_sync'], 'practical')
+        self.data['contexts'][0]['provider'] = 'claude'
+        with self.assertRaisesRegex(ValueError, 'requires a bindable Codex conversation context'):
+            self.load()
+
+    def test_enabling_title_sync_preserves_existing_tmux_binding(self):
+        before = cli.fingerprint(self.c)
+        self.c['codex_title_sync'] = 'practical'
+        self.assertEqual(cli.fingerprint(self.c), before)
+
+    def test_verified_title_reconfiguration_preserves_managed_pane(self):
+        prior = copy.deepcopy(self.c)
+        changed = copy.deepcopy(self.c)
+        changed['title'] = 'Renamed tab'
+        with patch.object(cli, 'STATE', self.path), patch.object(cli, 'live', return_value={'identity': '$3', 'dead': False}) as live, patch.object(cli, 'tmux') as tmux:
+            cli.remember_context_config(prior)
+            cli.retitle_verified_context(changed)
+            self.assertEqual(cli.read_state(self.path/'context-config'/f'{self.c["id"]}.json'), changed)
+        self.assertEqual(live.call_args_list[0].args[0], prior)
+        self.assertEqual(live.call_args_list[1].args[0], changed)
+        self.assertEqual(tmux.call_args_list[0].args, ('set-option', '-t', '$3', 'set-titles-string', 'Renamed tab'))
+        self.assertEqual(tmux.call_args_list[1].args, ('set-option', '-t', '$3', '@sfwb_binding', cli.fingerprint(changed)))
+
+    def test_reconfiguration_rejects_other_changes_before_tmux_write(self):
+        prior = copy.deepcopy(self.c)
+        changed = copy.deepcopy(self.c)
+        changed['title'] = 'Renamed tab'
+        changed['cwd'] = '/synthetic/other'
+        with patch.object(cli, 'STATE', self.path), patch.object(cli, 'tmux', side_effect=AssertionError('must not mutate')):
+            cli.remember_context_config(prior)
+            with self.assertRaisesRegex(ValueError, 'beyond its title'):
+                cli.retitle_verified_context(changed)
+
     def test_enabled_production_uses_workspace_write_and_missing_cwd_rejected(self):
         self.data['contexts'][0]['risk'] = 'production'
         production = self.load()['contexts'][0]
@@ -124,7 +160,7 @@ class LauncherTests(unittest.TestCase):
         lock.assert_called_once_with('provider-'+self.c['id'], blocking=False)
 
     def test_dry_run_never_launches_or_creates_state(self):
-        with patch.object(cli, 'STATE', self.path/'absent'), patch.object(cli.subprocess, 'run', side_effect=AssertionError('spawned')):
+        with patch.object(cli, 'default_manifest', return_value=ROOT/'config/workbench.example.yaml'), patch.object(cli, 'STATE', self.path/'absent'), patch.object(cli.subprocess, 'run', side_effect=AssertionError('spawned')):
             with contextlib.redirect_stdout(io.StringIO()):
                 cli.main(['--dry-run','up'])
         self.assertFalse((self.path/'absent').exists())
@@ -321,10 +357,27 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(calls[1][-2:], ['resume', identity])
 
     def test_one_context_failure_does_not_block_other_contexts(self):
-        with patch.object(cli, 'up', side_effect=[ValueError('fixture startup failure'), None]) as up:
+        with patch.object(cli, 'default_manifest', return_value=ROOT/'config/workbench.example.yaml'), patch.object(cli, 'up', side_effect=[ValueError('fixture startup failure'), None]) as up:
             with self.assertRaisesRegex(ValueError, 'Some contexts'):
                 cli.main(['up', 'ai-workbench', 'claude-code', '--headless'])
         self.assertEqual(up.call_count, 2)
+
+    def test_up_attempts_title_sync_only_after_successful_launch(self):
+        manifest = self.path/'manifest.yaml'
+        self.data['contexts'][0]['codex_title_sync'] = 'practical'
+        manifest.write_text(yaml.safe_dump(self.data))
+        with patch.object(cli, 'up') as up, patch.object(cli, 'sync_codex_title', return_value={'status': 'already_matched'}) as sync, contextlib.redirect_stdout(io.StringIO()):
+            cli.main(['--manifest', str(manifest), 'up', 'ai-workbench', '--headless'])
+        up.assert_called_once()
+        sync.assert_called_once()
+
+    def test_title_sync_failure_does_not_fail_successful_up(self):
+        manifest = self.path/'manifest.yaml'
+        self.data['contexts'][0]['codex_title_sync'] = 'practical'
+        manifest.write_text(yaml.safe_dump(self.data))
+        with patch.object(cli, 'up') as up, patch.object(cli, 'sync_codex_title', return_value={'status': 'deferred', 'reason': 'synthetic_unavailable'}), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            cli.main(['--manifest', str(manifest), 'up', 'ai-workbench', '--headless'])
+        up.assert_called_once()
 
     def test_title_failure_does_not_prevent_codex_start(self):
         with patch.object(cli, 'run', side_effect=FileNotFoundError), patch.object(cli, 'validate_context'), patch.object(cli.Path, 'cwd', return_value=self.path), patch.object(cli, 'start_codex', return_value=0) as start:

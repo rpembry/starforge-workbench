@@ -340,6 +340,26 @@ class Reconciler:
     def status(self, plan_id):
         return self._public(self._load_plan(plan_id))
 
+    def sync(self, context_id):
+        """Sync a blank or previously Workbench-named thread; preserve custom names."""
+        row = self._snapshot([context_id])[0]
+        if row['status'] in ('already_matched', 'conflict'):
+            return {'context': context_id, 'status': row['status'], 'reason': row['reason']}
+        if row['status'] == 'needs_choice':
+            path = self.state / 'managed' / (context_id + '.json')
+            try:
+                managed = _read(path)
+            except FileNotFoundError:
+                managed = None
+            if not managed or managed.get('thread_id') != row['thread_id'] or managed.get('written_title') != row['current_title']:
+                return {'context': context_id, 'status': 'needs_review', 'reason': 'custom_or_changed_title'}
+        plan = self.preview([context_id])
+        fresh = plan['rows'][0]
+        if fresh['status'] not in ('eligible', 'needs_choice'):
+            return {'context': context_id, 'status': fresh['status'], 'reason': fresh['reason']}
+        result = self.apply(plan['plan_id'], selected=[context_id], mode='practical', confirm_non_atomic=True)
+        return {'context': context_id, 'plan_id': plan['plan_id'], **result['results'][context_id]}
+
     def apply(self, plan_id, selected=None, all_eligible=False, mode='strict', confirm_non_atomic=False):
         if bool(selected) == bool(all_eligible):
             raise ValueError('Select exact context IDs or all eligible rows')
@@ -410,6 +430,11 @@ class Reconciler:
                                              'previous_title': old['current_title'], 'desired_title': old['desired_title'],
                                              'checked_at': _now(), 'mode': mode, **result}
                 _write(self.state / (plan_id + '.json'), plan)
+                if result['status'] == 'applied':
+                    evidence = plan['verified_writes'][identity]
+                    _write(self.state / 'managed' / (identity + '.json'),
+                           {'thread_id': evidence['thread_id'], 'written_title': evidence['written_title'],
+                            'verified_at': evidence['verified_at']})
                 if sent and result['status'] != 'unknown':
                     self._clear_intent(old['thread_id'])
             return self._public(plan)
