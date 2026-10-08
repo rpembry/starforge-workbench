@@ -75,7 +75,7 @@ def test_active_editor_refuses_without_touching_pending(isolated,tmp_path,monkey
 def test_queue_refuses_replacement_and_stale_receipt_replay(isolated,tmp_path,monkeypatch):
     p=source(tmp_path);first=editor.queue_dictation(p);pending=editor.pending_dir()/'dictation.json'
     before=pending.read_bytes()
-    with pytest.raises(FileExistsError):editor.queue_dictation(p)
+    with pytest.raises(editor.PendingDictationExists):editor.queue_dictation(p)
     assert pending.read_bytes()==before
     monkeypatch.setattr(editor,'open_editor',lambda *_:0)
     editor.run();receipt=(editor.pending_dir()/'handoff.json').read_bytes()
@@ -162,3 +162,19 @@ def test_vscode_readable_settings_rewrite_in_private_profile_is_supported(isolat
     settings.chmod(0o644)
     assert editor.open_editor(p,tmp_path)==0 and len(calls)==2
     assert settings.stat().st_mode & 0o777 == 0o600
+
+
+def test_finished_dictation_collision_reports_specific_reason_and_keeps_both(isolated,tmp_path,monkeypatch,capsys):
+    old=source(tmp_path,b'SYNTHETIC older draft');operation=editor.queue_dictation(old)
+    pending=editor.pending_dir()/'dictation.json';before=pending.read_bytes()
+    newer=tmp_path/'newer.txt';newer.write_bytes(b'SYNTHETIC completed newer draft');newer.chmod(0o600)
+    notes=[];monkeypatch.setattr(editor,'notify',notes.append)
+    monkeypatch.setattr(editor.sys,'argv',['edit-clipboard','--queue-dictation',str(newer)])
+    assert editor.main()==1
+    assert notes==['Pending dictation already exists; completed draft and existing work preserved.']
+    assert pending.read_bytes()==before
+    assert editor.pending_record(pending)['id']==operation
+    assert newer.read_bytes()==b'SYNTHETIC completed newer draft'
+    assert not list(editor.pending_dir().glob('.queue-*'))
+    assert not (editor.pending_dir()/'handoff.json').exists()
+    assert capsys.readouterr().out==''

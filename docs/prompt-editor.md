@@ -21,7 +21,10 @@ edit-clipboard --queue-dictation /absolute/private/completed-draft.txt
 
 The helper reads only that selected private owned regular file, publishes one
 immutable pending record atomically without replacement, and prints its random
-operation ID. If pending dictation already exists, it refuses replacement.
+operation ID. If pending dictation already exists, it refuses replacement and emits a specific
+collision notification. The newer completed source file remains untouched.
+The operator may handle operation IDs internally after an explicit human decision
+that the older handoff is finished; a new finish never implies that decision.
 It treats text as bytes, without executing or rewriting it. Queueing does not
 open an editor. Press the existing shortcut to open it when ready.
 

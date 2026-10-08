@@ -25,6 +25,10 @@ class ClipboardError(Exception):
     pass
 
 
+class PendingDictationExists(ClipboardError):
+    """Expected single-pending queue collision, never replacement authority."""
+
+
 def private_dir(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     status = path.stat()
@@ -139,7 +143,10 @@ def queue_dictation(path: Path) -> str:
         with os.fdopen(fd, "wb") as stream:
             stream.write(data); stream.flush(); os.fsync(stream.fileno())
         # Atomic, no-replace publication: another pending draft always wins.
-        os.link(temporary, folder / "dictation.json", follow_symlinks=False)
+        try:
+            os.link(temporary, folder / "dictation.json", follow_symlinks=False)
+        except FileExistsError:
+            raise PendingDictationExists() from None
         sync_dir(folder)
     finally:
         temporary.unlink(missing_ok=True)
@@ -232,6 +239,9 @@ def main() -> int:
             print(queue_dictation(args.queue_dictation))
             return 0
         return run(args.accept_dictation)
+    except PendingDictationExists:
+        notify("Pending dictation already exists; completed draft and existing work preserved.")
+        return 1
     except (ClipboardError, OSError, UnicodeError, ValueError) as exc:
         notify("Draft operation refused; existing work preserved.")
         return 1
