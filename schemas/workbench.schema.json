@@ -58,6 +58,9 @@
               "opencode"
             ]
           },
+          "codex_mode": {
+            "enum": ["conversation", "agents"]
+          },
           "codex_instructions_file": {
             "type": "string",
             "minLength": 1

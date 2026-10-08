@@ -64,8 +64,11 @@ def load(path):
             raise ValueError('Enabled context requires cwd')
         if c['risk'] == 'production' and c['enabled'] and c['provider'] != 'codex':
             raise ValueError('Enabled production contexts require the Codex adapter')
-        if c.get('codex_instructions_file') and c['provider'] != 'codex':
-            raise ValueError('Codex instructions file requires the Codex provider')
+        if c.get('codex_mode') == 'agents' and (c['provider'] != 'codex' or
+                c['resume_policy'] != 'never' or c['risk'] != 'local' or c['additional_cwds']):
+            raise ValueError('Codex Agents requires a local Codex context with never resume and no additional directories')
+        if c.get('codex_instructions_file') and (c['provider'] != 'codex' or c.get('codex_mode') == 'agents'):
+            raise ValueError('Codex instructions file requires a bindable Codex conversation context')
     return data
 
 def cwd(c):
@@ -596,6 +599,8 @@ def provider_sessions(c):
 
 
 def bind_session(c, identity):
+    if c.get('codex_mode') == 'agents':
+        raise ValueError('Codex Agents is a command center, not a bindable conversation')
     live(c)  # Catalog validation alone cannot establish tmux safety.
     source = str(cwd(c))
     if c['provider'] in {'codex', 'opencode'}:
@@ -707,6 +712,8 @@ def provider_argv(c, choice):
     if c['resume_policy'] == 'never' and choice != 'new':
         raise ValueError('This context does not permit conversation resume')
     if c['provider'] == 'codex':
+        if c.get('codex_mode') == 'agents':
+            return [exe, 'agents', '-C', str(cwd(c))]
         base = [exe, '-c', 'check_for_update_on_startup=false', '-C', str(cwd(c)), '-s', 'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write', '-a', 'on-request']
         instructions = codex_instructions(c)
         if instructions is not None:
@@ -751,6 +758,15 @@ def provider_argv(c, choice):
         return [exe, 'run', 'qwen3:8b']
     raise ValueError('Unsupported provider operation')
 
+def start_codex_agents(c):
+    """Ensure the shared daemon exists without restarting any running work."""
+    result = run([PROVIDERS['codex'], 'app-server', 'daemon', 'start'],
+                 cwd=cwd(c), timeout=30)
+    if result.returncode:
+        raise ValueError(c['id']+': Codex daemon start failed; command center was not opened')
+    return run(provider_argv(c, 'new'), cwd=cwd(c)).returncode
+
+
 def menu(c):
     # Drop inherited shell credentials before displaying the menu or spawning any child.
     sanitized = clean_env()
@@ -764,6 +780,10 @@ def menu(c):
     if actual != cwd(c):
         raise ValueError(c['id']+': refusing provider launch from unexpected pane directory '+str(actual))
     set_title(c)
+    if c.get('codex_mode') == 'agents':
+        with lock('provider-'+c['id'], blocking=False):
+            retry_start(c, lambda: start_codex_agents(c))
+        return
     if c['provider'] in {'codex', 'opencode'}:
         retry_start(c, lambda: start_codex(c))
         return
