@@ -105,3 +105,14 @@ content. Configure its parent directory before installing the service.
 
 Official [Todoist task description limits](https://www.todoist.com/help/todoist/features/add-a-task-description-in-todoist-rOryWIHn)
 and [API documentation](https://developer.todoist.com/api/v1/).
+
+## Known activation blocker
+
+A live check found that current `files.todoist.com/user_upload/` attachments
+redirect to an authenticated Todoist page when requested without credentials.
+The downloader deliberately rejects redirects and never sends its token to that
+host. A successful scheduled no-op over existing receipts does not verify future
+attachment conversion. Keep the timer paused until a supported retrieval method
+is implemented, any required exact credential-host use is explicitly approved,
+and live source retrieval and conversion pass. Do not bypass a rejected
+credential transmission by reusing browser cookies or another credential.
