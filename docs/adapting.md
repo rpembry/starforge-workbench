@@ -37,24 +37,31 @@ idempotent daemon-start command.
 
 For a Codex conversation that starts in a directory outside its role-specific
 instructions, set `codex_instructions_file` in that context to an absolute
-path to a private UTF-8 file. Workbench reads it on each new launch and resume
-and passes its content as Codex `developer_instructions`. Missing, symlinked,
+path to a private UTF-8 file. Workbench reads it on each new local launch and
+resume and passes its content as Codex `developer_instructions`. A new
+daemon-backed thread receives the content through app-server when created.
+Missing, symlinked,
 nonregular, nonprivate, or oversized files prevent the provider from starting.
 Changing the file does not change an existing conversation binding; the next
-launch or resume receives the updated text. A currently running conversation
-does not reload it. Keep secrets out of this file: the text is passed as a
-process argument and may be visible to other local processes. Codex still
+local launch or resume receives the updated text; an existing daemon-backed
+thread keeps the instructions it received when created. A currently running
+conversation does not reload it. Keep secrets out of this file: local-mode
+text is passed as a process argument and may be visible to other processes. Codex still
 discovers ordinary `AGENTS.md` files from the working directory as usual.
 
 For a conversation that must share the local Codex app-server daemon with the
-Agents command center, opt in with `codex_remote_daemon: true`. Workbench
-starts the daemon if needed, then opens or resumes the exact Codex thread
-through `--remote unix://`. The saved thread binding is unchanged; an existing
-local TUI must exit before the next launcher resume takes the new route.
-Other contexts continue to use their current transport. The daemon and Codex
-CLI must support the local Unix-socket remote mode. A remote conversation's
-turns may be visible to other authorized clients of that daemon, so use this
-only when shared control is intended.
+Agents command center, opt in with `codex_remote_daemon: true`,
+`resume_policy: explicit-session`, and no additional directories. Workbench
+starts the daemon if needed, creates a named thread through app-server with
+the private `codex_instructions_file` content, saves its exact binding, then
+opens it through `--remote unix://`. On restart it resumes that exact thread.
+Existing local bindings are not silently converted: a deliberate migration
+must preserve the old thread and select a new daemon-backed binding. If thread
+creation has an uncertain outcome, Workbench stops rather than creating a
+possible duplicate. Other contexts retain their current transport. The Codex
+CLI must support local Unix-socket remote mode. A remote conversation's turns
+are visible to other authorized clients of that daemon, so use this only when
+shared control is intended.
 
 ## Mouse scrolling and terminal preferences
 

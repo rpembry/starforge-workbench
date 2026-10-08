@@ -141,16 +141,25 @@ class LauncherTests(unittest.TestCase):
     def test_daemon_backed_codex_conversation_is_opt_in_and_preserves_binding(self):
         original = cli.fingerprint(self.c)
         self.c['codex_remote_daemon'] = True
+        self.c['resume_policy'] = 'explicit-session'
         self.assertEqual(cli.fingerprint(self.c), original)
-        for choice in ('new', 'picker'):
-            args = cli.provider_argv(self.c, choice)
-            self.assertEqual(args[args.index('--remote')+1], 'unix://')
+        with self.assertRaisesRegex(ValueError, 'through Workbench'):
+            cli.provider_argv(self.c, 'new')
+        with patch.object(cli, 'saved_session', return_value={'id': 'synthetic'}):
+            args = cli.provider_argv(self.c, 'resume')
+        self.assertEqual(args[args.index('--remote')+1], 'unix://')
+        self.assertEqual(args[-2:], ['resume', 'synthetic'])
         with patch.object(cli, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
             cli.ensure_codex_daemon(self.c)
             self.assertEqual(run.call_args.args[0], [cli.PROVIDERS['codex'], 'app-server', 'daemon', 'start'])
             self.assertEqual(run.call_args.kwargs['timeout'], 30)
         self.data['contexts'][0]['codex_remote_daemon'] = True
+        self.data['contexts'][0]['resume_policy'] = 'explicit-session'
         self.load()
+        self.data['contexts'][0]['resume_policy'] = 'picker'
+        with self.assertRaisesRegex(ValueError, 'exact-session resume'):
+            self.load()
+        self.data['contexts'][0]['resume_policy'] = 'explicit-session'
         self.data['contexts'][0]['provider'] = 'claude'
         with self.assertRaisesRegex(ValueError, 'requires a Codex conversation context'):
             self.load()
