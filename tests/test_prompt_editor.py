@@ -108,3 +108,13 @@ def test_concurrent_pending_change_refuses_ack(isolated,tmp_path,monkeypatch):
     assert editor.run()==0
     with pytest.raises(editor.ClipboardError):editor.run(accept=op)
     assert not (editor.pending_dir()/'handoff.json').exists()
+
+
+def test_same_operation_changed_text_cannot_use_prior_receipt_after_restart(isolated,tmp_path,monkeypatch):
+    op=editor.queue_dictation(source(tmp_path));pending=editor.pending_dir()/'dictation.json'
+    monkeypatch.setattr(editor,'open_editor',lambda *_:0)
+    assert editor.run()==0
+    changed=editor.pending_record(pending);changed['text']='SYNTHETIC changed after handoff'
+    pending.write_text(json.dumps(changed))
+    with pytest.raises(editor.ClipboardError):editor.run(accept=op)
+    assert editor.pending_record(pending)==changed

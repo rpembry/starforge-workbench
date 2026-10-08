@@ -34,7 +34,7 @@ edit-clipboard --accept-dictation OPERATION_ID
 ```
 
 This requires the unchanged pending operation and a matching successful editor
-receipt, under the same editor lock. Stale/repeated acknowledgements refuse. It
+receipt bound to the exact UTF-8 payload hash, under the same editor lock. Stale/repeated acknowledgements refuse. It
 clears only pending state; saved editor drafts remain. No acknowledgement is
 inferred from model output, transcript content or window closing.
 

@@ -2,6 +2,7 @@
 """Open pending dictation, or an empty draft, in the existing isolated editor."""
 
 import argparse
+import hashlib
 import stat
 import fcntl
 import json
@@ -177,12 +178,13 @@ def run(accept=None) -> int:
         record = pending_record(pending) if pending.exists() or pending.is_symlink() else None
         original = record["text"].encode() if record else b""
         operation = record["id"] if record else None
+        digest = hashlib.sha256(original).hexdigest()
         receipt = folder / "handoff.json"
         if accept is not None:
             if not pending.exists() or accept != operation:
                 raise ClipboardError("Pending dictation changed; nothing accepted")
             proof = json.loads(owned_text(receipt))
-            if proof != {"id": operation, "editor_closed_successfully": True}:
+            if proof != {"id": operation, "sha256": digest, "editor_closed_successfully": True}:
                 raise ClipboardError("No completed editor handoff; pending preserved")
             # Explicit human acknowledgement, never inferred from editor exit.
             pending.unlink(); sync_dir(folder)
@@ -206,7 +208,7 @@ def run(accept=None) -> int:
                 temp = folder / (".receipt-" + uuid.uuid4().hex)
                 fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
                 with os.fdopen(fd, "w") as stream:
-                    json.dump({"id": operation, "editor_closed_successfully": True}, stream)
+                    json.dump({"id": operation, "sha256": digest, "editor_closed_successfully": True}, stream)
                     stream.flush(); os.fsync(stream.fileno())
                 os.replace(temp, receipt); sync_dir(folder)
             notify("Draft retained locally; copy manually. Pending dictation remains until explicit acknowledgement.")
