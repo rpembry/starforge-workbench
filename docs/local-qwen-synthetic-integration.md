@@ -79,3 +79,42 @@ production human authentication, real VM transport and confidential-data integra
 remain absent. Trusted owner code and same-user attacks outside namespaces are
 outside this boundary. Metadata and status/timing covert channels remain review
 concerns. No production-readiness or whole-host DLP claim is made.
+# Stopped synthetic guest numeric composition
+
+`synthetic_guest_capacity.consume_capacity` is an owner-local consumer for the
+fixed one-CPU, 768 MiB synthetic-console registration. It copies only the exact
+successful capacity envelope into a frozen numeric value. Extra logs, model
+instructions, tools, paths, and targets fail closed. The required stopped/reaped
+booleans are trusted VM-owner evidence, not independently authenticated lifecycle
+or freshness attestations. No cloud entry point accepts this envelope.
+
+`GuestCapacityQwenAdapter` inherits the installed-model sandbox, durable inference
+slot, and resource limits. Its fixed prompt compares two synthetic planning CPU
+slots with the guest's one CPU under an explicit one-logical-CPU-per-slot
+assumption. CPU count does not establish production worker capacity; memory
+numbers are observation metadata. The detailed result and numeric provenance
+remain local. No model result grants release approval.
+
+The serial composition test uses mocked inference and a simulated authenticated
+verifier with a fake local inbox. It proves no preapproval disclosure, rejects a
+model-supplied approval, and sends only immutable reviewed bytes. It does not
+record actual human authorization. A real guest trial is held pending independent
+acceptance of the console transport fixes; that guest must be stopped and reaped
+before the one isolated model invocation. No production readiness is claimed.
+
+The authorized live synthetic trial used an external operator harness, rather
+than a cloud entry point. Its first console report inadvertently included
+synthetic numeric provenance. The guest and model were cleaned up, the detailed
+report stayed local, and no real endpoint received content; this original run
+does not establish strict numeric nondisclosure.
+
+The corrected console boundary is now tracked as
+`starforge_workbench.diagnostic_trial_reporting`. Its `emit_status` function and
+operator-only CLI emit exactly `protocol` and an allowlisted `status`, including
+on malformed evidence. The CLI accepts only an owner-local regular evidence
+file with mode 0600 and a 64 KiB limit, refuses symlinks/devices, and emits no
+stderr, private paths, digests, reports, numeric provenance, or exception text.
+The external harness calls this tracked boundary. Captured synthetic evidence
+was replayed through it without another guest or model invocation, with exact
+stdout and empty stderr assertions. Independent replay review is required;
+this bounded regression evidence is separate from production acceptance.
