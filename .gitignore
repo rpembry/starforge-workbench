@@ -23,6 +23,7 @@
 !/bin/ai-workbench
 !/bin/aiw
 !/bin/chrome
+!/bin/edit-clipboard
 !/bin/keep-collector.mjs
 !/config/
 !/config/workbench.example.yaml
