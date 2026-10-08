@@ -276,6 +276,28 @@ def test_token_only_goes_to_api_and_no_redirects():
             remote.html('https://example.com/file.html')
 
 
+def test_attachment_login_redirect_is_held_without_auth_or_write():
+    calls = []
+    def transport(request):
+        calls.append(request)
+        if request.url.host == 'files.todoist.com':
+            return httpx.Response(302, headers={'Location':'https://app.todoist.com/user_upload/example/file.html'})
+        if request.url.path.endswith('/comments'):
+            return httpx.Response(200, json={'results':[{
+                'id':'comment1', 'item_id':'task1', 'file_attachment':comment()['attachment'],
+                'is_deleted':False}], 'next_cursor':None})
+        if request.url.path.endswith('/tasks'):
+            return httpx.Response(200, json={'results':[task()], 'next_cursor':None})
+        raise AssertionError('unexpected request')
+    with httpx.Client(transport=httpx.MockTransport(transport), follow_redirects=False) as client:
+        counts, state, saves = run(Remote('fake-token', client))
+    assert counts['failed'] == 1 and counts['updated'] == 0
+    assert state['receipts'] == {}
+    assert all(r.method == 'GET' for r in calls)
+    assert [r.url.host for r in calls] == ['api.todoist.com','api.todoist.com','files.todoist.com']
+    assert 'Authorization' not in calls[-1].headers
+
+
 def test_transport_retries_reads_but_never_writes(monkeypatch):
     monkeypatch.setattr('workbench.newsletter_job.time.sleep', lambda _: None)
     attempts = []

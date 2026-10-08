@@ -111,8 +111,22 @@ and [API documentation](https://developer.todoist.com/api/v1/).
 A live check found that current `files.todoist.com/user_upload/` attachments
 redirect to an authenticated Todoist page when requested without credentials.
 The downloader deliberately rejects redirects and never sends its token to that
-host. A successful scheduled no-op over existing receipts does not verify future
+host. The official SDK's [viewAttachment documentation](https://doist.github.io/todoist-sdk-typescript/api/classes/TodoistApi/#viewattachment)
+describes Bearer authentication to `files.todoist.com` and credential-free CDN
+downloads. The [SDK implementation at c7412eb](https://github.com/Doist/todoist-sdk-typescript/blob/c7412eb6c44859fe63ee7da7d27254cc30981217/src/clients/upload-client.ts)
+supports pre-signed URLs at `todoist.b-cdn.net` and
+`d1ysz50cxb9zwl.cloudfront.net`, but current tested comment metadata returned a
+file locator on `files.todoist.com`, not such a CDN URL.
+
+The current [OpenAPI schema](https://developer.todoist.com/openapi.json) has only
+POST and DELETE at `/api/v1/uploads`; no attachment-download or signed-URL lookup
+is specified. Although the migration table mentions GET at that path, a live
+read returned 405. The upload response's `file_url` is a file locator, not evidence
+of a separate credential-free download URL. Do not use backup downloads or broad
+account exports to retrieve project attachments.
+
+A successful scheduled no-op over existing receipts does not verify future
 attachment conversion. Keep the timer paused until a supported retrieval method
-is implemented, any required exact credential-host use is explicitly approved,
-and live source retrieval and conversion pass. Do not bypass a rejected
-credential transmission by reusing browser cookies or another credential.
+within the allowed credential-origin boundary and live conversion are verified.
+User approval alone does not override a rejected credential transmission. Do not
+bypass it by running the SDK, reusing browser cookies, or another credential.
