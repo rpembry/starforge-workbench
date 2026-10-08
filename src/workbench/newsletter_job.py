@@ -147,7 +147,11 @@ class Remote:
         payload = self.request('GET', 'comments', params={'task_id': task_id, 'limit': 100})
         if not isinstance(payload, dict) or not isinstance(payload.get('results'), list) or payload.get('next_cursor'):
             raise JobError('comments_incomplete')
-        return payload['results']
+        # API v1 uses item_id/file_attachment; connector snapshots use
+        # task_id/attachment. Preserve the server's actual task binding.
+        return [{**comment, 'task_id': comment.get('task_id', comment.get('item_id')),
+                 'attachment': comment.get('attachment', comment.get('file_attachment'))}
+                for comment in payload['results'] if not comment.get('is_deleted', False)]
 
     def html(self, url: str):
         parsed = urlsplit(url)

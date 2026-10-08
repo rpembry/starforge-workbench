@@ -29,6 +29,36 @@ def comment(i='task1'):
     return {'id': 'comment1', 'task_id': i, 'attachment': {'file_name': 'Newsletter title', 'file_type': 'text/html', 'file_url': 'https://files.todoist.com/user_upload/example/file.html'}}
 
 
+@pytest.mark.parametrize('binding,deleted,updated', [('task1', False, 1), ('other', False, 0), ('task1', True, 0)])
+def test_http_api_v1_comment_fields(binding, deleted, updated):
+    current = task()
+    current.pop('is_completed')
+    current['checked'] = False
+    posts = []
+    def handler(request):
+        if request.url.host == 'files.todoist.com':
+            return httpx.Response(200, text=HTML)
+        if request.url.path.endswith('/comments'):
+            return httpx.Response(200, json={'results': [{
+                'id':'comment1', 'item_id':binding, 'file_attachment':comment()['attachment'],
+                'is_deleted':deleted}], 'next_cursor':None})
+        if request.url.path.endswith('/tasks'):
+            return httpx.Response(200, json={'results':[current], 'next_cursor':None})
+        if request.url.path.endswith('/tasks/task1'):
+            if request.method == 'POST':
+                posts.append(json.loads(request.content))
+                current['description'] = posts[-1]['description']
+            return httpx.Response(200, json=current)
+        raise AssertionError('unexpected request')
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        counts, state, saves = run(Remote('fake-token', client))
+    assert counts['updated'] == updated
+    assert len(posts) == updated
+    if updated:
+        assert 'Full body with literal' in current['description']
+        assert state['receipts']['task1']['status'] == 'verified'
+
+
 class FakeRemote:
     def __init__(self, tasks=None):
         self.items = tasks or [task()]
