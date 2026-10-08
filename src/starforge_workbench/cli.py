@@ -784,9 +784,11 @@ def provider_argv(c, choice):
     if c['provider'] == 'codex':
         if c.get('codex_mode') == 'agents':
             return [exe, 'agents', '-C', str(cwd(c))]
-        base = [exe, '-c', 'check_for_update_on_startup=false', '-C', str(cwd(c)), '-s', 'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write', '-a', 'on-request']
+        base = [exe, '-c', 'check_for_update_on_startup=false', '-C', str(cwd(c))]
         if c.get('codex_remote_daemon'):
             base += ['--remote', 'unix://']
+        else:
+            base += ['-s', 'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write', '-a', 'on-request']
         if c.get('codex_remote_daemon'):
             if choice == 'new':
                 raise ValueError('Create daemon-backed Codex threads through Workbench before opening the TUI')
