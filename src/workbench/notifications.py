@@ -22,6 +22,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .client import client
+from .upgrade_notes import UpgradeSettings
 
 ENDPOINT = 'https://api.pushover.net/1/messages.json'
 CATEGORIES = {'approval_needed', 'collector_health', 'agent_without_active_run',
@@ -79,6 +80,7 @@ class Settings(BaseModel):
     min_interval_seconds: int = Field(default=300, ge=5, le=86400)
     max_attempts: int = Field(default=3, ge=1, le=5)
     quiet_hours: QuietHours | None = None
+    upgrade_notes: UpgradeSettings | None = None
 
     @field_validator('dashboard_url')
     @classmethod
@@ -379,10 +381,7 @@ def read_state(folder, config):
 
 @contextmanager
 def locked_state(folder):
-    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
-    info = folder.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
-        raise NotificationError('unsafe_notification_state_directory')
+    private_state_directory(folder)
     fd = os.open(folder/'worker.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         info = os.fstat(fd)
@@ -397,14 +396,21 @@ def locked_state(folder):
         os.close(fd)
 
 
-def save_state(folder, state):
+def private_state_directory(folder):
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = folder.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise NotificationError('unsafe_notification_state_directory')
+
+
+def save_state(folder, state, filename='delivery.json'):
     fd, name = tempfile.mkstemp(prefix='.delivery-', dir=folder)
     try:
         with os.fdopen(fd, 'w') as stream:
             stream.write(state.model_dump_json())
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(name, folder/'delivery.json')
+        os.replace(name, folder/filename)
         directory = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory)
@@ -587,7 +593,9 @@ def fetch_snapshot(config):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['once', 'watch', 'preview', 'test', 'status', 'resolve'])
+    parser.add_argument('command', choices=['once', 'watch', 'preview', 'test', 'status', 'resolve',
+                                          'upgrade-record', 'upgrade-once', 'upgrade-preview',
+                                          'upgrade-status', 'upgrade-reconcile', 'upgrade-retry'])
     parser.add_argument('--config', type=Path, default=Path.home()/'.config/starforge-workbench/notifications.json')
     parser.add_argument('--snapshot', type=Path, help='Synthetic JSON snapshot for preview only')
     parser.add_argument('--send', action='store_true', help='Explicitly send one test notification (test command only)')
@@ -595,7 +603,22 @@ def main(argv=None):
     parser.add_argument('--attempt-id')
     parser.add_argument('--outcome', choices=['delivered', 'retry'])
     parser.add_argument('--acknowledge-possible-duplicate', action='store_true')
+    parser.add_argument('--app-id', choices=['codex_cli', 'codex_desktop'])
+    parser.add_argument('--before-version')
+    parser.add_argument('--installed-version')
+    parser.add_argument('--event-id')
+    parser.add_argument('--command-id')
+    parser.add_argument('--task-id')
     args = parser.parse_args(argv)
+    producer_flags = (args.app_id, args.before_version, args.installed_version)
+    receipt_flags = (args.event_id, args.command_id, args.task_id)
+    if (args.command == 'upgrade-record' and not all(producer_flags) or
+            args.command != 'upgrade-record' and any(producer_flags)):
+        parser.error('Upgrade recording requires app ID and both verified versions')
+    if (args.command == 'upgrade-reconcile' and not all(receipt_flags) or
+            args.command == 'upgrade-retry' and (not args.event_id or not args.command_id or args.task_id) or
+            args.command not in {'upgrade-reconcile', 'upgrade-retry'} and any(receipt_flags)):
+        parser.error('Upgrade reconciliation requires exact event, command and confirmed task IDs')
     if args.command == 'resolve' and (not args.attempt_id or not args.outcome):
         parser.error('Resolution requires the exact attempt ID and outcome')
     if args.command != 'resolve' and (args.attempt_id or args.outcome or args.acknowledge_possible_duplicate):
@@ -605,6 +628,31 @@ def main(argv=None):
     while True:
         try:
             config = settings(args.config.expanduser())
+            from . import upgrade_notes
+            if args.command.startswith('upgrade-'):
+                if args.command == 'upgrade-record':
+                    result = upgrade_notes.record(config, dict(app_id=args.app_id, before_version=args.before_version,
+                                                              installed_version=args.installed_version))
+                elif args.command == 'upgrade-status':
+                    result = upgrade_notes.status(config)
+                elif args.command == 'upgrade-reconcile':
+                    result = upgrade_notes.reconcile(config, args.event_id, args.command_id, args.task_id)
+                elif args.command == 'upgrade-retry':
+                    result = upgrade_notes.retry_known_failure(config, args.event_id, args.command_id)
+                else:
+                    result = upgrade_notes.poll(config, preview=args.command == 'upgrade-preview')
+                print(json.dumps(result), flush=True)
+                return 2 if result['status'] in {'unknown', 'blocked', 'retry_pending'} else 0
+            upgrade_result = None
+            if args.command in {'once', 'watch'} and config.upgrade_notes and config.upgrade_notes.enabled:
+                try:
+                    upgrade_result = upgrade_notes.poll(config)
+                except (NotificationError, OSError, ValueError):
+                    # Optional-source faults must not suppress ordinary attention.
+                    import sys
+                    exc = sys.exception()
+                    upgrade_result = {'status': 'error', 'error': exc.code if isinstance(exc, NotificationError)
+                                      else 'upgrade_local_error'}
             if args.command == 'status':
                 state = read_state(Path(config.state_dir).expanduser(), config)
                 print(json.dumps(dict(status='unknown' if state.blocked else 'idle', attempt=attempt_view(state),
@@ -625,10 +673,16 @@ def main(argv=None):
                 print(json.dumps({'status': 'test_delivered' if args.send else 'test_preview', 'payload': payload}))
                 return 0
             if not config.enabled and args.command != 'preview':
-                print(json.dumps({'status': 'disabled'}))
-                return 0
+                result = upgrade_result or {'status': 'disabled'}
+                print(json.dumps(result), flush=True)
+                if args.command != 'watch' or upgrade_result is None:
+                    return 2 if result['status'] in {'error', 'unknown', 'blocked', 'retry_pending'} else 0
+                time.sleep(config.poll_seconds)
+                continue
             snapshot = json.loads(args.snapshot.read_text()) if args.snapshot else fetch_snapshot(config)
             result = poll(config, snapshot, preview=args.command == 'preview', retry_pending=args.retry_pending)
+            if upgrade_result is not None:
+                result['upgrade_notes'] = upgrade_result
             print(json.dumps(result), flush=True)
         except (NotificationError, OSError, ValueError):
             # Never log response bodies, config input, keys, task data or HTTP exceptions.
@@ -637,7 +691,9 @@ def main(argv=None):
             result = {'status': 'error', 'error': exc.code if isinstance(exc, NotificationError) else 'notification_local_error'}
             print(json.dumps(result), flush=True)
         if args.command != 'watch':
-            return 2 if result['status'] in {'error', 'blocked', 'retry_pending', 'unknown', 'quarantined'} or result.get('quarantined_pending', 0) else 0
+            return 2 if (result['status'] in {'error', 'blocked', 'retry_pending', 'unknown', 'quarantined'} or
+                         result.get('quarantined_pending', 0) or
+                         result.get('upgrade_notes', {}).get('status') in {'error', 'blocked', 'retry_pending', 'unknown'}) else 0
         time.sleep(config.poll_seconds if 'config' in locals() else 30)
 
 
