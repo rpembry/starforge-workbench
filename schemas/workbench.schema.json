@@ -67,6 +67,9 @@
           "codex_remote_daemon": {
             "type": "boolean"
           },
+          "presentation": {
+            "enum": ["tab", "command-center"]
+          },
           "codex_instructions_file": {
             "type": "string",
             "minLength": 1

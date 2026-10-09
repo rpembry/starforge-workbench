@@ -75,6 +75,8 @@ def load(path):
             raise ValueError('Codex daemon mode requires a Codex conversation context')
         if c.get('codex_remote_daemon') and c['resume_policy'] != 'explicit-session':
             raise ValueError('Codex daemon mode requires exact-session resume')
+        if c.get('presentation', 'tab') == 'command-center' and not c.get('codex_remote_daemon'):
+            raise ValueError('Command Center presentation requires a daemon-backed Codex conversation')
         if c.get('codex_instructions_file') and (c['provider'] != 'codex' or c.get('codex_mode') == 'agents'):
             raise ValueError('Codex instructions file requires a bindable Codex conversation context')
     return data
@@ -326,7 +328,7 @@ def retry_start(c, operation):
 
 
 def fingerprint(c):
-    binding = {key: value for key, value in c.items() if key not in {'role', 'codex_instructions_file', 'codex_remote_daemon'}}
+    binding = {key: value for key, value in c.items() if key not in {'role', 'codex_instructions_file', 'codex_remote_daemon', 'presentation'}}
     return hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
 
 def validate_context(c):
@@ -463,6 +465,19 @@ def reuse_external(c, existing, headless=False):
 def up(c, manifest, headless=False):
     with lock('launch'):
         state = live(c)
+        if c.get('presentation') == 'command-center':
+            validate_context(c)
+            # Never replace a running TUI or its draft merely to change presentation.
+            if state and not state['dead'] and provider_pids(c, state['pane_pid']):
+                print(c['id']+': existing terminal is still running; close it deliberately to finish Command Center-only setup')
+                return
+            with lock('provider-'+c['id'], blocking=False):
+                data = saved_session(c)
+                data = ensure_daemon_binding(c, data)
+                from starforge_workbench.codex_daemon import thread_status
+                thread_status(data['id'])
+            print(c['id']+': available in Command Center; no terminal opened')
+            return
         # A live managed pane is authoritative, even when its terminal window closed.
         if not state or state['dead']:
             existing = external_session(c)
@@ -697,6 +712,26 @@ def remember_created(c, before):
         raise ValueError('More than one new conversation appeared; refusing to guess the binding')
     return False
 
+def ensure_daemon_binding(c, data):
+    """Ensure one exact daemon thread without opening a terminal."""
+    ensure_codex_daemon(c)
+    intent = STATE/'daemon-start'/(c['id']+'.json')
+    if not data:
+        if intent.exists():
+            raise ValueError(c['id']+': prior daemon thread creation is uncertain; inspect and bind an exact ID before retrying')
+        role_text = context_instructions(c)
+        atomic(intent, {'context_id': c['id'], 'cwd': str(cwd(c))})
+        from starforge_workbench.codex_daemon import create_thread
+        identity = create_thread(cwd(c), c['title'], role_text,
+                                 'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write',
+                                 directories(c)[1:])
+        bind_session(c, identity)
+        intent.unlink()
+        return saved_session(c)
+    if intent.exists():
+        intent.unlink()
+    return data
+
 def start_codex(c):
     existing = external_session(c)
     if existing:
@@ -715,22 +750,7 @@ def start_codex(c):
             stack.enter_context(lock('checkout-'+hashlib.sha256(key.encode()).hexdigest(), blocking=False))
         before = provider_sessions(c) if not data and not c.get('codex_remote_daemon') else None
         if c.get('codex_remote_daemon'):
-            ensure_codex_daemon(c)
-            intent = STATE/'daemon-start'/(c['id']+'.json')
-            if not data:
-                if intent.exists():
-                    raise ValueError(c['id']+': prior daemon thread creation is uncertain; inspect and bind an exact ID before retrying')
-                role_text = context_instructions(c)
-                atomic(intent, {'context_id': c['id'], 'cwd': str(cwd(c))})
-                from starforge_workbench.codex_daemon import create_thread
-                identity = create_thread(cwd(c), c['title'], role_text,
-                                         'read-only' if c['risk'] == 'cloud-infrastructure' else 'workspace-write',
-                                         directories(c)[1:])
-                bind_session(c, identity)
-                intent.unlink()
-                data = saved_session(c)
-            elif intent.exists():
-                intent.unlink()
+            data = ensure_daemon_binding(c, data)
         stop = threading.Event()
         errors = []
         def remember():
@@ -953,7 +973,10 @@ def launcher_plan(contexts):
     return [{'id': c['id'], 'title': c['title'], 'cwd': str(cwd(c)) if c['cwd'] else None,
              'additional_cwds': c['additional_cwds'], 'provider': c['provider'],
              'resume_policy': c['resume_policy'], 'enabled': c['enabled'],
-             'action': ('resume saved conversation or create and remember' if c['provider'] == 'codex'
+             'presentation': c.get('presentation', 'tab'),
+             'action': ('ensure daemon thread without opening a terminal'
+                        if c.get('presentation') == 'command-center' else
+                        'resume saved conversation or create and remember' if c['provider'] == 'codex'
                         else ('start interactive qwen3:8b' if c['provider'] == 'ollama'
                               else 'resume saved conversation or open provider directly'))
                         if c['enabled'] else 'disabled'} for c in contexts]
