@@ -33,6 +33,7 @@ test('new window identity is retried once, manual moves stay put, disable cancel
         '\nglobalThis.Placement = FavoritePlacement;';
     const context = {validateConfig,assignmentFor,monitorFor,TextDecoder,console,
         Extension:class {},Meta:{WindowType:{NORMAL:1}},
+        Shell:{WindowTracker:{get_default:()=>({get_window_app:()=>null})}},
         Main:{sessionMode:{currentMode:'user'},screenShield:{locked:false}},
         Gio:{File:{new_for_path:()=>({load_contents:()=>[true,new TextEncoder().encode(JSON.stringify(config))]})},
             DBus:{session:{}},DBusExportedObject:{wrapJSObject:()=>({export(){},unexport(){}})}},

@@ -1,6 +1,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
+import Shell from 'gi://Shell';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {validateConfig, assignmentFor, monitorFor} from './placement-core.js';
@@ -67,8 +68,9 @@ export default class FavoritePlacement extends Extension {
         const [ok, bytes] = file.load_contents(null);
         if (!ok) return;
         const config = validateConfig(JSON.parse(new TextDecoder().decode(bytes)));
+        const app = Shell.WindowTracker.get_default().get_window_app(window);
         const row = assignmentFor(config, {classes: [window.get_wm_class(),
-            window.get_wm_class_instance(), window.get_gtk_application_id()].filter(Boolean),
+            window.get_wm_class_instance(), window.get_gtk_application_id(), app?.get_id()].filter(Boolean),
             title: window.get_title()});
         if (!row || (selectedName !== null && row.name !== selectedName)) return;
         const manager = global.backend.get_monitor_manager();
