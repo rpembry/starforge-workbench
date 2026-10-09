@@ -75,6 +75,17 @@ def test_preview_is_read_only_and_resolves_all_variants(setup):
     assert not restore.state_path.exists() and not restore.lock_path.exists()
 
 
+def test_optional_placement_unavailable_preserves_verified_existing_app(setup):
+    restore, desktop, *_ = setup
+    desktop.states['Editor'] = 'present'
+    desktop.place = lambda favorite: 'unavailable'
+    preview = restore.preview(['Editor'])
+    item = restore.apply(['Editor'], preview['token'])['items'][0]
+    assert item['result'] == 'already_present'
+    assert item['placement'] == 'unavailable'
+    assert desktop.launches == []
+
+
 def test_present_is_preserved_and_delayed_launch_stays_uncertain(setup):
     restore, desktop, _, _, _ = setup
     desktop.states['Editor'] = 'present'

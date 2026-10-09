@@ -35,6 +35,7 @@
 !/tests/*.py
 !/tests/*.sh
 !/tests/*.cjs
+!/tests/favorite_placement.test.mjs
 !/tests/gnome_favorite_presence.test.mjs
 !/tests/gnome_favorite_presence_gjs.js
 !/tests/keep_collector.test.mjs
@@ -51,6 +52,9 @@
 !/docs/images/
 !/docs/images/starforge-dashboard-simulated.png
 !/extensions/
+!/extensions/favorite-placement@rpembry.github.io/
+!/extensions/favorite-placement@rpembry.github.io/*.js
+!/extensions/favorite-placement@rpembry.github.io/metadata.json
 !/extensions/favorite-presence@rpembry.github.io/
 !/extensions/favorite-presence@rpembry.github.io/extension.js
 !/extensions/favorite-presence@rpembry.github.io/metadata.json

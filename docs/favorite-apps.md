@@ -145,3 +145,32 @@ separate X11 session. Record the exact build and desktop-entry identities,
 preview first, then verify launch count, actual window ownership/readiness,
 repeat/concurrent apply, delayed startup, and preservation of an already-open
 window. Do not substitute normal user applications for disposable targets.
+
+## Optional physical monitor placement
+
+The separate `favorite-placement@rpembry.github.io` GNOME 50 extension reads
+`~/.config/starforge-ai-workbench/favorite-placement.json`. It has no default
+assignments. Configure `version: 1`, a `monitors` object with `left`, `middle`,
+and `right` entries containing exact connector and physical serial, and an
+`assignments` array. Each assignment has `monitor`, `classes` (exact window
+class/application IDs), and optionally an exact `title` to distinguish a
+terminal context. Keep personal identities and display inventories outside Git.
+
+The extension places only new normal windows, with bounded retries at 250 ms,
+1 s, 3 s, and 10 s for delayed client identity. It stops after the first
+placement, preserving later manual moves. Missing/replaced monitors and
+ambiguous identities cause no move. It never launches apps, activates
+workspaces, closes windows, or changes window size. Enabling preserves already
+open windows. The Shell-owned D-Bus object
+`/org/starforge/Workbench/FavoritePlacement` exposes `Snapshot` and a deliberate
+`PlaceConfigured` action under `org.starforge.Workbench.FavoritePlacement`;
+it takes a configured favorite name and applies that assignment to already-open
+windows. The launcher requests this optional placement for selected preserved
+or accepted applications; unavailable placement never changes app readiness.
+
+Install its directory in the normal user GNOME extension directory. GNOME may
+not discover a newly installed extension in the current session; activate at
+a normal later session start when necessary, preserving current work. Do not
+restart GNOME or change debugging/security settings merely to load it. Pure
+identity/monitor tests are in `tests/favorite_placement.test.mjs`; these are
+not evidence of live GNOME placement.

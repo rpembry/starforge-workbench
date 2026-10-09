@@ -521,8 +521,11 @@ class FavoriteRestore:
                     result, evidence = 'refused', str(exc)
                 except OSError as exc:
                     result, evidence = 'uncertain', str(exc)
-                items.append({'name': name, 'result': result, 'launch_requested': launch_requested,
-                              'launcher_accepted': launcher_accepted, 'evidence': evidence})
+                item = {'name': name, 'result': result, 'launch_requested': launch_requested,
+                        'launcher_accepted': launcher_accepted, 'evidence': evidence}
+                if (result in {'already_present', 'verified_ready'} or launcher_accepted) and hasattr(self.desktop, 'place'):
+                    item['placement'] = self.desktop.place(favorite)
+                items.append(item)
             return {'selection': names, 'items': items}
         finally:
             os.close(fd)

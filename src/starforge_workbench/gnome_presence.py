@@ -15,6 +15,14 @@ class GnomeDesktop:
         self.runner = runner
         self.proc = Path(proc)
 
+    def place(self, favorite: dict) -> str:
+        try:
+            result = self.runner(['/usr/bin/python3', str(HELPER.with_name('favorite_placement_helper.py')),
+                                  favorite['name']], capture_output=True, text=True, timeout=3, check=True)
+            return json.loads(result.stdout)['placement']
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            return 'unavailable'
+
     def observe(self, favorite: dict, entry: dict) -> tuple[str, str]:
         if os.environ.get('XDG_SESSION_TYPE') != 'wayland':
             return 'unavailable', 'Not a Wayland session'
@@ -28,6 +36,7 @@ class GnomeDesktop:
             if result.get('state') != 'absent':
                 if favorite['kind'] == 'pwa':
                     from .favorite_apps import _pwa_cmdline_identity
+                    incomplete = False
                     for process in self.proc.iterdir():
                         if not process.name.isdigit():
                             continue
@@ -41,7 +50,11 @@ class GnomeDesktop:
                         except FileNotFoundError:
                             continue
                         except OSError:
-                            return 'uncertain', 'Browser process inventory is incomplete'
+                            # A protected process cannot prove absence, but must not
+                            # hide a later exact positive match in the inventory.
+                            incomplete = True
+                    if incomplete:
+                        return 'uncertain', 'Browser process inventory is incomplete'
                 return 'uncertain', 'GNOME cannot verify this app is closed'
             # Shell's window inventory cannot exclude a starting process.
             # A script launcher may exit while its child stays open under a
