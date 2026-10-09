@@ -20,6 +20,9 @@ dependencies = [
 [dependency-groups]
 dev = ["pytest>=8,<10"]
 
+[project.optional-dependencies]
+newsletter = ["beautifulsoup4>=4.12,<5"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -38,6 +41,7 @@ coord-server = "coordinator.server:main"
 coord-supervisor = "coordinator.supervisor_service:main"
 coord-ui = "workbench.coordinator_local:main"
 wb-script-observe = "workbench.script_observation_cli:main"
+wb-newsletter-inline = "workbench.newsletter_job:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

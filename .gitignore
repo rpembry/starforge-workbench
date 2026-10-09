@@ -61,6 +61,7 @@
 !/deploy/*.py
 !/deploy/*.sh
 !/deploy/*.service
+!/deploy/newsletter-inline.timer
 !/deploy/workbench-collector-without-opencode.conf.example
 !/deploy/runtime-downloads.json
 !/deploy/service.env.example
