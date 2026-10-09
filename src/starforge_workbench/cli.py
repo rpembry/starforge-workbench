@@ -468,7 +468,7 @@ def up(c, manifest, headless=False):
         if c.get('presentation') == 'command-center':
             validate_context(c)
             # Never replace a running TUI or its draft merely to change presentation.
-            if state and not state['dead'] and provider_pids(c, state['pane_pid']):
+            if state and not state['dead']:
                 print(c['id']+': existing terminal is still running; close it deliberately to finish Command Center-only setup')
                 return
             with lock('provider-'+c['id'], blocking=False):

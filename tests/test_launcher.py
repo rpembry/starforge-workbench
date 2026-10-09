@@ -215,7 +215,6 @@ class LauncherTests(unittest.TestCase):
                       resume_policy='explicit-session')
         with patch.object(cli, 'STATE', self.path), \
                 patch.object(cli, 'live', return_value={'dead': False, 'pane_pid': 123}), \
-                patch.object(cli, 'provider_pids', return_value=[456]), \
                 patch.object(cli, 'validate_context'), \
                 patch.object(cli, 'saved_session', side_effect=AssertionError('must not rebind')), \
                 patch.object(cli, 'tmux', side_effect=AssertionError('must not stop pane')):
