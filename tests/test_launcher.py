@@ -180,6 +180,67 @@ class LauncherTests(unittest.TestCase):
                 cli.start_codex_agents(self.c)
             self.assertEqual(run.call_count, 1)
 
+    def test_command_center_presentation_requires_daemon_and_preserves_pane_identity(self):
+        original = cli.fingerprint(self.c)
+        self.c['presentation'] = 'command-center'
+        self.assertEqual(cli.fingerprint(self.c), original)
+        self.data['contexts'][0]['presentation'] = 'command-center'
+        with self.assertRaisesRegex(ValueError, 'requires a daemon-backed'):
+            self.load()
+        self.data['contexts'][0]['codex_remote_daemon'] = True
+        self.data['contexts'][0]['resume_policy'] = 'explicit-session'
+        self.load()
+        self.assertEqual(cli.launcher_plan([self.data['contexts'][0]])[0]['presentation'], 'command-center')
+
+    def test_command_center_up_reuses_exact_daemon_binding_without_terminal(self):
+        self.c.update(codex_remote_daemon=True, presentation='command-center',
+                      resume_policy='explicit-session')
+        binding = {'id': '11111111-2222-3333-4444-555555555555', 'transport': 'daemon'}
+        from starforge_workbench import codex_daemon
+        with patch.object(cli, 'STATE', self.path), \
+                patch.object(cli, 'live', return_value=None), \
+                patch.object(cli, 'validate_context'), \
+                patch.object(cli, 'saved_session', return_value=binding), \
+                patch.object(cli, 'ensure_codex_daemon') as daemon, \
+                patch.object(codex_daemon, 'thread_status', return_value='idle') as status, \
+                patch.object(cli, 'tmux', side_effect=AssertionError('no tmux')), \
+                patch.object(cli, 'open_tab', side_effect=AssertionError('no tab')), \
+                patch.object(cli, 'run', side_effect=AssertionError('no provider TUI')):
+            cli.up(self.c, ROOT/'config/workbench.example.yaml')
+        daemon.assert_called_once_with(self.c)
+        status.assert_called_once_with(binding['id'])
+
+    def test_command_center_up_creates_only_one_bound_daemon_thread(self):
+        self.c.update(codex_remote_daemon=True, presentation='command-center',
+                      resume_policy='explicit-session')
+        identity = '11111111-2222-3333-4444-555555555555'
+        from starforge_workbench import codex_daemon
+        with patch.object(cli, 'STATE', self.path), \
+                patch.object(cli, 'live', return_value=None), \
+                patch.object(cli, 'validate_context'), \
+                patch.object(cli, 'saved_session', side_effect=[None, {'id': identity}]), \
+                patch.object(cli, 'ensure_codex_daemon'), \
+                patch.object(cli, 'context_instructions', return_value='Synthetic role'), \
+                patch.object(cli, 'bind_session') as bind, \
+                patch.object(codex_daemon, 'create_thread', return_value=identity) as create, \
+                patch.object(codex_daemon, 'thread_status', return_value='idle'), \
+                patch.object(cli, 'tmux', side_effect=AssertionError('no tmux')), \
+                patch.object(cli, 'open_tab', side_effect=AssertionError('no tab')):
+            cli.up(self.c, ROOT/'config/workbench.example.yaml')
+        create.assert_called_once()
+        bind.assert_called_once_with(self.c, identity)
+        self.assertFalse((self.path/'daemon-start'/(self.c['id']+'.json')).exists())
+
+    def test_command_center_up_preserves_a_live_terminal_and_draft(self):
+        self.c.update(codex_remote_daemon=True, presentation='command-center',
+                      resume_policy='explicit-session')
+        with patch.object(cli, 'STATE', self.path), \
+                patch.object(cli, 'live', return_value={'dead': False, 'pane_pid': 123}), \
+                patch.object(cli, 'validate_context'), \
+                patch.object(cli, 'saved_session', side_effect=AssertionError('must not rebind')), \
+                patch.object(cli, 'tmux', side_effect=AssertionError('must not stop pane')):
+            cli.up(self.c, ROOT/'config/workbench.example.yaml')
+
     def test_daemon_thread_creation_crash_does_not_retry_or_replace_binding(self):
         self.c.update(codex_remote_daemon=True, resume_policy='explicit-session')
         from starforge_workbench import codex_daemon
