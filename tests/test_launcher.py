@@ -210,6 +210,27 @@ class LauncherTests(unittest.TestCase):
         daemon.assert_called_once_with(self.c)
         status.assert_called_once_with(binding['id'])
 
+    def test_command_center_up_creates_only_one_bound_daemon_thread(self):
+        self.c.update(codex_remote_daemon=True, presentation='command-center',
+                      resume_policy='explicit-session')
+        identity = '11111111-2222-3333-4444-555555555555'
+        from starforge_workbench import codex_daemon
+        with patch.object(cli, 'STATE', self.path), \
+                patch.object(cli, 'live', return_value=None), \
+                patch.object(cli, 'validate_context'), \
+                patch.object(cli, 'saved_session', side_effect=[None, {'id': identity}]), \
+                patch.object(cli, 'ensure_codex_daemon'), \
+                patch.object(cli, 'context_instructions', return_value='Synthetic role'), \
+                patch.object(cli, 'bind_session') as bind, \
+                patch.object(codex_daemon, 'create_thread', return_value=identity) as create, \
+                patch.object(codex_daemon, 'thread_status', return_value='idle'), \
+                patch.object(cli, 'tmux', side_effect=AssertionError('no tmux')), \
+                patch.object(cli, 'open_tab', side_effect=AssertionError('no tab')):
+            cli.up(self.c, ROOT/'config/workbench.example.yaml')
+        create.assert_called_once()
+        bind.assert_called_once_with(self.c, identity)
+        self.assertFalse((self.path/'daemon-start'/(self.c['id']+'.json')).exists())
+
     def test_command_center_up_preserves_a_live_terminal_and_draft(self):
         self.c.update(codex_remote_daemon=True, presentation='command-center',
                       resume_policy='explicit-session')
