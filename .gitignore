@@ -95,3 +95,6 @@ config/workbench.yaml
 !/docs/evaluations/docker-workers-54-matched-failed.json
 !/docs/evaluations/docker-workers-54-reviewed.json
 !/docs/evaluations/docker-workers-54-disposition.json
+
+# Public snapshot attribution and maintenance boundary
+!PROVENANCE.md

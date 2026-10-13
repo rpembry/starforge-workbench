@@ -108,7 +108,7 @@ original observations remain preserved.
 ## Owner direction after the workload comparison
 
 On 2026-09-18, the owner explicitly requested merging #80 and continuing Docker
-subsystem development. [The recorded decision](https://github.com/rpembry/starforge-workbench/issues/54#issuecomment-5728395369)
+subsystem development. The recorded decision (historical reference)
 authorizes incremental #51 development despite the limited Python comparison's
 recommendation to defer expansion for that workload. It does not change the
 measurements or establish a runtime/setup benefit that was not demonstrated.

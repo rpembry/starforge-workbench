@@ -1,5 +1,10 @@
 # Starforge Workbench
 
+This public repository maintains the legacy terminal Workbench. The separate
+Desktop product is outside its scope; future Workbench features enter through
+focused review. See [provenance and scope](PROVENANCE.md) before publishing from
+an existing development clone.
+
 For everyday use, open **Everyday guide & startup** from the dashboard navigation (`/guide`). It covers launching sessions, daily conversations, task updates, reports, and health checks.
 
 

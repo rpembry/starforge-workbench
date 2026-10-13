@@ -1,10 +1,10 @@
 # FLOW work-item documents and authority
 
 Status: accepted design, 2026-09-25. Implementation is staged in issues
-[#110](https://github.com/rpembry/starforge-workbench/issues/110),
-[#111](https://github.com/rpembry/starforge-workbench/issues/111),
-[#112](https://github.com/rpembry/starforge-workbench/issues/112), and
-[#119](https://github.com/rpembry/starforge-workbench/issues/119).
+#110 (historical reference),
+#111 (historical reference),
+#112 (historical reference), and
+#119 (historical reference).
 
 ## Decision
 

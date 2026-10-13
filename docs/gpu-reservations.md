@@ -1,6 +1,6 @@
 # Host-local GPU reservations (isolated policy slice)
 
-This source-controlled slice addresses [#193](https://github.com/rpembry/starforge-workbench/issues/193). It provides a pure policy engine in `workbench.gpu_policy`. It does **not** install a service, change an existing job, contact a model server, or control a GPU. An installed scheduler remains responsible for starting the eventual host-local controller. Script observation in #189 and scheduled collection in #190 can report evidence, but neither is the authority to interrupt a process.
+This source-controlled slice addresses #193 (historical reference). It provides a pure policy engine in `workbench.gpu_policy`. It does **not** install a service, change an existing job, contact a model server, or control a GPU. An installed scheduler remains responsible for starting the eventual host-local controller. Script observation in #189 and scheduled collection in #190 can report evidence, but neither is the authority to interrupt a process.
 
 ## Controller adapter contract
 
