@@ -1,0 +1,3 @@
+# Omission selects this same native behavior. No Docker dependency or probe.
+backend: tmux
+repository_strategy: existing

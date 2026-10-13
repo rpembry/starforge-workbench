@@ -1,0 +1,29 @@
+[Unit]
+Description=Personal AI Workbench API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=workbench
+Group=workbench
+WorkingDirectory=/opt/workbench/current
+EnvironmentFile=/etc/workbench/service.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/workbench/current/.venv/bin/uvicorn workbench.main:create_app --factory --host 127.0.0.1 --port 8027 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-access-log
+Restart=on-failure
+RestartSec=5
+StateDirectory=workbench
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/workbench
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

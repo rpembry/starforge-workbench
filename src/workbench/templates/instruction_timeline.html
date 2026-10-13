@@ -1,0 +1,6 @@
+{% set target_id = session.id if session is defined else session_id %}<section id="instruction-timeline" aria-labelledby="timeline-heading" hx-get="/ui/sessions/{{ target_id }}/instructions" hx-trigger="every 5s" hx-swap="outerHTML">
+<h2 id="timeline-heading">Delivery timeline</h2>
+{% for instruction in instructions %}<article class="instruction"><h3><span class="badge">{{ instruction.state_label }}</span></h3><p>{{ instruction.state_explanation }}</p><p class="instruction-text">{{ instruction.text }}</p><dl><dt>Queued</dt><dd>{{ instruction.created_label }}</dd><dt>Expires</dt><dd>{{ instruction.expires_label }}</dd></dl>
+<details><summary>Audit history</summary><ol class="timeline">{% for event in instruction.history %}<li><strong>{{ event.state_label }}</strong> · {{ event.reason_label }}<br><small>{{ event.occurred_label }} · {{ event.actor }}</small></li>{% endfor %}</ol></details></article>
+{% else %}<p>No instructions have been queued for this exact session.</p>{% endfor %}
+</section>

@@ -1,0 +1,87 @@
+import asyncio
+from pathlib import Path
+
+from mcp import Client
+from starforge_workbench.cli import launcher_plan, load
+from workbench.mcp_server import build_server
+
+
+class Response:
+    def __init__(self, value): self.value = value
+    def raise_for_status(self): return None
+    def json(self): return self.value
+
+
+class API:
+    def __init__(self): self.calls = []
+    def __enter__(self): return self
+    def __exit__(self, *args): return None
+    def request(self, method, path, json=None):
+        self.calls.append((method, path, json))
+        return Response({'method': method, 'path': path, 'payload': json})
+
+
+def invoke(server, name, arguments=None):
+    async def run():
+        async with Client(server) as connected:
+            return await connected.call_tool(name, arguments or {})
+    return asyncio.run(run()).structured_content
+
+
+def test_server_instructions_explain_unsupported_operation_fallback():
+    instructions = build_server().instructions
+    assert 'GitHub feature request' in instructions
+    assert 'GitHub access is unavailable' in instructions
+    assert 'notify the user' in instructions
+    assert 'uncertain write' in instructions
+
+
+def test_capabilities_report_only_running_server_support():
+    result = invoke(build_server(), 'workbench_capabilities')
+    assert result['transport'] == 'stdio'
+    assert result['evidence'] == 'running-server'
+    assert result['flow'] == 'unavailable'
+    assert result['client_skill_discovery'] == 'unknown'
+    assert result['api_health'] == 'not_checked'
+
+
+def test_read_and_append_tools_use_bounded_api_contracts():
+    api = API()
+    server = build_server(api_factory=lambda **kwargs: api, manifest_path=lambda: None, context_loader=lambda path: [{'id': 'daily', 'provider': 'codex', 'enabled': True}])
+    assert invoke(server, 'worklog_query', {'table': 'actions', 'limit': 2})['path'] == '/api/actions?limit=2&offset=0'
+    assert invoke(server, 'worklog_append', {'kind': 'proposal', 'summary': 'Review tests'})['payload']['status'] == 'proposed'
+    assert invoke(server, 'worklog_append', {'kind': 'accomplishment', 'summary': 'Tests passed'})['payload']['kind'] == 'accomplishment'
+    assert invoke(server, 'standup_report')['path'] == '/api/reports/standup'
+
+
+def test_browser_mcp_escapes_workspace_and_entry_path_segments():
+    api = API()
+    server = build_server(api_factory=lambda **kwargs: api)
+    added = invoke(server, 'browser_workspace_add', {
+        'workspace': 'default', 'name': 'Docs / help?', 'url': 'https://example.com/'})
+    removed = invoke(server, 'browser_workspace_remove', {
+        'workspace': 'default', 'name': 'Docs / help?'})
+    assert added['path'] == '/api/browser/workspaces/default/entries'
+    assert removed['path'] == '/api/browser/workspaces/default/entries?name=Docs%20%2F%20help%3F'
+    dots = invoke(server, 'browser_workspace_remove', {'name': '..'})
+    assert dots['path'] == '/api/browser/workspaces/default/entries?name=..'
+
+
+def test_context_tools_default_to_preview_and_reject_live_restore():
+    restored = []
+    server = build_server(api_factory=lambda **kwargs: API(), manifest_path=lambda: None, context_loader=lambda path: [{'id': 'daily', 'provider': 'codex', 'enabled': True}], restore=lambda context, dry_run: restored.append((context, dry_run)))
+    assert invoke(server, 'list_contexts') == {'result': [{'id': 'daily', 'provider': 'codex', 'enabled': True}]}
+    assert invoke(server, 'restore_session', {'context': 'daily'})['status'] == 'previewed'
+    assert restored == [('daily', True)]
+    denied = invoke(server, 'restore_session', {'context': 'daily', 'dry_run': False})
+    assert denied['status'] == 'denied'
+    assert 'WB_MCP_ALLOW_RESTORE' in denied['message']
+
+
+def test_restore_preview_returns_same_plan_as_launcher_dry_run():
+    manifest = Path(__file__).resolve().parents[1] / 'config/workbench.example.yaml'
+    context = load(manifest)['contexts'][0]
+    server = build_server(manifest_path=lambda: manifest)
+    result = invoke(server, 'restore_session', {'context': context['id']})
+    assert result['status'] == 'previewed'
+    assert result['plan'] == launcher_plan([context])

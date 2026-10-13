@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Externally scheduled script observation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "event_id", "script_id", "script_revision", "adapter_id", "run_id", "seq", "occurred_at", "kind", "data"],
+  "properties": {
+    "protocol": {"const": "script-observation.v1"},
+    "event_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "script_id": {"$ref": "#/$defs/id"},
+    "script_revision": {"$ref": "#/$defs/id"},
+    "adapter_id": {"$ref": "#/$defs/id"},
+    "run_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "seq": {"type": "integer", "minimum": 1, "maximum": 2},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "kind": {"enum": ["started", "exited", "launch_failed"]},
+    "data": {"type": "object", "maxProperties": 3}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$"}
+  },
+  "allOf": [
+    {"if": {"properties": {"kind": {"const": "started"}}}, "then": {"properties": {"seq": {"const": 1}, "data": {"type": "object", "required": ["pid_known"], "properties": {"pid_known": {"const": true}}, "additionalProperties": false}}}},
+    {"if": {"properties": {"kind": {"const": "exited"}}}, "then": {"properties": {"seq": {"const": 2}, "data": {"type": "object", "required": ["exit_code", "signal", "duration_ms"], "properties": {"exit_code": {"type": ["integer", "null"], "minimum": 0}, "signal": {"type": ["integer", "null"], "minimum": 1}, "duration_ms": {"type": "integer", "minimum": 0}}, "oneOf": [{"properties": {"exit_code": {"type": "integer"}, "signal": {"type": "null"}}}, {"properties": {"exit_code": {"type": "null"}, "signal": {"type": "integer"}}}], "additionalProperties": false}}}},
+    {"if": {"properties": {"kind": {"const": "launch_failed"}}}, "then": {"properties": {"seq": {"const": 2}, "data": {"type": "object", "required": ["error"], "properties": {"error": {"type": "string", "maxLength": 80}}, "additionalProperties": false}}}}
+  ]
+}

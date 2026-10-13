@@ -1,0 +1,16 @@
+# Example only: adapt paths and explicitly authorize delivery before enabling.
+[Unit]
+Description=Optional Workbench attention notifier
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/path/to/venv/bin/wb-notify watch --config %h/.config/starforge-workbench/notifications.json
+Restart=on-failure
+RestartSec=60
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,5 @@
+[Service]
+# Review the existing unit and preserve all unrelated selected contexts.
+# This example reflects the starforge contexts at issue #81 rollout.
+ExecStart=
+ExecStart=%h/.local/share/starforge-ai-workbench/collector-current/.venv/bin/wb-collect --manifest %h/.config/starforge-ai-workbench/workbench.yaml --credentials-file %h/.config/starforge-ai-workbench/collector.json --context ai-workbench --context aiw --context claude-code --interval 30

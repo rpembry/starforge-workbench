@@ -1,0 +1,140 @@
+{
+  "$defs": {
+    "OrphanPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "grace_seconds": {
+          "default": 10,
+          "maximum": 300,
+          "minimum": 0,
+          "title": "Grace Seconds",
+          "type": "integer"
+        },
+        "max_orphan_seconds": {
+          "default": 0,
+          "maximum": 86400,
+          "minimum": 0,
+          "title": "Max Orphan Seconds",
+          "type": "integer"
+        },
+        "mode": {
+          "default": "strict",
+          "enum": [
+            "strict",
+            "trusted_local"
+          ],
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "title": "OrphanPolicy",
+      "type": "object"
+    },
+    "ResourceRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu_millis": {
+          "maximum": 256000,
+          "minimum": 1,
+          "title": "Cpu Millis",
+          "type": "integer"
+        },
+        "memory_mb": {
+          "maximum": 1048576,
+          "minimum": 16,
+          "title": "Memory Mb",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpu_millis",
+        "memory_mb"
+      ],
+      "title": "ResourceRequest",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "api_version": {
+      "const": "coordinator.job.v1",
+      "default": "coordinator.job.v1",
+      "title": "Api Version",
+      "type": "string"
+    },
+    "consumer_ref": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Consumer Ref"
+    },
+    "deadline_seconds": {
+      "maximum": 86400,
+      "minimum": 1,
+      "title": "Deadline Seconds",
+      "type": "integer"
+    },
+    "orphan_policy": {
+      "$ref": "#/$defs/OrphanPolicy"
+    },
+    "parent_ref": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Ref"
+    },
+    "payload": {
+      "additionalProperties": true,
+      "title": "Payload",
+      "type": "object"
+    },
+    "profile_ref": {
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+      "title": "Profile Ref",
+      "type": "string"
+    },
+    "resources": {
+      "$ref": "#/$defs/ResourceRequest"
+    },
+    "worker_contract": {
+      "const": "worker.v1",
+      "default": "worker.v1",
+      "title": "Worker Contract",
+      "type": "string"
+    },
+    "worker_type": {
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+      "title": "Worker Type",
+      "type": "string"
+    },
+    "workspace_ref": {
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+      "title": "Workspace Ref",
+      "type": "string"
+    }
+  },
+  "required": [
+    "worker_type",
+    "profile_ref",
+    "workspace_ref",
+    "payload",
+    "deadline_seconds",
+    "resources"
+  ],
+  "title": "JobSpec",
+  "type": "object"
+}
